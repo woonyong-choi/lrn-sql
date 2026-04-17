@@ -15,60 +15,62 @@
 - 화이트보드 설명 시:
   가운데에서 바깥으로 확장하며 설명한다
 
-## 한 장 로드맵 (세로 키워드 트리)
+## 한 장 로드맵
 
-```mermaid
-graph TD
-    A["CSAPP 11: Network Programming"]
+11.1 Client-Server Model
 
-    A --> B["11.1 Client-Server Model"]
-    B --> B1["client / server / resource"]
-    B --> B2["transaction: request -> process -> response"]
+* client / server / resource
+* transaction: request → process → response
 
-    B2 --> C["11.2 Networks"]
-    C --> C1["LAN: Ethernet, hub, bridge, frame, MAC"]
-    C --> C2["WAN / router / internet"]
-    C --> C3["protocol: naming + delivery"]
-    C --> C4["encapsulation: data -> packet -> frame"]
+11.2 Networks
 
-    C4 --> D["11.3 Global IP Internet"]
-    D --> D1["IP address: 32-bit, network byte order"]
-    D1 --> D1a["htonl/ntohl, inet_pton/inet_ntop"]
-    D --> D2["DNS: domain name -> IP"]
-    D --> D3["connection: point-to-point, full duplex, reliable"]
-    D3 --> D3a["socket = IP:port"]
-    D3a --> D3b["socket pair = 4-tuple로 연결 식별"]
+* LAN: Ethernet, hub, bridge, frame, MAC
+* WAN / router / internet
+* protocol: naming + delivery
+* encapsulation: data → packet → frame
 
-    D3b --> E["11.4 Sockets Interface"]
-    E --> E1["서버: socket -> bind -> listen -> accept"]
-    E --> E2["클라이언트: socket -> connect"]
-    E --> E3["listenfd vs connfd"]
-    E --> E4["getaddrinfo / getnameinfo"]
-    E --> E5["open_clientfd / open_listenfd"]
-    E5 --> E6["Echo client/server: iterative, robust I/O"]
+11.3 Global IP Internet
 
-    E6 --> F["11.5 Web Servers"]
-    F --> F1["HTTP: text-based request/response"]
-    F --> F2["URL: host:port/path?args"]
-    F --> F3["static content: 파일 반환"]
-    F --> F4["dynamic content: CGI 실행 결과 반환"]
-    F4 --> F4a["CGI: fork + execve + dup2 + QUERY_STRING"]
+* IP address: 32-bit, network byte order
+   * htonl/ntohl, inet_pton/inet_ntop
+* DNS: domain name → IP
+* connection: point-to-point, full duplex, reliable
+   * socket = IP:port
+   * socket pair = 4-tuple로 연결 식별
 
-    F4a --> G["11.6 Tiny Web Server"]
-    G --> G1["main: listen -> accept loop"]
-    G --> G2["doit: request 파싱 -> 분기"]
-    G --> G3["parse_uri: static vs dynamic 판별"]
-    G --> G4["serve_static: mmap -> write"]
-    G --> G5["serve_dynamic: fork -> execve"]
+11.4 Sockets Interface
 
-    G5 --> H["이번 주 확장"]
-    H --> H1["Echo server: 소켓 기초 확인"]
-    H --> H2["Tiny 완성 + 숙제 문제"]
-    H --> H3["Proxy Lab"]
-    H3 --> H3a["sequential -> concurrent -> cache"]
-    H --> H4["SQL API Server"]
-    H4 --> H4a["thread pool + DB engine + 병렬 처리"]
-```
+* 서버: socket → bind → listen → accept
+* 클라이언트: socket → connect
+* listenfd vs connfd
+* getaddrinfo / getnameinfo
+* open_clientfd / open_listenfd
+* Echo client/server: iterative, robust I/O
+
+11.5 Web Servers
+
+* HTTP: text-based request/response
+* URL: host:port/path?args
+* static content: 파일 반환
+* dynamic content: CGI 실행 결과 반환
+   * CGI: fork + execve + dup2 + QUERY_STRING
+
+11.6 Tiny Web Server
+
+* main: listen → accept loop
+* doit: request 파싱 → 분기
+* parse_uri: static vs dynamic 판별
+* serve_static: mmap → write
+* serve_dynamic: fork → execve
+
+이번 주 확장
+
+* Echo server: 소켓 기초 확인
+* Tiny 완성 + 숙제 문제
+* Proxy Lab
+   * sequential → concurrent → cache
+* SQL API Server
+   * thread pool + DB engine + 병렬 처리
 
 ## 화이트보드 설명 순서
 

@@ -18,6 +18,7 @@
 - `04-sql-api-implementation-bridge.md`: CSAPP 11 내용을 SQL API 서버 구현으로 연결하는 가이드
 - `05-ch11-sequential-numeric-walkthrough.md`: 11장을 초보자 관점에서 실제 숫자와 흐름으로 끝까지 설명하는 기준 문서
 - `06-resources.md`: 학습 자료, 참고 링크, 숙제 문제 가이드, 디버깅 도구 정리
+- `07-ch11-code-reference.md`: 11장의 모든 구조체, 함수 원형, 전체 소스 코드(Tiny/Echo/adder), Aside 박스, 연습문제 풀이, 숙제 전문
 
 ## 이번 주 핵심 흐름
 
