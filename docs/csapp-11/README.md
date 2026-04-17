@@ -11,12 +11,13 @@
 
 ## 문서 목록
 
-- `00-roadmap-overview.md`: 전체 개념 지도, 학습 체크, 화이트보드 설명용 0번 페이지
+- `00-roadmap-overview.md`: 세로 키워드 트리 기반 한 장 로드맵, 학습 체크, 화이트보드 설명용
 - `01-week-plan.md`: 2026-04-17 ~ 2026-04-22 실행 계획
-- `02-keyword-tree.md`: 개념 트리와 확장 학습 키워드
+- `02-keyword-tree.md`: 모든 개념을 하나의 종속 관계 트리로 정리한 통합 키워드 트리
 - `03-completion-rubric.md`: 어디까지 이해하면 "학습 완료"인지 판단하는 기준
 - `04-sql-api-implementation-bridge.md`: CSAPP 11 내용을 SQL API 서버 구현으로 연결하는 가이드
 - `05-ch11-sequential-numeric-walkthrough.md`: 11장을 초보자 관점에서 실제 숫자와 흐름으로 끝까지 설명하는 기준 문서
+- `06-resources.md`: 학습 자료, 참고 링크, 숙제 문제 가이드, 디버깅 도구 정리
 
 ## 이번 주 핵심 흐름
 

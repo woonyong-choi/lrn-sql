@@ -17,13 +17,16 @@
 
 ## csapp-11/
 
+CSAPP 11장 네트워크 프로그래밍 학습과 수요 코딩회 구현을 한 흐름으로 연결한 문서 묶음입니다.
+
 - `README.md`: 문서 묶음 소개와 전체 목표
-- `00-roadmap-overview.md`: 한 장 로드맵, 학습 체크, 화이트보드 설명용 페이지
-- `01-week-plan.md`: 2026-04-17 ~ 2026-04-22 실행 계획
-- `02-keyword-tree.md`: 마인드맵형 개념 트리와 확장 질문
-- `03-completion-rubric.md`: 학습 완료 판단 기준
-- `04-sql-api-implementation-bridge.md`: CSAPP 11에서 SQL API 서버 구현으로 연결하는 가이드
+- `00-roadmap-overview.md`: 세로 키워드 트리 기반 한 장 로드맵, 학습 체크, 화이트보드 설명용
+- `01-week-plan.md`: 2026-04-17 ~ 2026-04-22 일별 실행 계획
+- `02-keyword-tree.md`: 모든 개념을 하나의 종속 관계 트리로 정리한 통합 키워드 트리
+- `03-completion-rubric.md`: 학습 완료 판단 기준 (4단계 기준표 + 일별 체크리스트)
+- `04-sql-api-implementation-bridge.md`: CSAPP 11장에서 SQL API 서버 구현으로 연결하는 가이드
 - `05-ch11-sequential-numeric-walkthrough.md`: 초보자도 11장 전체를 실제 숫자와 흐름으로 끝까지 따라가는 기준 문서
+- `06-resources.md`: 학습 자료, 참고 링크, 숙제 문제 가이드, 디버깅 도구 정리
 
 ## question/
 
