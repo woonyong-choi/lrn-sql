@@ -45,3 +45,6 @@ fopen
 
 # FILE I/O
 
+![FILE I/O IMAGE](./IMAGES/IMG_3517.JPG)
+
+
