@@ -1,363 +1,654 @@
-# 00. Top-down Walkthrough — 한 번의 네트워크 통신을 끝까지 따라가는 선형 가이드
+# 00. Top-down DFS Walkthrough — 네트워크 통신 한 번을 바닥까지
 
-> CSAPP 11장 + 본 주 SQL API 서버 과제를 위한 통합 읽기 순서
-> q01~q14 문서와 지난 대화의 심화 설명을 **탑다운 하나의 흐름**으로 묶는다.
-> 위에서 아래로 순서대로 읽으면, 앞 섹션이 다음 섹션의 전제가 된다.
+CSAPP 11장 + 본 주 SQL API 서버 과제를 위한 통합 읽기 순서.
+q01 ~ q18 문서와 지난 학습 내용을 **탑다운 하나의 흐름**에 DFS(depth-first) 로 묶는다.
+위에서 아래로 그대로 읽으면 앞 섹션이 다음 섹션의 전제가 된다.
 
-## 읽는 방법
+## 이 문서의 원칙
 
-1. 본 문서는 "네트워크 통신 한 번" 을 큰 그림에서 시작해, 점점 깊게 파고들어, 마지막에 실제 서버(Tiny, Proxy, 스레드 풀)까지 연결한다.
-2. 각 섹션 끝에 **"→ 상세"** 링크로 대응하는 `q0X.md` 문서를 건다. 본 문서만 읽어도 뼈대가 잡히고, 깊게 보고 싶으면 링크를 타면 된다.
-3. 용어가 나올 때마다 **한 줄 정의**부터 주고, 그 다음에 예시로 넘어간다.
+```
+원칙 1.  탑다운            큰 그림 -> 계층 -> 함수 -> 비트
+원칙 2.  DFS (깊이 우선)    한 주제는 바닥까지 파고든 뒤 다음 형제로
+원칙 3.  한 줄 정의 먼저    용어가 처음 나오면 괄호로 한 줄 정의
+원칙 4.  그 다음 다이어그램  ASCII 박스 / 표 / 코드 블록 순
+원칙 5.  심화는 q-문서로     각 섹션 끝에 "-> 상세" 로 q0X 연결
+```
 
-## 목차
+각 섹션 끝의 `-> 상세: q0X.md` 는 **그 섹션을 바닥까지 더 파고 싶을 때** 읽는다.
+본 문서만 읽어도 뼈대가 잡히고, 깊게 보고 싶으면 링크를 타서 내려갔다가 돌아오면 된다.
 
-- §0. 왜 이런 순서로 읽는가
-- §1. 전체 그림: 클라이언트 ↔ 서버 한 번의 통신
-- §2. 네트워크 하드웨어 계층 — 선로, 이더넷, 공유기, 라우터, LAN/WAN
-- §3. 주소 체계 — IP / MAC / 포트, 그리고 byte order
-- §4. DNS — 도메인을 IP 로 바꾸는 분산 조회
-- §5. 유저와 커널 — ring, syscall, trap, interrupt
-- §6. 파일 추상화 — inode, fd, VFS, sockfs
-- §7. 소켓의 3층 구조 — struct file → struct socket → struct sock
-- §8. 소켓 API 함수들 — socket/bind/listen/accept/connect + getaddrinfo
-- §9. 송신 파이프라인 (top-down) — write() 한 번이 NIC 까지 내려가는 길
-- §10. sk_buff, sk_write_queue, slab — 커널 쪽 버퍼 모델
-- §11. TCP 의 핵심 — seq/ack/flag/window 를 비트 단위로
-- §12. IP 의 핵심 — TTL, protocol, checksum, fragmentation
-- §13. ARP 와 next-hop — MAC 은 매 홉 바뀌고 IP 는 유지된다
-- §14. NIC 와 드라이버 — DMA, MMIO, I/O 브릿지, descriptor ring
-- §15. 수신 파이프라인 (bottom-up) — 프레임이 read() 까지 올라오는 길
-- §16. 네 개의 렌즈 — CPU / 메모리 / 커널 / 핸들
-- §17. 응용 계층 — HTTP, MIME, FTP, Telnet
-- §18. 가장 단순한 HTTP 서버 — Tiny 의 구조
-- §19. 동적 콘텐츠 — CGI, fork, dup2, execve
-- §20. Echo 서버와 EOF — 짧은 read/write, 데이터그램
-- §21. Tiny → Proxy — "서버이자 클라이언트"
-- §22. Iterative → Concurrent — 스레드 풀, epoll, io_uring
-- §23. 마무리 — 이번 주 SQL API 서버로의 연결
+## 목차 — DFS 순서
+
+```
+[A] 큰 그림                        §1
+[B] 네트워크 하드웨어                §2   -> q01
+[C] 주소 체계                      §3   -> q02
+[D] DNS                          §4   -> q03
+[E] 유저/커널 경계                  §5
+[F] 파일 추상화 (바닥까지)           §6   -> q04
+      F-1. VFS 4 객체
+      F-2. ext4 디스크 레이아웃
+      F-3. path_lookupat / dcache
+      F-4. open / read 시스템콜 경로
+      F-5. 페이지 캐시 / filemap_read
+      F-6. BIO / blk-mq / writeback
+      F-7. Pseudo-FS
+      F-8. sockfs — 소켓이 파일이 되는 방법
+[G] 소켓 3층 구조                   §7   -> q05
+[H] 소켓 API                       §8   -> q06
+[I] TCP/UDP 시스템콜                §9   -> q07
+[J] 송신 파이프라인                  §10  -> q08
+      J-1. [1]~[9] 전체
+      J-2. sk_buff / slab / 큐
+      J-3. TCP 헤더 비트 단위
+      J-4. IP 헤더 비트 단위
+      J-5. ARP / next-hop / MAC 교체
+[K] I/O Bridge (바닥까지)           §11  -> q10
+      K-1. IMC + PCH 진화
+      K-2. 세 주소 공간
+      K-3. PCIe TLP
+      K-4. DMA API
+      K-5. MSI-X / NAPI
+[L] 수신 파이프라인                  §12
+[M] 네 개의 렌즈                    §13  -> q09
+[N] 응용 계층 HTTP                   §14  -> q11
+[O] Tiny Web Server                §15  -> q12
+[P] CGI / fork / dup2              §16  -> q13
+[Q] Echo Server / EOF              §17  -> q14
+[R] Proxy                          §18  -> q15
+[S] 스레드 풀 / epoll               §19  -> q16
+[T] 락 기본                        §20  -> q17
+[U] 스레드 동시성 실패 13선          §21  -> q18
+[V] 마무리 — SQL API 서버로 연결     §22
+```
 
 ---
 
-## §0. 왜 이런 순서로 읽는가
+## §0. 왜 이런 순서인가
 
-네트워크 공부가 어려운 이유는 "전선부터 HTTP 까지" 층이 7~8개로 많고, 각 층에 전용 용어가 있고, **그 용어들이 서로를 전제로** 하기 때문이다. 예를 들어 "소켓" 을 이해하려면 "fd" 가 무엇인지 알아야 하고, fd 를 이해하려면 "커널 메모리" 를 알아야 하고, 커널 메모리를 이해하려면 "syscall" 이 무엇인지 알아야 한다.
+네트워크 공부가 어려운 이유는 "전선부터 HTTP 까지" 층이 7~8개로 많고, 각 층에 전용 용어가 있고, **그 용어들이 서로를 전제로** 하기 때문이다. "소켓" 을 이해하려면 "fd" 를, fd 를 이해하려면 "커널 메모리" 를, 커널 메모리를 이해하려면 "syscall" 을 알아야 한다.
 
-이 문서는 그 의존 관계를 풀어서 **한 방향으로 읽게 재배치**한 것이다. 순서를 따라가면 "이 용어는 아직 모르는데..." 가 안 생기도록 설계했다.
+본 문서는 그 의존 관계를 한 방향 DFS 로 풀었다. 순서를 따라가면 "이 용어는 아직 모르는데..." 가 생기지 않도록 설계했다.
+
+```
+ 탑다운                            DFS 깊이
+ ────                              ──────
+ 큰 그림                           얕게
+   |                               |
+ 하드웨어                          |
+   |                               |
+ 주소/DNS                          |
+   |                               |
+ 유저/커널                         |
+   |                               |
+ 파일시스템 ─┐                     |
+            |                     |   <- 파일시스템 안쪽을 바닥까지
+            | VFS/ext4/page cache |      다 파고 나서 위로 올라옴
+            | /blk-mq/writeback   |
+            └──────────────────── v
+ 소켓 3층
+   |
+ (...계속 깊어지다가 I/O 브릿지에서 또 바닥까지...)
+```
 
 ---
 
-## §1. 전체 그림 — 클라이언트 ↔ 서버 한 번의 통신
+## §1. 전체 그림 — 한 줄 요청이 일으키는 4계층
 
-`curl http://www.google.com/` 한 줄이 일어나면 내부에서 벌어지는 일을 **3줄 요약**하면 이렇다.
+`curl http://www.google.com/` 한 줄이 실행되면 내부에서 벌어지는 일의 **3줄 요약**:
 
-1. 내 컴퓨터가 `www.google.com` 을 **DNS** 로 IP(예: `142.251.150.104`)로 바꾼다.
-2. 내 컴퓨터가 그 IP 의 80번 포트로 **TCP 연결**을 맺고 `GET / HTTP/1.1\r\n\r\n` 을 보낸다.
-3. 구글 서버가 HTML 을 TCP 로 돌려준다. 연결 종료.
-
-이 한 문장 뒤에 실제로는 **네 개의 층**이 동시에 돌아간다.
-
-```text
-[ 응용 계층 ]  HTTP, DNS, SSH, FTP ...          ← 사람이 쓰는 프로토콜
-[ 전송 계층 ]  TCP, UDP                           ← 프로세스 ↔ 프로세스
-[ 인터넷 계층 ] IP, ICMP                          ← 호스트 ↔ 호스트
-[ 링크 계층 ]  Ethernet, Wi-Fi, ARP             ← 바로 옆 기계끼리
+```
+1. 내 PC 가 "www.google.com" 을 DNS 로 IP (예: 142.251.150.104) 로 변환
+2. 내 PC 가 그 IP 의 80 번 포트로 TCP 연결을 맺고 "GET / HTTP/1.1\r\n\r\n" 전송
+3. 구글 서버가 HTML 을 TCP 로 돌려줌. 연결 종료
 ```
 
-**핵심 원칙**: 위 계층은 아래 계층을 "모른다". HTTP 는 TCP 덕분에 "바이트 스트림이 순서대로 온다" 고만 믿고 있다. TCP 는 IP 덕분에 "호스트에 도달한다" 고만 믿고 있다. IP 는 Ethernet 덕분에 "옆 기계에 프레임이 간다" 고만 믿고 있다. 이 "덕분에" 의 연쇄가 **캡슐화(encapsulation)**다.
+뒤에서는 **네 개의 계층**이 동시에 돌아간다.
 
-```text
-유저 데이터       "GET /home.html ..."                        (95B 라 치자)
-  ↓ TCP 헤더 20B
-TCP 세그먼트      [TCP|데이터]                                  115B
-  ↓ IP 헤더 20B
-IP 패킷           [IP|TCP|데이터]                               135B
-  ↓ Ethernet 헤더 14B + 트레일러 4B
-Ethernet 프레임   [Eth|IP|TCP|데이터|CRC]                       149~153B
+```
+┌─────────────────────────────────────────────────────────┐
+│ 응용 계층    HTTP, DNS, SSH, FTP ...                     │  사람이 쓰는 프로토콜
+├─────────────────────────────────────────────────────────┤
+│ 전송 계층    TCP, UDP                                    │  프로세스 <-> 프로세스
+├─────────────────────────────────────────────────────────┤
+│ 인터넷 계층  IP, ICMP                                    │  호스트 <-> 호스트
+├─────────────────────────────────────────────────────────┤
+│ 링크 계층    Ethernet, Wi-Fi, ARP                        │  바로 옆 기계끼리
+└─────────────────────────────────────────────────────────┘
 ```
 
-**→ 상세**: [q02-host-network-pipeline.md](./q02-host-network-pipeline.md)
+**핵심 원칙**: 위 계층은 아래 계층을 "모른다". HTTP 는 TCP 덕분에 "바이트 스트림이 순서대로 온다" 고 믿는다. TCP 는 IP 덕분에 "호스트에 도달한다" 고 믿는다. 이 "덕분에" 의 연쇄가 **캡슐화(encapsulation)** 다.
+
+```
+유저 데이터    "GET /home.html ..."                       (95B 라 치자)
+   | + TCP 헤더 20B
+TCP 세그먼트   [ TCP | 데이터 ]                             115B
+   | + IP 헤더 20B
+IP 패킷        [ IP | TCP | 데이터 ]                        135B
+   | + Ethernet 14B + FCS 4B
+Ethernet 프레임 [ Eth | IP | TCP | 데이터 | CRC ]            153B
+```
+
+이제 바닥 계층부터 하나씩 DFS 로 내려간다.
 
 ---
 
 ## §2. 네트워크 하드웨어 계층 — 선로, 이더넷, 공유기, 라우터, LAN/WAN
 
-**이더넷(Ethernet)** 은 "바로 옆에 있는 기계끼리 프레임을 주고받는 방법" 이다. 선로는 구리(UTP), 광섬유, 무선(Wi-Fi) 어느 쪽이든 된다. 프레임 맨 앞엔 **MAC 주소** (48비트, 예: `AA:BB:CC:DD:EE:FF`)가 src/dst 로 들어간다.
+**이더넷(Ethernet)** = "바로 옆에 있는 기계끼리 프레임을 주고받는 방법". 선로는 구리(UTP)/광섬유/무선(Wi-Fi) 어느 쪽이든 된다. 프레임 맨 앞에 **MAC 주소** (48 비트, 예: `AA:BB:CC:DD:EE:FF`) 가 src/dst 로 들어간다.
 
-**허브 / 스위치(브릿지) / 라우터 / 공유기** 차이를 한 줄씩:
+### 2.1 허브 / 스위치 / 라우터 / 공유기
 
-- **허브** : 신호를 그냥 모든 포트에 뿌린다(물리 계층). 요즘은 거의 없음.
-- **스위치(브릿지)** : MAC 주소 테이블을 유지해서 **정확한 포트로만** 프레임을 보낸다(링크 계층).
-- **라우터** : IP 주소를 보고 **다른 네트워크로** 패킷을 전달한다(인터넷 계층).
-- **공유기** : 스위치 + 라우터 + NAT + Wi-Fi AP 를 한 박스에 넣은 가정용 제품.
+| 장비 | 계층 | 판단 기준 | 특징 |
+| --- | --- | --- | --- |
+| 허브 | 물리 | 없음 (모든 포트로 뿌림) | 옛날 물건 |
+| 스위치(브릿지) | 링크 | MAC 테이블 | 정확한 포트로만 |
+| 라우터 | 인터넷 | 라우팅 테이블 (IP) | 다른 네트워크로 |
+| 공유기 | 혼합 | 스위치 + 라우터 + NAT + AP | 가정용 통합 |
 
-**LAN / WAN**:
+### 2.2 LAN 과 WAN
 
-- **LAN(Local Area Network)** : 한 사무실/집 안. 수 ~ 수백 대 기기. 브로드캐스트 가능. MAC 으로 통신.
-- **WAN(Wide Area Network)** : LAN 끼리를 라우터로 연결한 거대한 그물. 인터넷이 대표적. IP 라우팅으로 통신.
+```
+LAN  (Local Area Network)   한 사무실/집    수~수백 대    브로드캐스트 가능   MAC 통신
+WAN  (Wide Area Network)    LAN 들의 연결   인터넷 전체   라우터가 분리      IP 라우팅
+```
 
-이 계층에서 가장 중요한 개념은 **"브로드캐스트 도메인은 LAN 까지"**. 라우터를 넘으면 브로드캐스트가 멈춘다. 그래서 ARP 같은 프로토콜은 같은 LAN 안에서만 돈다(§13).
+### 2.3 브로드캐스트 도메인의 경계
 
-**→ 상세**: [q01-network-hardware.md](./q01-network-hardware.md)
+> **브로드캐스트는 LAN 까지만**. 라우터를 넘으면 멈춘다.
+
+이 한 줄이 왜 중요하냐면 — ARP 처럼 브로드캐스트로 도는 프로토콜은 같은 LAN 안에서만 돈다 (§10.5). 라우터가 경계를 끊어 주지 않으면 인터넷 전체에서 ARP 폭풍이 일어난다.
+
+> **-> 상세**: [q01-network-hardware.md](./q01-network-hardware.md)
+> Ethernet 프레임 67B 바이트맵, MAC 의 I/G/U/L 비트, IP 헤더 RFC 비트맵, TCP 9-bit 플래그, CRC-32 / 체크섬 연산.
 
 ---
 
-## §3. 주소 체계 — IP / MAC / 포트, 그리고 byte order
+## §3. 주소 체계 — MAC / IP / Port, 그리고 byte order
 
 세 종류의 주소가 있다.
 
-```text
-MAC  48비트   AA:BB:CC:DD:EE:FF         NIC 하나당 하나. 평생 고정(거의).
-IP   32비트   192.168.1.10              호스트당. LAN 안에선 공유기가 나눠줌(DHCP).
-포트 16비트   80, 443, 51213            프로세스/소켓당. 같은 호스트에서 구분용.
+```
+┌───────┬─────────┬───────────────────────┬─────────────────────────────┐
+│ 주소  │ 비트    │ 예시                  │ 소속                          │
+├───────┼─────────┼───────────────────────┼─────────────────────────────┤
+│ MAC   │ 48      │ AA:BB:CC:DD:EE:FF     │ NIC 하나당 하나. 평생 고정    │
+│ IP    │ 32      │ 192.168.1.10          │ 호스트당. DHCP 로 분배        │
+│ 포트  │ 16      │ 80, 443, 51213        │ 프로세스/소켓당              │
+└───────┴─────────┴───────────────────────┴─────────────────────────────┘
 ```
 
-**4-tuple** = (src IP, src port, dst IP, dst port) 가 TCP/UDP 연결 하나를 유일하게 식별한다.
+**4-tuple** = `(src IP, src port, dst IP, dst port)` 가 TCP/UDP 연결 하나를 유일하게 식별한다.
 
-**IPv6** 는 128비트. `2001:db8::1` 처럼 8개 16진수 그룹. 당분간 IPv4 와 병행.
+### 3.1 IPv4 와 IPv6
 
-**Byte order** (엔디안) 는 네트워크 공부에서 반드시 걸리는 함정이다.
+```
+IPv4    32 비트   192.168.1.10           4 바이트, 약 43억 개
+IPv6   128 비트   2001:db8::1            8 개의 16진수 그룹, 사실상 무한
+```
 
-- x86, ARM, Apple Silicon 은 **little-endian**. 메모리에 낮은 자리수가 앞.
-- 네트워크 바이트 순서는 **big-endian**. 높은 자리수가 앞.
-- 그래서 포트 번호 `80` (= `0x0050`) 을 그대로 소켓 구조체에 넣으면 전선에서 `0x5000` (=20480) 으로 읽힌다. 꼭 `htons(80)` 써야 한다.
+당분간 둘은 병행된다.
+
+### 3.2 Byte order (엔디안) 함정
+
+```
+ x86/ARM/Apple Silicon      little-endian   (낮은 자리수 앞)
+ 네트워크 바이트 순서        big-endian      (높은 자리수 앞)
+```
+
+포트 `80` (= `0x0050`) 을 그대로 소켓 구조체에 넣으면 전선에서 `0x5000` (= 20480) 으로 읽힌다. **반드시 `htons(80)`** 써야 한다.
 
 ```c
-serv_addr.sin_port = htons(80);   // host → network short
+serv_addr.sin_port = htons(80);            // host -> network short
 serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 ```
 
-`htons/ntohs/htonl/ntohl` 네 개를 외워두면 모든 엔디안 실수가 줄어든다.
+`htons / ntohs / htonl / ntohl` 네 개를 외워두면 모든 엔디안 실수가 줄어든다.
 
-**→ 상세**: [q04-ip-address-byte-order.md](./q04-ip-address-byte-order.md)
+> **-> 상세**: [q02-ip-address-byte-order.md](./q02-ip-address-byte-order.md)
 
 ---
 
 ## §4. DNS — 도메인을 IP 로 바꾸는 분산 조회
 
-사람이 `www.google.com` 을 외우고, 기계는 IP 로 통신한다. 그 사이 다리가 DNS.
+사람은 `www.google.com` 을 외우고, 기계는 IP 로 통신한다. 그 사이 다리가 DNS.
 
-```text
-www.google.com.
-           ^^^  TLD
-     ^^^^^^    2차 도메인
- ^^^          서브도메인
-              (맨 끝의 '.' 는 root)
+### 4.1 도메인 구조
+
+```
+           www.google.com.
+           ^^^            서브도메인
+               ^^^^^^     2차 도메인
+                      ^^^ TLD
+                          . (root, 보통 생략)
 ```
 
-**재귀 조회 흐름** (내 PC 가 처음 `www.google.com` 을 물을 때):
+### 4.2 재귀 조회 흐름
 
-```text
-① 내 PC → OS 리졸버 → ISP/Cloudflare 재귀 리졸버(1.1.1.1)
-② 재귀 리졸버 → root NS:    "com 은 누구?"
-                  ← "a.gtld-servers.net"
-③ 재귀 리졸버 → com NS:      "google.com 는 누구?"
-                  ← "ns1.google.com"
-④ 재귀 리졸버 → google.com NS: "www.google.com 의 A 는?"
-                  ← "142.251.150.104"
-⑤ 내 PC 에 IP 돌아옴. TTL 동안 캐싱.
+```
+┌─ 내 PC ─────┐
+│             │
+│  OS 리졸버  │ ──(①)──> ISP/Cloudflare 재귀 리졸버 (예: 1.1.1.1)
+│             │                   │
+└─────────────┘                   │ ②  "com 누구?"
+                                   ├────────> Root NS
+                                   │ <────── "a.gtld-servers.net"
+                                   │
+                                   │ ③  "google.com 누구?"
+                                   ├────────> com NS
+                                   │ <────── "ns1.google.com"
+                                   │
+                                   │ ④  "www.google.com A?"
+                                   ├────────> google.com NS
+                                   │ <────── "142.251.150.104"
+                                   │
+         <──────────────────────── ⑤  IP 돌아옴, TTL 동안 캐싱
 ```
 
-레코드 종류: `A` (IPv4), `AAAA` (IPv6), `CNAME` (별칭), `MX` (메일), `NS` (권한 서버), `TXT` (SPF/인증).
+### 4.3 주요 레코드
 
-**Cloudflare** 같은 서비스는 보통 세 역할을 겸한다.
+| 타입 | 의미 |
+| --- | --- |
+| A | IPv4 주소 |
+| AAAA | IPv6 주소 |
+| CNAME | 별칭 (다른 도메인으로 위임) |
+| MX | 메일 서버 |
+| NS | 권한 네임서버 |
+| TXT | SPF, 도메인 인증 문자열 |
 
-- Registrar (도메인 등록 대행)
-- 권한 NS (실제 A 레코드 보관)
-- 프록시 CDN (proxy-on 이면 A 레코드가 Cloudflare 엣지 IP 로 나옴 → 공격 완화, 캐시)
+### 4.4 Cloudflare 의 세 역할
 
-**→ 상세**: [q05-dns-domain-cloudflare.md](./q05-dns-domain-cloudflare.md)
+```
+Registrar          도메인 등록 대행
+권한 NS             A 레코드 실제 보관
+프록시 CDN          proxy-on 이면 A = Cloudflare 엣지 IP (공격 완화, 캐시)
+```
+
+> **-> 상세**: [q03-dns-domain-cloudflare.md](./q03-dns-domain-cloudflare.md)
 
 ---
 
 ## §5. 유저와 커널 — ring, syscall, trap, interrupt
 
-앞으로 나올 모든 소켓/파일 얘기는 **"유저가 커널에 일을 시키는"** 구조다. 그 경계를 먼저 이해해야 한다.
+앞으로 나올 모든 "소켓/파일" 얘기는 **유저가 커널에 일을 시키는** 구조다. 그 경계를 먼저 이해해야 한다.
 
-**링 레벨(CPL: Current Privilege Level)**:
+### 5.1 링 레벨 (CPL)
 
-- CPU 는 현재 권한을 `CS` 레지스터 하위 2비트에 저장한다.
-- `CPL=0` = 커널 모드 (모든 명령, 모든 메모리 접근 가능)
-- `CPL=3` = 유저 모드 (제한된 명령만, 커널 메모리 접근 불가)
-- 즉 **권한은 "코드" 가 아니라 "CPU 상태"** 가 쥐고 있다.
+```
+CPU 내부        CS 레지스터 하위 2비트 = CPL (Current Privilege Level)
+CPL = 0         커널 모드 (모든 명령, 모든 메모리)
+CPL = 3         유저 모드 (제한된 명령, 유저 영역 메모리만)
+```
 
-**주소 공간은 어떻게 나뉘나**:
+**권한은 "코드" 가 아니라 "CPU 상태"** 가 쥐고 있다.
 
-- 가상 주소 공간 전체를 "유저 영역" + "커널 영역" 으로 나눈다.
-- x86_64 리눅스에선 `0x0000_0000_0000_0000 ~ 0x0000_7FFF_FFFF_FFFF` 가 유저, `0xFFFF_8000_0000_0000 ~ 0xFFFF_FFFF_FFFF_FFFF` 가 커널.
-- 커널 영역은 **모든 프로세스의 페이지 테이블에 동일하게 매핑**되어 있다. 하지만 CPL=3 일 땐 접근하면 Segfault.
-- 그래서 syscall 이 하는 일은 **주소 공간 바꾸기가 아니라 "권한을 CPL=0 으로 올리기"** 다.
+### 5.2 주소 공간 배치 (x86_64 Linux)
 
-**세 가지 경계 넘기**:
+```
+0xFFFF_FFFF_FFFF_FFFF  ┬────────────────────┐
+                       │                     │
+                       │     커널 영역       │  모든 프로세스가 공유 매핑
+                       │                     │  CPL=3 일 때 접근 금지
+                       │                     │
+0xFFFF_8000_0000_0000  ┼────────────────────┤
+                       │                     │  "비매핑 간격"
+0x0000_7FFF_FFFF_FFFF  ┼────────────────────┤
+                       │                     │
+                       │     유저 영역       │  프로세스마다 다름
+                       │                     │
+0x0000_0000_0000_0000  ┴────────────────────┘
+```
+
+syscall 이 하는 일은 **주소 공간을 바꾸는 게 아니라 "CPL 을 3 -> 0 으로 올리는 것"**.
+
+### 5.3 세 가지 경계 넘기
 
 | 종류 | 누가 발생 | 동기/비동기 | 예 |
-|---|---|---|---|
-| syscall | 유저가 의도적으로 (`syscall` 명령) | 동기 | `read()`, `write()`, `socket()` |
-| trap(exception) | 유저 코드가 실수로 | 동기 | 0 나누기, page fault, invalid opcode |
-| interrupt | 외부 장치가 | 비동기 | NIC "패킷 왔어", 타이머, 키보드 |
+| --- | --- | --- | --- |
+| syscall | 유저가 의도 (`syscall` 명령) | 동기 | `read`, `write`, `socket` |
+| trap (exception) | 유저 코드가 실수 | 동기 | 0 나누기, page fault |
+| interrupt | 외부 장치 | 비동기 | NIC 패킷, 타이머, 키보드 |
 
-syscall 예:
+### 5.4 syscall 실제 동작
 
-```text
+```
 유저 코드:  write(4, buf, 95)
-  ↓ glibc 의 wrapper
-  mov rax, 1         ; syscall 번호(sys_write)
-  mov rdi, 4         ; fd
-  mov rsi, buf       ; 유저 포인터
-  mov rdx, 95        ; 길이
-  syscall            ; CPU: CPL=3 → 0, rip = entry_SYSCALL_64
-  ↓
-커널: entry_SYSCALL_64 → sys_write → ksys_write → ...
-  ↓ 끝나면
-  sysret             ; CPU: CPL=0 → 3, rip = 유저 복귀 주소
+   | glibc wrapper
+   v
+   mov rax, 1           ; syscall 번호 (sys_write)
+   mov rdi, 4           ; fd
+   mov rsi, buf         ; 유저 포인터
+   mov rdx, 95          ; 길이
+   syscall              ; CPU: CPL=3 -> 0, rip = entry_SYSCALL_64
+   |
+   v
+커널:  entry_SYSCALL_64 -> sys_write -> ksys_write -> vfs_write -> ...
+   |
+   v
+   sysret               ; CPU: CPL=0 -> 3, rip = 유저 복귀 주소
 ```
 
-**glibc** 는 이 wrapper 모음(`libc.so.6`)이다. "편하게 C 함수로 쓰자" 를 위한 얇은 래퍼.
+**glibc** 는 이 wrapper 모음(`libc.so.6`) 이다. "편하게 C 함수로 쓰자" 를 위한 얇은 래퍼일 뿐이다.
+
+### 5.5 함수 주소 해석시에도 CPL 이 체크되나?
+
+- MMU 는 **모든 메모리 접근 때마다** CPL 과 페이지의 U/S 비트를 비교한다.
+- CPL=3 인 유저가 커널 영역(U/S=S) 주소로 점프하려고 하면 -> Page Fault (Segfault).
+- SMEP (Supervisor Mode Execution Prevention) / SMAP 은 하드웨어가 **커널 모드가 유저 영역을 실수로 실행/접근하는 것** 도 막는 추가 방어.
 
 ---
 
-## §6. 파일 추상화 — inode, fd, VFS, sockfs
+## §6. 파일 추상화 — 바닥까지 파고들기 [DFS 심화 구역]
 
-리눅스/유닉스의 근본 사상: **"모든 것은 파일이다"**. 그래서 디스크 파일도, 소켓도, 파이프도, 장치도 전부 `read/write/close` 로 다룬다. 그걸 떠받치는 게 **VFS(Virtual File System)**.
+리눅스/유닉스의 근본 사상: **모든 것은 파일이다**. 디스크 파일, 소켓, 파이프, 장치, 심지어 메모리 공유도 전부 `read/write/close` 로 다룬다. 그걸 떠받치는 게 VFS.
 
-**inode — 파일의 주민등록증**:
+이 섹션은 **DFS 깊이 우선**: 위로 다시 올라가기 전에 파일 시스템 안쪽을 바닥까지 판다.
 
-```text
-$ ls -li /home/woonyong/a.txt
-132045 -rw-r--r-- 1 woonyong users 1024 Apr 17 10:00 a.txt
-  ^^^^^ inode 번호
+### 6.1 VFS 의 네 객체
+
+```
+┌─────────────┐   한 FS 인스턴스(마운트)당 1개. 전체 구조 메타데이터
+│ super_block │   ext4 superblock, tmpfs, sockfs 마다 각각
+└─────────────┘
+
+┌─────────────┐   파일 본체. 크기, 주인, 권한, 데이터 블록 위치
+│   inode     │   이름은 없다. 한 파일 = 한 inode
+└─────────────┘
+
+┌─────────────┐   이름-inode 매핑. 하드 링크 N개 = dentry N개
+│   dentry    │   최근 조회된 건 dcache 에 캐시
+└─────────────┘
+
+┌─────────────┐   "열린 상태". 같은 파일을 두 번 열면 file 이 2 개
+│    file     │   read offset, 플래그, f_op (read/write 핸들러)
+└─────────────┘
 ```
 
-inode 안에는 크기, 주인, 권한, 타입, 데이터 블록 위치가 들어있지만 **이름은 없다**. 이름은 디렉토리 파일 안에 `"a.txt" → 132045` 로 들어있다.
+### 6.2 fd 와 fdtable
 
-**fd — 프로세스 안의 정수**:
-
-```text
+```
 task_struct (PID=1234)
-  └── files → files_struct
-               └── fdtable.fd[] 배열
-                    ├── [0] → struct file (stdin)
-                    ├── [1] → struct file (stdout)
-                    ├── [2] → struct file (stderr)
-                    ├── [3] → struct file (./a.txt)
-                    └── [4] → struct file (socket)
+  └── files -> files_struct
+                 └── fdtable.fd[]  (배열)
+                      ├── [0] -> file (stdin)
+                      ├── [1] -> file (stdout)
+                      ├── [2] -> file (stderr)
+                      ├── [3] -> file (./a.txt)
+                      └── [4] -> file (socket)
 ```
 
-- fd 는 이 배열의 **인덱스**일 뿐이다.
-- 프로세스마다 고유. 같은 fd 번호가 다른 프로세스에선 다른 파일.
-- `fork()` 하면 자식이 **현재 열려있는 모든 fd 를 전부** 복사(§19 참조). 몇 개든, 종류가 무엇이든(파일/소켓/파이프/tty) 가리지 않는다. fdtable 은 기본 64 슬롯, 필요시 자동 확장, 상한은 `RLIMIT_NOFILE`.
+- fd 는 이 배열의 **인덱스**일 뿐.
+- 프로세스마다 고유. 같은 fd 번호도 다른 프로세스에선 다른 파일.
+- `fork()` 는 이 fdtable 을 **통째로** 복사 (§16).
+- 기본 64 슬롯, 필요시 자동 확장, 상한은 `RLIMIT_NOFILE`.
 
-**struct file vs struct inode vs struct dentry**:
+### 6.3 ext4 디스크 레이아웃
 
-- `struct inode` : 파일 본체 메타데이터 (한 파일당 한 개)
-- `struct dentry` : 이름-inode 매핑 (하드 링크 N개, inode 1개, dentry N개)
-- `struct file` : **열린 상태** (read offset, 플래그). 같은 파일을 두 번 열면 file 이 2개. inode 는 1개.
+ext4 는 디스크를 **블록 그룹** 으로 나눈다.
 
-**sockfs — 소켓 전용 가상 파일시스템**:
+```
+디스크 선두
+┌────────────────────────────────────────────────────────────────┐
+│ [Block Group 0] [Block Group 1] [Block Group 2] ... [Group N]  │
+└────────────────────────────────────────────────────────────────┘
 
-소켓은 디스크에 없으니 **anonymous inode** 를 sockfs 라는 메모리 가상 FS 가 발급해서 붙여준다. 이렇게 해야 VFS 의 `struct file` 체인에 들어갈 수 있다.
-
-```text
-sockfd=4 ── fdtable[4] ── struct file ── f_op = socket_file_ops
-                             │
-                             └── private_data → struct socket
-                                                   ├── ops = inet_stream_ops
-                                                   └── sk  → struct sock (tcp_sock)
+한 블록 그룹 내부:
+┌────────────────────────────────────────────────────────────────┐
+│ Super │  GDT  │ Block  │ Inode  │ Inode │      Data           │
+│ block │       │ Bitmap │ Bitmap │ Table │      Blocks         │
+└────────────────────────────────────────────────────────────────┘
+   ^       ^        ^        ^         ^          ^
+   1블록   N블록    1블록    1블록     수십블록    나머지 전부
 ```
 
-그래서 `read(4, ...)` 가 `socket_file_ops.read_iter` 를 거쳐 `tcp_recvmsg` 까지 흐를 수 있다.
-
-**파이프도 같은 모양**:
+inode 한 개 (`struct ext4_inode`) 는 **128~256 B**. 데이터 블록 위치는 **extent tree** 로 저장한다 (예전 inode 12 개 직접 + 3 단계 간접 포인터 방식에서 진화).
 
 ```c
-int fd[2]; pipe(fd);
+// fs/ext4/ext4.h  (단순화)
+struct ext4_extent {
+    __le32  ee_block;   // 논리 블록 번호 (파일 안에서)
+    __le16  ee_len;     // 연속 길이
+    __le16  ee_start_hi;
+    __le32  ee_start_lo;// 물리 블록 번호 (디스크 위치)
+};
 ```
 
-커널이 **작은 링 버퍼(기본 64KB)** 를 하나 만들고, fd[0]/fd[1] 두 개의 file 로 그걸 가리킨다. "이름 없는 파일" 이 바로 파이프.
+**Extent** = "이 논리 블록 K 개는 디스크의 물리 블록 M 번부터 연속되어 있다". 큰 파일을 효율적으로 저장한다.
+
+### 6.4 path_lookupat — "/home/u/a.txt" 해석
+
+```c
+// fs/namei.c  (초단순화)
+int path_lookupat(...) {
+    // 1. 시작점 (루트 또는 cwd) 의 dentry 잡기
+    // 2. "/" 단위로 잘라서 한 조각씩
+    for (each component)
+        link_path_walk(...)  // dcache 에서 찾음
+    // 3. 없으면 디스크에서 inode 읽어옴 (ext4_lookup)
+    // 4. 심볼릭 링크면 재귀
+    // 5. 최종 dentry 반환
+}
+```
+
+**dcache** 덕에 반복 조회는 거의 메모리 연산이다.
+
+### 6.5 open / read 시스템콜 경로
+
+```
+ open("/home/u/a.txt", O_RDONLY)
+   | syscall
+   v
+ do_sys_open -> getname (유저 경로 커널로 복사)
+             -> get_unused_fd_flags (fd 번호 예약)
+             -> path_openat        (path_lookupat + alloc_empty_file)
+             -> vfs_open           (f_op = ext4_file_operations 고정)
+             -> fd_install         (fdtable 에 꽂기)
+   |
+   v
+ 유저: fd 반환
+```
+
+```
+ read(fd, buf, 4096)
+   | syscall
+   v
+ ksys_read -> vfs_read -> f_op->read_iter
+                           | ext4 면 ext4_file_read_iter
+                           v
+                           generic_file_read_iter
+                           v
+                           filemap_read           (§6.6 페이지 캐시)
+```
+
+### 6.6 페이지 캐시 (filemap_read)
+
+```
+ [유저 buf 4096B]
+       ^
+       | copy_to_user
+       |
+ ┌──────────────────────────────────────┐
+ │ 페이지 캐시 (DRAM 안, inode 별로 관리) │
+ │ ┌───┬───┬───┬───┬───┬───┐           │
+ │ │ 0 │ 1 │ 2 │ 3 │ 4 │ 5 │ ...       │  (4KB 단위)
+ │ └───┴───┴───┴───┴───┴───┘           │
+ └──────────────────────────────────────┘
+       ^
+       | 페이지가 없으면 "page fault" -> 디스크에서 올림
+       |
+ ┌──────────────────────────────────────┐
+ │ 블록 레이어 (BIO)                    │
+ └──────────────────────────────────────┘
+       |
+       v
+ 디스크
+```
+
+한 번 읽은 페이지는 캐시에 남아 다음 read 를 빠르게 한다.
+
+### 6.7 BIO / blk-mq / writeback
+
+```
+ struct bio   "이 페이지를 이 디스크 섹터와 주고받아줘" 요청 단위
+ struct request  드라이버가 실제로 디스크에 보내는 명령
+
+ [파일 쓰기]
+   filemap_write -> 페이지에 마킹 (dirty)
+   ...
+   writeback 데몬 (bdflush) 이 주기적으로 dirty 페이지 수집
+   -> bio 만들어 blk-mq 제출
+   -> 다중 큐 (CPU 별) 로 드라이버에게 전달
+   -> 디스크 I/O 완료시 인터럽트
+```
+
+**fsync(fd)** 는 이 dirty 페이지가 **디스크에 실제로 기록될 때까지** 블록한다.
+
+### 6.8 Pseudo-filesystem 들
+
+실제 디스크에 없는 가상 FS 들. 전부 **같은 VFS 인터페이스**로 다룬다.
+
+| FS | 마운트 지점 | 용도 |
+| --- | --- | --- |
+| procfs | `/proc` | 프로세스/커널 상태 조회 |
+| sysfs | `/sys` | 장치 트리/드라이버 속성 |
+| tmpfs | `/tmp`, `/dev/shm` | RAM 에 있는 파일 (스왑 가능) |
+| devpts | `/dev/pts` | PTY 터미널 |
+| pipefs | 내부 | 파이프 버퍼의 anonymous inode |
+| sockfs | 내부 | 소켓의 anonymous inode |
+
+### 6.9 sockfs — 소켓이 파일이 되는 방법
+
+소켓은 디스크에 없으니 **anonymous inode** 를 sockfs 가 발급한다. 이래야 VFS 체인에 들어갈 수 있다.
+
+```
+sockfd=4 ── fdtable[4] ── struct file ── f_op = socket_file_ops
+                            │
+                            └── private_data -> struct socket
+                                                  ├── ops = inet_stream_ops
+                                                  └── sk  -> struct sock (tcp_sock)
+```
+
+그래서 `read(4, ...)` 가 `socket_file_ops.read_iter` -> `tcp_recvmsg` 까지 흐를 수 있다 (§7, §9).
+
+### 6.10 f_op 디스패치 — 같은 read() 가 fd 타입별로 다르게
+
+```
+ read(fd, ...) ──> file->f_op->read_iter
+                     ├── ext4_file_read_iter  (일반 파일)
+                     ├── sock_read_iter       (소켓)   -> tcp_recvmsg
+                     ├── pipe_read            (파이프)
+                     ├── tty_read             (터미널)
+                     └── proc_reg_read_iter   (procfs)
+```
+
+하나의 syscall 이 fd 타입에 따라 완전히 다른 구현으로 빠진다. 이게 "모든 것이 파일" 의 실제 구현 장치다.
+
+> **-> 상세**: [q04-filesystem.md](./q04-filesystem.md)
+> syscall -> VFS -> ext4 -> 페이지캐시 -> blk-mq -> 드라이버 전체 경로를 커널 소스 코드 레벨로.
 
 ---
 
-## §7. 소켓의 3층 구조 — struct file → struct socket → struct sock
+## §7. 소켓의 3층 구조 — file -> socket -> sock
 
-이제 소켓 하나를 "세 개의 렌즈" 로 본다.
+소켓 하나를 **세 개의 렌즈**로 본다.
 
-```text
-유저가 보는 것         sockfd = 4 (단순 정수)
+```
+─────────────────────────────────────────────────────────────
+ 유저가 보는 것     sockfd = 4  (단순 정수)
+─────────────────────────────────────────────────────────────
 
-VFS 층               struct file
-                       - f_op = socket_file_ops  (read/write/poll/close ...)
-                       - private_data → socket
+ VFS 층            struct file
+                    · f_op = socket_file_ops  (read/write/poll/close ...)
+                    · private_data -> socket
 
-BSD socket 층         struct socket
-                       - type = SOCK_STREAM
-                       - state = SS_CONNECTED
-                       - ops = inet_stream_ops  (bind/listen/accept/sendmsg ...)
-                       - sk   → sock
+─────────────────────────────────────────────────────────────
 
-프로토콜 층            struct sock  (상위타입 tcp_sock)
-                       - sk_family = AF_INET
-                       - sk_write_queue  (송신 대기 FIFO)
-                       - sk_receive_queue (수신 대기 FIFO)
-                       - sk_rcvbuf / sk_sndbuf (버퍼 크기 제한)
-                       - tcp_sock 의 seq/ack/window/cwnd/상태머신
+ BSD socket 층      struct socket
+                    · type  = SOCK_STREAM
+                    · state = SS_CONNECTED
+                    · ops   = inet_stream_ops  (bind/listen/accept/sendmsg ...)
+                    · sk    -> sock
+
+─────────────────────────────────────────────────────────────
+
+ 프로토콜 층        struct sock  (상위 타입: tcp_sock)
+                    · sk_family = AF_INET
+                    · sk_write_queue    (송신 대기 FIFO)
+                    · sk_receive_queue  (수신 대기 FIFO)
+                    · sk_rcvbuf / sk_sndbuf
+                    · tcp_sock 의 seq / ack / window / cwnd / 상태 머신
+─────────────────────────────────────────────────────────────
 ```
 
 이 세 층 덕분에:
 
-- VFS 는 "모든 것이 파일" 을 유지하고
-- BSD socket 층은 "bind/listen/accept" 같은 공통 API 를 제공하고
-- 프로토콜 층은 TCP/UDP/UNIX 도메인 등 **실제 동작의 차이** 를 담는다.
+- VFS 층 -> "모든 것이 파일" 유지
+- BSD 층 -> bind/listen/accept 같은 **공통 API**
+- 프로토콜 층 -> TCP/UDP/UNIX 도메인 등 **실제 동작의 차이**
 
-`sendmsg` 한 번 부를 때 흐르는 경로는:
+`sendmsg` 호출 시 흐름:
 
-```text
-write()/send() → file->f_op->write_iter
-              → sock_write_iter
-              → sock->ops->sendmsg
-              → tcp_sendmsg  (TCP 면)
-              → (sk_write_queue 에 skb enqueue + ip_output 호출)
+```
+write() / send()
+   v  file->f_op->write_iter
+sock_write_iter
+   v  sock->ops->sendmsg
+inet_sendmsg -> tcp_sendmsg     (TCP 일 때)
+   v  sk_write_queue 에 skb enqueue + ip_output 호출
+IP 계층으로
 ```
 
-**→ 상세**: [q06-socket-principle.md](./q06-socket-principle.md)
+> **-> 상세**: [q05-socket-principle.md](./q05-socket-principle.md)
 
 ---
 
-## §8. 소켓 API 함수들 — socket/bind/listen/accept/connect + getaddrinfo
+## §8. 소켓 API — socket/bind/listen/accept/connect + getaddrinfo
 
-서버와 클라이언트가 부르는 함수는 대칭이 있다.
+### 8.1 서버/클라이언트 대칭
 
-```text
-서버                           클라이언트
-────                           ────────
-socket()                       socket()
-bind()                         (bind 는 보통 생략, 커널이 랜덤 포트)
-listen()
-accept()  ← 여기서 block         connect()  ← 3-way handshake
-read()/write()                 write()/read()
-close()                        close()
+```
+ 서버                          클라이언트
+ ────                          ────────
+ socket()                      socket()
+ bind()                        (bind 보통 생략 -> 커널이 랜덤 포트)
+ listen()
+ accept()   <- 여기서 block      connect()  <- 3-way handshake
+ read()/write()                write()/read()
+ close()                       close()
 ```
 
-각 함수가 하는 일 한 줄씩:
+### 8.2 각 함수 한 줄씩
 
-- `socket(domain, type, proto)` : struct socket/sock 할당하고 fd 하나 반환.
-- `bind(fd, sa, len)` : "이 소켓은 이 IP:port 로 들어오는 패킷 받을래" 를 커널에 등록.
-- `listen(fd, backlog)` : 이 소켓을 "수동(passive)" 로 표시, 미완성/완성 큐 준비.
-- `accept(fd, ...)` : listen 큐에서 완성된 연결 하나를 꺼내 **새 fd(connfd)** 반환. listenfd 는 그대로 남는다.
-- `connect(fd, sa, len)` : 서버에 SYN 보내고 연결 완성까지 대기.
+| 함수 | 역할 |
+| --- | --- |
+| `socket(domain, type, proto)` | struct socket/sock 할당 + fd 반환 |
+| `bind(fd, sa, len)` | "이 IP:port 로 오는 패킷 받을래" 등록 |
+| `listen(fd, backlog)` | 수동(passive) 로 전환, SYN/ACCEPT 큐 준비 |
+| `accept(fd, ...)` | 완성된 연결 하나 꺼내 새 fd(connfd) 반환. listenfd 그대로 |
+| `connect(fd, sa, len)` | 서버에 SYN 보내고 연결 완성까지 대기 |
 
-**listenfd vs connfd** 헷갈림 주의:
+### 8.3 listenfd vs connfd
 
-- 서버는 한 번 `socket + bind + listen` 해서 **listenfd** 하나 만든다.
-- 클라이언트가 붙을 때마다 `accept` 가 **새 connfd** 를 만든다.
-- listenfd 는 "들을 귀" , connfd 는 "실제 대화".
+```
+ 서버 프로세스
+ ┌──────────────────────────┐
+ │ listenfd (3)  <- 듣기용  │
+ │ connfd_1 (4)  <- 클라 A │
+ │ connfd_2 (5)  <- 클라 B │
+ │ connfd_3 (6)  <- 클라 C │
+ └──────────────────────────┘
+```
 
-**getaddrinfo** — 도메인/서비스명을 socket API 에 맞는 struct 배열로 바꿔주는 "DNS + 포트맵" 래퍼.
+listenfd = "들을 귀", connfd = "실제 대화".
+
+### 8.4 getaddrinfo
+
+도메인 + 서비스명을 socket API 용 struct 배열로 바꿔 주는 "DNS + 포트 맵" 래퍼.
 
 ```c
 struct addrinfo hints = { .ai_socktype = SOCK_STREAM, .ai_family = AF_UNSPEC };
 struct addrinfo *res;
 getaddrinfo("www.google.com", "80", &hints, &res);
-// res 는 linked list. IPv4 하나, IPv6 하나 등이 들어옴.
 for (p = res; p; p = p->ai_next) {
     fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
     if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
@@ -366,207 +657,127 @@ for (p = res; p; p = p->ai_next) {
 freeaddrinfo(res);
 ```
 
-addrinfo 의 주요 필드: `ai_family` (AF_INET/AF_INET6), `ai_socktype` (SOCK_STREAM/DGRAM), `ai_addr` (sockaddr 포인터), `ai_addrlen`, `ai_next`.
+addrinfo 주요 필드: `ai_family` (AF_INET/AF_INET6), `ai_socktype`, `ai_addr`, `ai_addrlen`, `ai_next`.
 
-**→ 상세**: [q07-ch11-4-sockets-interface.md](./q07-ch11-4-sockets-interface.md), [q03-tcp-udp-socket-syscall.md](./q03-tcp-udp-socket-syscall.md)
+> **-> 상세**: [q06-ch11-4-sockets-interface.md](./q06-ch11-4-sockets-interface.md)
 
 ---
 
-## §9. 송신 파이프라인 (top-down) — write() 한 번이 NIC 까지
+## §9. TCP/UDP 시스템콜 — process-to-process 추상화
 
-이제 **실제 한 번의 write** 를 처음부터 끝까지. 95B 의 HTTP 요청을 보낸다고 하자.
+### 9.1 host-to-host vs process-to-process
 
-```text
+```
+IP 계층       호스트 -> 호스트        (IP 주소로 구분)
+TCP/UDP      프로세스 -> 프로세스     (IP+Port 로 구분)
+```
+
+### 9.2 TCP 와 UDP 차이
+
+| 관점 | TCP | UDP |
+| --- | --- | --- |
+| 연결 | 3-way handshake 필요 | 없음 |
+| 순서 | 보장 | 안 함 |
+| 손실 | 재전송 | 그냥 날림 |
+| 혼잡 제어 | cwnd/slow start | 없음 |
+| API | stream (`SOCK_STREAM`) | datagram (`SOCK_DGRAM`) |
+| 헤더 | 20 B 기본 | 8 B 고정 |
+| 용도 | HTTP, SSH, DB | DNS 쿼리, 게임, 동영상 스트리밍 |
+
+### 9.3 TCP 3-way handshake
+
+```
+ 클라이언트              서버
+ ──────                 ────
+   |   SYN seq=x          |
+   |─────────────────────>|   listen 큐(incomplete) 에 추가
+   |                      |
+   |   SYN+ACK seq=y,ack=x+1
+   |<─────────────────────|   listen 큐(accept) 준비
+   |                      |
+   |   ACK ack=y+1        |
+   |─────────────────────>|   accept() 가 이거 꺼내감
+   |                      |
+   |   ───── 데이터 ─────  |
+```
+
+> **-> 상세**: [q07-tcp-udp-socket-syscall.md](./q07-tcp-udp-socket-syscall.md)
+
+---
+
+## §10. 송신 파이프라인 — write() 한 번이 NIC 까지
+
+### 10.1 [1]~[9] 전체 경로
+
+95 B 의 HTTP 요청을 보낸다고 하자.
+
+```
 [1] 유저            buf = "GET /home.html HTTP/1.1\r\n..."  (95B)
                     write(4, buf, 95);
-                      ↓ syscall  (§5: CPL 0 진입)
-
-[2] VFS             fdtable[4] → file → sock_write_iter
-                      ↓
-
+                      | syscall  (§5: CPL 3 -> 0)
+                      v
+[2] VFS             fdtable[4] -> file -> sock_write_iter
+                      v
 [3] BSD socket      socket->ops->sendmsg == tcp_sendmsg
-                      ↓
-
-[4] TCP 계층        sk_buff 하나 할당 (슬랩에서)
-                    copy_from_user: 유저 buf(95B) → skb 데이터 영역(커널 VA)
-                    TCP 헤더 20B 붙이기 (seq, ack, flag, window, checksum)
+                      v
+[4] TCP 계층        sk_buff 하나 할당 (slab)
+                    copy_from_user: 유저 95B -> skb 데이터영역 (커널 VA)
+                    TCP 헤더 20B 붙임 (seq, ack, flag, window, checksum)
                     sk_write_queue tail 에 enqueue
                     tcp_write_xmit 호출
-                      ↓
-
+                      v
 [5] IP 계층         ip_queue_xmit
-                    목적지 IP 로 라우팅 테이블 조회 → next-hop, 출력 인터페이스 결정
-                    IP 헤더 20B 붙이기 (TTL=64, proto=TCP, checksum, src/dst IP)
-                      ↓
-
-[6] ARP/이웃        next-hop 의 MAC 주소 조회 (없으면 ARP 요청)
-                      ↓
-
-[7] 링크 계층        Ethernet 헤더 14B 붙이기 (src MAC=내 NIC, dst MAC=공유기)
-                    dev_queue_xmit → qdisc → ndo_start_xmit
-                      ↓
-
-[8] NIC 드라이버      TX descriptor ring 에 "이 skb 의 물리주소 + 길이" 기록
-                    MMIO 로 doorbell 레지스터 write → "NIC 야, 보내"
-                      ↓
-
-[9] NIC 하드웨어      DMA 엔진이 DRAM → NIC 내부 FIFO 로 프레임 복사
-                    MAC 컨트롤러가 CRC 4B 계산해서 프레임 끝에 덧붙임
-                    PHY 가 전기/광 신호로 선로에 송출
-                      ↓
-                    TX 완료 → IRQ → 드라이버가 skb 해제
+                    라우팅 테이블 조회 -> next-hop, 출력 인터페이스
+                    IP 헤더 20B 붙임 (TTL=64, proto=TCP, checksum, src/dst IP)
+                      v
+[6] Neighbor (ARP)  next-hop IP 로 dst MAC 조회 (dcache 유사한 neighbor cache)
+                    없으면 ARP request 브로드캐스트
+                    Ethernet 헤더 14B 붙임 (dst MAC, src MAC, EtherType=0x0800)
+                      v
+[7] qdisc/TC        큐잉 디스크립터에 삽입 (pfifo_fast 가 기본)
+                      v
+[8] 드라이버        igb_xmit_frame (예: Intel 드라이버)
+                    skb 의 linear/frag 영역을 DMA descriptor 로 변환
+                    descriptor ring 에 기록
+                    MMIO write 로 "tail pointer 움직임" 을 NIC 에 통지 (§11)
+                      v
+[9] NIC 하드웨어    DMA 로 DRAM 에서 프레임 읽음
+                    FCS (CRC-32) 4B 추가
+                    선로로 전기/광 신호 전송
 ```
 
-각 단계의 번호를 기억해두면, 문제가 났을 때 "몇 단계까지 갔는가" 로 디버깅할 수 있다.
+### 10.2 sk_buff, sk_write_queue, slab
 
-**→ 상세**: [q02-host-network-pipeline.md](./q02-host-network-pipeline.md)
-
----
-
-## §10. sk_buff, sk_write_queue, slab — 커널 쪽 버퍼 모델
-
-**sk_buff** = 네트워크 스택의 "패킷 하나" 를 표현하는 커널 구조체.
-
-```text
-struct sk_buff
-  ├── head   ──▶ [ headroom | data .......... | tailroom ]
-  ├── data   ──▶           ↑ 현재 payload 시작
-  ├── tail   ──▶                               ↑ 끝
-  ├── end    ──▶                                          ↑
-  ├── len, data_len
-  ├── protocol, pkt_type
-  └── (prev, next for queue)
+```c
+// include/linux/skbuff.h 단순화
+struct sk_buff {
+    unsigned char *head, *data, *tail, *end;   // 프레임 버퍼 포인터들
+    unsigned int len, data_len;
+    __u16 protocol;
+    struct sk_buff *next, *prev;               // 큐 연결용
+    struct sock *sk;                           // 소유 소켓
+    ...
+};
 ```
 
-- **head/end** 는 할당된 전체 메모리 범위
-- **data/tail** 은 현재 유효 payload 범위
-- `skb_push(len)` 은 data 포인터를 앞으로 이동해서 헤더를 앞에 붙일 공간을 만든다. 그래서 TCP→IP→Ethernet 으로 내려가면서 **헤더를 앞에 "밀어 넣을" 수 있다**.
-- `skb_pull(len)` 은 반대. 수신 때 헤더를 벗긴다.
+**sk_buff 버퍼 구조** (메모리상):
 
-**sk_write_queue / sk_receive_queue — 소켓마다 한 쌍씩**:
-
-중요한 점: 이 두 큐는 전역 단일이 아니라 **각 struct sock 안에 박혀 있는 리스트 헤드**다. 소켓 하나당 한 쌍. 관리 주체는 커널의 TCP/UDP 프로토콜 계층(`net/ipv4/tcp.c`, `net/core/sock.c`).
-
-```text
-커널 DRAM 안
-
-struct sock (소켓 A)
-  ├── sk_write_queue  = { prev, next, qlen=3 }
-  │       │
-  │       ▼
-  │   [skb1] ⇄ [skb2] ⇄ [skb3]        ← 이중 연결 리스트
-  │     ↑                    ↑
-  │     오래된 것(head)        새 것(tail)
-  └── sk_receive_queue = { prev, next, qlen=1 }
-          │
-          ▼
-      [skb_rx1]
-
-struct sock (소켓 B) ─ 자기만의 write/receive_queue 를 따로
-struct sock (소켓 C) ─ ...
+```
+ head      data                   tail      end
+  v          v                      v        v
+  +──────────+──────────────────────+────────+
+  │ headroom │      payload         │ tailroom│
+  +──────────+──────────────────────+────────+
+             ^                      ^
+             여기에 headers 를 앞쪽으로 "push" 한다
+             (TCP -> IP -> Ethernet 추가되며 data 포인터가 앞으로 이동)
 ```
 
-동작:
+sk_buff 는 **slab** (`kmem_cache_alloc`) 에서 할당된다. slab 은 **같은 크기 객체의 전용 캐시**이다.
 
-- 유저가 `write()` → 새 skb 가 write_queue **tail** 에 추가
-- TCP 가 실제로 내보낼 때 → **head** 부터 꺼내 IP 로 넘김
-- NIC 에서 수신된 skb → receive_queue tail 에 추가
-- 유저가 `read()` → head 에서 꺼내 copy_to_user
+### 10.3 TCP 헤더 비트 단위
 
-**skb 한 개는 "메타데이터 + 데이터" 두 조각**:
-
-```text
-skb 하나
-  ① struct sk_buff (메타데이터, 약 224B)    ← slab "skbuff_head_cache" 에서 할당
-  ② 데이터 영역 (패킷 바이트)                ← page_frag_alloc (페이지 조각)
 ```
-
-- 작은 패킷(MTU 1500 정도): 한 페이지(4KB) 안에서 조각을 떼서 씀.
-- 큰 데이터(TSO 64KB 세그먼트 등): 한 skb 에 **흩어진 페이지 여러 조각**이 `skb_frag[]` 배열로 매달림. scatter-gather DMA 로 NIC 에 전송될 때 하나의 프레임처럼 이어붙여진다. **연속된 물리 메모리일 필요가 없다**.
-
-**sk_sndbuf / sk_rcvbuf — 큐의 상한과 백프레셔**:
-
-큐가 무한정 커지면 DRAM 이 터진다. 커널은 소켓마다 두 상한을 둔다.
-
-```text
-/proc/sys/net/ipv4/tcp_wmem
-4096   16384    4194304       ← min   default   max
-       (16 KB)   (4 MB)
-
-setsockopt(fd, SOL_SOCKET, SO_SNDBUF, ...) 로 개별 설정 가능.
-전역 상한은 net.core.wmem_max.
-```
-
-**한도를 넘어도 연결을 끊지 않는다. 속도를 줄인다**.
-
-- **송신 쪽이 꽉 찬 경우** (내가 너무 빨리 write):
-  - blocking 소켓 → `write()` 가 block, 공간 생기면 깨어남
-  - non-blocking → `write()` 가 -1, `errno = EAGAIN/EWOULDBLOCK`
-- **수신 쪽이 꽉 찬 경우** (상대가 빨리 보내는데 내가 안 읽음):
-  - TCP 가 ACK 의 `Window` 필드를 0 으로 알려줌 (= Zero Window)
-  - 상대 TCP 가 송신을 멈춤
-  - 내가 `read()` 로 큐를 비우면 window 가 다시 열리고 상대가 재개
-
-"연결 닫힘(RST)" 은 별개 사건이다. 버퍼가 꽉 찼다는 이유만으로 RST 를 보내지 않는다.
-
-**slab allocator — 계란판 모형으로**:
-
-`sk_buff` 는 초당 수백만 번 할당/해제된다. 매번 페이지 받아서 224B 만 쓰고 버리면 낭비라, 커널은 **slab** 이라는 "같은 크기 객체 전용 풀" 을 쓴다.
-
-두 단계로 쌓여 있다.
-
-```text
-[ Buddy Allocator ]    ← 페이지(4KB) 단위 관리인
-                          2^n 페이지 크기로 반씩 쪼개고, 반납시 짝꿍과 다시 합침(단편화 방지)
-       │ "페이지 줘"
-       ▼
-[ Slab Allocator  ]    ← "같은 크기 객체 N칸짜리 계란판" 만듦
-   대표 cache:
-     - skbuff_head_cache    224B
-     - TCPv4                2304B
-     - inode_cache          592B
-     - kmalloc-64, -128 ...
-
-계란판 모형:
-  buddy 에서 4KB 페이지 한 장 받음
-  → 224B 씩 줄 그어 18칸짜리 계란판 완성 (= slab 하나)
-  → 요청 올 때마다 빈 칸 하나씩 반환
-  → 18칸 다 차면 buddy 에 새 페이지 요청 → 새 계란판 추가 (이제 36칸)
-
-확인:  /proc/slabinfo
-  skbuff_head_cache   12340 / 12800   objsize=224  objperslab=36  pagesperslab=2
-  (현재 12,340칸 사용 / 총 12,800칸. 2페이지짜리 slab 하나에 36칸.)
-```
-
-**요청 경로 요약**:
-
-```text
-kmem_cache_alloc(skbuff_head_cache)
-  ├─ 현재 CPU 의 per-CPU 캐시에 남는 칸 있음 → 바로 반환 (락 없음, 최고속)
-  ├─ 없으면 slab 에서 다음 칸 할당 (가벼운 락)
-  └─ slab 도 꽉 찼으면 buddy 에 새 페이지 요청 → 새 slab 만들어 칸 반환
-```
-
-**SLAB / SLUB / SLOB** 은 "Slab" 이라는 개념의 **구현 엔진** 이름. API 는 모두 동일.
-- SLAB : 옛 구현, 복잡
-- SLUB : 현대 리눅스 기본(2.6.23+), 단순하고 빠름
-- SLOB : 초소형 임베디드용
-
-커스텀 커널이 아니면 보통 SLUB 가 돌고 있다. 신경 쓸 필요 없음.
-
----
-
-## §11. TCP 의 핵심 — seq/ack/flag/window 를 비트 단위로
-
-TCP 헤더 (20B, 옵션 제외):
-
-> **비트맵 읽는 법**: 이 다이어그램은 마크다운 표가 아니라 **RFC 스타일 비트 레이아웃**이다.
-> - 맨 위 눈금 `0 1 2 … 31` 은 **비트 번호**.
-> - 한 줄 = **32비트 = 4바이트**.
-> - 줄이 5개면 20바이트, 6개면 24바이트 식으로 읽는다.
-> - 한 줄 안에 칸이 두 개면 2+2바이트, 칸이 4개면 1+1+1+1바이트.
-
-```text
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -576,743 +787,660 @@ TCP 헤더 (20B, 옵션 제외):
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                    Acknowledgment Number                      |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  DO |Rsvd | U A P R S F |           Window                    |
+|Data |   Reserved|N|C|E|U|A|P|R|S|F|          Window           |
+|Offset|          |S|W|C|R|C|S|S|Y|I|                           |
+|      |          | |R|E|G|K|H|T|N|N|                           |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |           Checksum            |         Urgent Pointer        |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    Options (길이 가변)                         |
+|                    Options (가변)                             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        Data (payload)                         |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-첫 줄 해석: `Source Port` (비트 0~15, 2바이트) + `Destination Port` (비트 16~31, 2바이트). 전체 5행 = **20바이트 고정 헤더**.
+9-bit 플래그: NS / CWR / ECE / URG / ACK / PSH / RST / SYN / FIN.
 
-**seq / ack — 바이트 번호** (내 대화에서 이미 짚었던 것):
+### 10.4 IP 헤더 비트 단위
 
-- `seq` : "내가 지금 보내는 첫 바이트의 번호"
-- `ack` : "상대가 기대하는 다음 바이트 번호 = 지금까지 받은 바이트의 다음"
-
-```text
-클라 초기 seq=1000, 서버 초기 seq=5000 이라고 가정.
-
-[3-way handshake]
-  클라 → 서버 : SYN seq=1000              (데이터 0, 하지만 SYN 은 +1)
-  서버 → 클라 : SYN+ACK seq=5000 ack=1001
-  클라 → 서버 : ACK seq=1001 ack=5001
-
-[데이터]
-  클라 → 서버 : seq=1001, 95B
-  서버 → 클라 : ack=1096  (1001+95=1096)
-  서버 → 클라 : seq=5001, 300B
-  클라 → 서버 : ack=5301  (5001+300=5301)
-
-[FIN]
-  클라 → 서버 : FIN seq=1096 ack=5301
-  서버 → 클라 : ACK ack=1097
-  서버 → 클라 : FIN seq=5301 ack=1097
-  클라 → 서버 : ACK ack=5302
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|Version|  IHL  |Type of Service|          Total Length         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Identification        |Flags|      Fragment Offset    |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Time to Live |    Protocol   |         Header Checksum       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       Source Address                          |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Destination Address                        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Options (있을 때)                          |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-**플래그 6비트**:
+중요 필드:
 
-- `SYN` : "연결 시작하자"
-- `ACK` : "ack 필드가 유효해" (연결 중엔 거의 항상 켜짐)
-- `FIN` : "내 쪽은 더 보낼 거 없어"
-- `RST` : "비정상 종료, 상태 초기화"
-- `PSH` : "받는 즉시 앱에 전달해라"
-- `URG` : "긴급 데이터 있음" (거의 안 씀)
+| 필드 | 기본값 | 의미 |
+| --- | --- | --- |
+| Version | 4 | IPv4 |
+| IHL | 5 | 헤더 길이(4B 단위). 5=20B |
+| TTL | 64 | hop 마다 -1. 0 되면 drop |
+| Protocol | 6(TCP)/17(UDP)/1(ICMP) | 다음 계층 |
+| Checksum | 헤더만 | hop 마다 재계산 (TTL 바뀜) |
 
-**Window** : "나 지금 N 바이트 더 받을 수 있어" 의 크기. 흐름 제어(flow control)용.
+### 10.5 ARP 와 next-hop — MAC 은 매 홉 바뀌고 IP 는 유지된다
 
-**혼잡 제어(congestion control)** : 송신자가 내부적으로 유지하는 `cwnd`. 네트워크 자체의 혼잡을 감지(패킷 손실, RTT 증가)해서 보낼 양을 조절. Reno, Cubic, BBR 등의 알고리즘.
+라우터는 **인터페이스마다 MAC 이 따로** 있다.
 
-**MSS (Maximum Segment Size)** : 한 TCP 세그먼트에 넣을 수 있는 최대 데이터 바이트. 보통 **1460B** (= Ethernet MTU 1500 - IP 20 - TCP 20). 유저가 아무리 큰 데이터를 줘도 TCP 가 잘라서 여러 세그먼트로 보낸다.
+```
+  호스트 A          라우터          호스트 B
+  11:11            (두 개!)          33:33
+    |           eth0:22:22            |
+    |           eth1:44:44            |
+    |─────────────( LAN1 )            |
+    |                 |               |
+    |                 |─────────( LAN2 )──|
+    |                                 |
+
+ 프레임 A->라우터:   src MAC 11:11, dst MAC 22:22   (IP: A->B)
+ 프레임 라우터->B:   src MAC 44:44, dst MAC 33:33   (IP: A->B 그대로)
+```
+
+| hop 마다 | 바뀜 | 그대로 |
+| --- | --- | --- |
+| Ethernet header (src/dst MAC) | 교체 | - |
+| IP header (src/dst IP) | - | 유지 |
+| TTL | -1 | - |
+| IP checksum | 재계산 | - |
+| TCP header / payload | - | 유지 |
+
+비유: **IP 는 편지의 최종 주소, MAC 은 "다음 우체국" 주소.** 매 우체국(라우터) 마다 "다음 우체국" 만 갱신된다.
+
+> **-> 상세**: [q08-host-network-pipeline.md](./q08-host-network-pipeline.md)
+> 라우터 다중 인터페이스 MAC 교체 규칙, frame ① -> ② 재작성 표.
 
 ---
 
-## §12. IP 의 핵심 — TTL, protocol, checksum, fragmentation
+## §11. I/O Bridge — NIC / DMA / MMIO 바닥까지 [DFS 심화 구역]
 
-IP 헤더 (20B, 옵션 제외):
+§10.1 의 [8]~[9] 단계에서 "MMIO write", "DMA", "인터럽트" 라는 단어가 등장했다. 여기서 바닥까지 판다.
 
-> **읽는 법** (TCP 와 동일): 한 줄 = 32비트 = 4바이트. 5행이면 20바이트.
-> 첫 줄은 4비트+4비트+8비트+16비트 식으로 쪼개져 있다. 칸 위에 쓰인 숫자가 해당 필드의 **비트 폭**.
+### 11.1 Northbridge/Southbridge -> IMC + PCH 진화
 
-```text
-+---+---+---+---+---+---+---+---+
-| Ver=4 | IHL=5 |   TOS         |   Total Length (16)           |
-+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-|        Identification         | Flags|   Fragment Offset      |
-+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-|   TTL (8)     | Protocol (8)  |       Header Checksum (16)    |
-+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-|                     Source IP Address (32)                    |
-+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-|                  Destination IP Address (32)                  |
-+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+```
+ 옛날 (2008 이전)                   현재 (Intel/AMD 2014+)
+ ──────────────                     ──────────────────────
+                                     ┌──────────────────────┐
+  CPU ─── FSB ─── Northbridge ─── DRAM   CPU die 안에 IMC  │
+                     │                   │   (메모리 컨트롤러)│
+                     │                   │                    │
+                    PCIe / AGP            │   PCIe Root Complex│
+                     │                   └──────────────────────┘
+                  Southbridge                      │
+                  (SATA, USB ...)                  │ DMI (QPI 유사)
+                                                   v
+                                                  PCH (구 South)
+                                                  (SATA, USB, SPI, ...)
 ```
 
-첫 줄 풀어 읽기:
-- `Version=4` → IPv4 (4비트)
-- `IHL=5` → 헤더 길이 5 × 4바이트 = **20바이트** (4비트)
-- `TOS` → 서비스 타입 (8비트)
-- `Total Length` → 헤더+본문 총 길이 (16비트)
+**IMC (Integrated Memory Controller)** 가 CPU 다이에 들어오면서 메모리 접근이 거의 "다이 내부 배선" 이 되었다.
 
-- **TTL (Time To Live)** : 라우터 한 번 통과할 때마다 1 감소. 0 되면 버리고 ICMP Time Exceeded 로 돌려줌. 루프 방지. 리눅스 기본 64, Windows 128.
-- **Protocol** : 상위 계층 식별. 6=TCP, 17=UDP, 1=ICMP.
-- **Source/Destination IP** : 네트워크를 건너는 동안 **거의 바뀌지 않음**. NAT 구간에서만 src IP 가 치환됨.
+### 11.2 세 주소 공간
 
-**체크섬 비트 레벨로**:
+```
+                     ┌────────────────────────────────────┐
+   DRAM 주소 공간    │  0x0000_0000 ~ 물리 메모리 끝        │  WB (writeback 캐시)
+                     └────────────────────────────────────┘
 
-예) 헤더 두 word `0x4500` + `0x0073` 의 체크섬.
+                     ┌────────────────────────────────────┐
+   MMIO 주소 공간    │  예: 0xF000_0000 ~ 0xFEFF_FFFF      │  UC/WC (비캐시)
+                     │  NIC/GPU/디스크의 레지스터가 이 영역│
+                     └────────────────────────────────────┘
 
-```text
-① 16비트 단위로 더한다 (1의 보수 합)
-   0x4500 + 0x0073 = 0x4573
-
-② 캐리가 났으면 하위에 돌려 더한다 (이 예엔 없음)
-
-③ 비트 반전
-   ~0x4573 = 0xBA8C
-
-④ 이게 체크섬 필드에 들어간다.
+                     ┌────────────────────────────────────┐
+   Port I/O          │  16 비트, 0x0000 ~ 0xFFFF            │  in/out 명령 전용
+                     │  레거시 (PS/2 키보드 등)            │
+                     └────────────────────────────────────┘
 ```
 
-수신 쪽은 동일 방식으로 합산했을 때 `0xFFFF` 가 나와야 정상. 틀리면 버린다. 요즘은 NIC 가 이걸 하드웨어로 오프로드.
+커널은 `ioremap(phys, size)` 로 MMIO 영역을 커널 가상 주소로 매핑하고, 그 포인터에 **보통 MOV 명령**으로 읽고 쓴다. 하지만 페이지 속성이 UC/WC 라서 캐시에 들어가지 않고 바로 PCIe TLP 로 나간다 (§11.3).
 
-**Fragmentation(단편화)**:
+### 11.3 PCIe TLP (Transaction Layer Packet)
 
-경로 중간 라우터의 MTU 가 작으면 IP 패킷을 쪼갠다. 쪼개진 조각은 같은 ID 를 공유하고 Fragment Offset 이 다르다. 수신 호스트가 다시 조립. 요즘은 Path MTU Discovery 로 송신자가 미리 MSS 를 줄여서 fragment 를 피하는 게 표준.
-
----
-
-## §13. ARP 와 next-hop — MAC 은 매 홉 바뀌고 IP 는 유지된다
-
-IP 는 "어디로 최종 도착" 이고, MAC 은 "바로 옆 누구에게 던질래" 다. 그래서 프레임이 라우터를 지날 때마다 **MAC 은 매번 바뀌고 IP 는 유지**된다.
-
-```text
-내 PC ─────▶ 공유기 ─────▶ ISP 라우터 ─────▶ … ─────▶ 구글 서버
-
-프레임 #1 (내 PC → 공유기)
-  src MAC = 내 PC, dst MAC = 공유기
-  src IP  = 192.168.0.10 (사설)
-  dst IP  = 142.251.150.104
-
-프레임 #2 (공유기 → ISP)
-  src MAC = 공유기, dst MAC = ISP 라우터
-  src IP  = 공유기 외부 IP (NAT 로 치환됨)   ← 여기만 바뀜
-  dst IP  = 142.251.150.104
-
-프레임 #3 (ISP → 다음)
-  src MAC = ISP, dst MAC = 다음 라우터
-  src IP  = 공유기 외부 IP (그대로)
-  dst IP  = 142.251.150.104 (그대로)
+```
+ CPU core
+   |
+   | MOV  [mmio_addr], value
+   v
+ IMC / Root Complex
+   |
+   | TLP  (packet 형태)
+   v
+ ┌──────────────────────┐
+ │ TLP 헤더             │   Type: MRd, MWr, CfgRd/Wr, Cpl, Msg
+ │ Requester ID         │
+ │ Tag                  │
+ │ Address              │
+ │ ─────────────────    │
+ │ Payload (데이터)     │
+ └──────────────────────┘
+   |
+   v
+ PCIe 스위치/링크 -> NIC 의 레지스터
 ```
 
-**라우팅 테이블 조회** (내 PC 의 커널이 하는 일):
-
-```text
-$ ip route
-default via 192.168.0.1 dev wlan0
-192.168.0.0/24 dev wlan0 scope link
-10.0.0.0/8 via 192.168.0.254 dev wlan0
-
-목적지가 142.251.150.104 이면:
-- /24 매치? 아니
-- /8 매치?  아니
-- default  매치! → next-hop = 192.168.0.1
-```
-
-가장 구체적인 prefix 가 이긴다 = **Longest Prefix Match**. 현대 라우터는 이걸 하드웨어(TCAM)로 한다.
-
-**ARP** (Address Resolution Protocol):
-
-"192.168.0.1 의 MAC 이 뭐니?" 를 LAN 전체에 브로드캐스트.
-
-```text
-ARP Request (브로드캐스트)
-  "Who has 192.168.0.1? Tell 192.168.0.10"
-  dst MAC = FF:FF:FF:FF:FF:FF   (전체 뿌림)
-
-ARP Reply (유니캐스트)
-  "192.168.0.1 is at AA:BB:CC:DD:EE:FF"
-```
-
-대답을 ARP 캐시에 저장. `ip neigh` 로 볼 수 있다. 타임아웃 지나면 다시 물음.
-
-**hop** 이라는 용어:
-
-- "라우터 한 번 통과" = 1 hop.
-- `traceroute` 가 각 홉의 IP 를 보여주는 원리: TTL=1,2,3... 으로 증가시켜 보내면 각 중간 라우터가 `ICMP Time Exceeded` 를 돌려줘서 그 라우터의 IP 가 드러난다.
-
-```text
-$ traceroute www.google.com
- 1  192.168.0.1   2 ms
- 2  10.x.x.x      5 ms   (ISP 첫 라우터)
- ...
- 8  142.251.150.119   30 ms   (구글 엣지)
-```
-
----
-
-## §14. NIC 와 드라이버 — DMA, MMIO, I/O 브릿지, descriptor ring
-
-여기가 "CPU-메모리-주변장치" 의 물리 구조를 이해해야 하는 지점.
-
-**CPU ↔ DRAM ↔ 주변장치 구조**:
-
-```text
-[CPU 코어] ── [캐시] ── [IMC: 메모리 컨트롤러] ── [DRAM]
-                              │
-                              └── [PCIe 루트 컴플렉스] ── [NIC, GPU, NVMe ...]
-                                   (= I/O 브릿지)
-```
-
-- CPU ↔ DRAM 은 **메모리 컨트롤러**를 통한 직통. CPU 칩 안에 IMC 가 들어있음(요즘 Intel/AMD 모두). 빠름.
-- CPU ↔ NIC 은 **PCIe 루트 컴플렉스**를 통과. CSAPP 에서 "I/O 브릿지" 라 부르는 그것.
-- 즉 "CPU 는 DRAM 과 직결" 이 맞지만, 주변장치는 별도의 버스로 연결된다.
-
-**DMA (Direct Memory Access)**:
-
-NIC 가 데이터를 보내려면 DRAM 의 skb 를 읽어야 하는데, CPU 가 일일이 복사하면 느리다. 대신 NIC 가 **PCIe 를 통해 DRAM 에 직접 읽기/쓰기** 를 한다. CPU 는 "시작해" 신호만 주고 빠진다. 복사는 NIC ↔ 메모리 컨트롤러 ↔ DRAM 사이에서 일어남.
-
-**MMIO (Memory-Mapped I/O)**:
-
-NIC 레지스터를 메모리 주소처럼 접근한다. 예: 주소 `0xFEC00000` 에 쓰는 것 = "NIC 의 doorbell 레지스터에 신호 주기". 이런 주소 영역은 **페이지 테이블에서 non-cacheable** 로 매핑됨 (캐시되면 장치에 안 보이니까).
-
-즉 두 종류의 통신이 있다:
-
-- `CPU → NIC 에게 명령` : MMIO (CPU 가 특정 주소에 write)
-- `NIC ↔ DRAM 데이터 이동` : DMA (CPU 는 개입 X)
-
-**TX/RX descriptor ring**:
-
-DRAM 안에 드라이버가 만들어 두는 **링 버퍼**. 한 칸(= descriptor)에는 "이 skb 는 물리주소 0x12345000 에 있고 길이 149B" 가 들어간다.
-
-```text
-TX ring (송신)
-  [ desc0 | desc1 | desc2 | ... | descN ]  (링처럼 순환)
-     ↑                     ↑
-     NIC 가 다음 읽을 위치   드라이버가 다음 쓸 위치
-
-프로시저:
-  드라이버: desc 에 skb 포인터 쓰기 → tail 증가 → MMIO 로 doorbell
-  NIC:     doorbell 감지 → DMA 로 desc 의 skb 를 읽어서 전송 → head 증가
-```
-
-**NIC 내부 하드웨어**:
-
-- **DMA 엔진** : PCIe 로 DRAM 과 통신하는 하드웨어 블록
-- **MAC 컨트롤러** : Ethernet 프레임 조립, CRC 계산
-- **PHY** : 전기/광 신호 ↔ 디지털 비트
-- **FIFO SRAM** : 수십~수백 KB 의 내부 버퍼 (프레임 임시 보관)
-- **펌웨어** : NIC 안의 작은 CPU 가 돌리는 마이크로코드
-
-**드라이버 vs NIC 내부 차이**:
-
-- **드라이버** = 소프트웨어. 커널 모듈. `drivers/net/ethernet/...` 의 C 코드. descriptor ring 관리, skb 와의 연결, IRQ 처리.
-- **NIC 내부** = 하드웨어. PCIe 카드 안의 칩들. 실제 프레임 송수신.
-
-**TSO (TCP Segmentation Offload) & Scatter-Gather DMA**:
-
-TSO 는 "CPU 가 TCP 를 쪼개지 말고 NIC 가 대신 쪼개" 라고 떠넘기는 기능.
-
-```text
-[ TSO 없음 ]
-  CPU: 64KB 를 1460B × 45개 세그먼트로 손수 쪼갬
-       각 세그먼트마다 TCP 헤더 만들고 체크섬 계산
-       → 45회 헤더 작업
-
-[ TSO 있음 ]
-  CPU: 64KB 덩어리 1개 + "이걸 MSS=1460 으로 쪼개줘" 만 NIC 에 넘김
-  NIC: 내부에서 45개 프레임 만들고 헤더 복제, 체크섬, 송출
-       → CPU 는 1번만 작업
-```
-
-여기서 핵심: "64KB 덩어리" 가 **연속된 물리 메모리일 필요가 없다**. skb 는 `skb_frag[]` 배열로 흩어진 페이지 조각들을 엮는다.
-
-```text
-skb
-  ├── head/data/tail  (선형 영역 — 헤더가 들어가는 첫 조각)
-  └── frags[]
-       ├── { page 물리주소 A, offset 0, 4096 }
-       ├── { page 물리주소 B, offset 0, 4096 }
-       ├── { page 물리주소 C, offset 0, 4096 }
-       └── ... (최대 MAX_SKB_FRAGS, 보통 17)
-```
-
-NIC 의 DMA 엔진은 **scatter-gather DMA** 를 지원해서 여러 물리주소를 받아 순서대로 끌어간다. 즉 **메모리는 흩어져 있어도 전선에 나갈 땐 이어진다**.
-
-정리: "페이지" 는 메모리 관리 단위(4KB), "TSO 세그먼트" 는 NIC 에 넘기는 덩어리 크기(최대 ~64KB). 서로 다른 층이다.
-
-**IRQ (인터럽트) 처리**:
-
-```text
-NIC 가 프레임 수신 완료 → PCIe 로 MSI-X 인터럽트 발사
-  ↓
-APIC → LAPIC → CPU 특정 코어로 IRQ 벡터 전달
-  ↓
-IDT[vector] → 드라이버의 top-half 핸들러 실행 (아주 짧음)
-  ↓
-napi_schedule → softirq NET_RX 로 예약
-  ↓
-나중에 softirq context 에서 실제 스택 처리 (bottom half)
-```
-
-Top-half 와 bottom-half 를 나누는 이유: 인터럽트는 다른 인터럽트를 막으므로 최대한 짧아야 함. 무거운 처리는 softirq/tasklet 으로 미룬다.
-
-**NAPI** (New API) : IRQ polling 을 섞는 방식. 패킷이 많을 땐 IRQ 꺼두고 polling 으로 빠르게, 드물면 IRQ 로. 수십만 pps 에서 IRQ storm 방지.
-
----
-
-## §15. 수신 파이프라인 (bottom-up) — 프레임이 read() 까지 올라오는 길
-
-§9 의 정반대 방향. 이번엔 바닥에서 위로.
-
-```text
-[1] NIC PHY          선로에서 전기/광 신호 수신
-                      ↓
-[2] NIC MAC          CRC 검증, 프레임 조립, 내부 FIFO 에 저장
-                      ↓
-[3] NIC DMA          DMA 로 DRAM 의 RX ring 에 프레임 복사
-                      ↓
-[4] NIC → CPU        MSI-X 인터럽트 발사
-                      ↓
-[5] 드라이버 top-half  인터럽트 핸들러 진입 → napi_schedule
-                      (IRQ 잠깐 마스크)
-                      ↓
-[6] softirq NET_RX    bottom-half. sk_buff 꺼내서 스택에 올림
-                      ↓
-[7] Ethernet         dst MAC 확인, EtherType 보고 상위로 (0x0800=IP)
-                      ↓
-[8] IP 계층           dst IP = 내 IP 인가, checksum, TTL 검증
-                      proto 보고 TCP/UDP/ICMP 로 분기
-                      ↓
-[9] TCP 계층          4-tuple (src/dst IP/port) 로 소켓 검색
-                      seq 순서 검증, 재조립
-                      sk->sk_receive_queue 에 skb enqueue
-                      프로세스가 read 대기중이면 wake_up
-                      ↓
-[10] 유저 read()      copy_to_user: skb → 유저 buf
-                      skb 해제
-```
-
-**포인트**:
-- CPU 는 처음엔 **전혀 개입하지 않음** (DMA 가 다 함)
-- IRQ 부터 비로소 CPU 가 관여
-- softirq 는 "유저 프로세스 컨텍스트도, 인터럽트 컨텍스트도 아닌" 특수 상태. 유저 공간 접근은 못 함.
-- copy_to_user 는 **read 를 부른 그 프로세스의 컨텍스트**에서 일어남. 그래야 해당 프로세스의 페이지 테이블로 유저 주소를 해석할 수 있으니까.
-
----
-
-## §16. 네 개의 렌즈 — CPU / 메모리 / 커널 / 핸들
-
-같은 한 번의 통신을 네 가지 관점으로 다시 보면 성능/디버깅이 보인다.
-
-**CPU 관점**: 제어와 복사. DMA 는 장치가 하지만, `copy_from_user`, 체크섬(오프로드 없으면), TCP 상태 관리, 인터럽트 처리, syscall 진입/복귀는 모두 CPU 사이클. `perf top` 에서 `copy_user_enhanced_fast_string`, `__netif_receive_skb`, `tcp_sendmsg` 같은 함수가 뜨는 이유.
-
-**메모리 관점**: sk_buff 가 DRAM 을 여러 번 오간다. 유저 버퍼 → skb → NIC RX/TX 버퍼 → PHY. 각 복사가 메모리 대역폭을 쓴다. NUMA 환경에선 CPU-NIC 가 같은 노드에 있어야 빠름.
-
-**커널 관점**: 소켓 → proto_ops(TCP/UDP) → IP → qdisc → 드라이버 함수 체인. 튜닝 포인트: qdisc 정책, SO_REUSEPORT, epoll vs select, softirq core 분산.
-
-**핸들(fd) 관점**: 유저가 보는 건 정수. 뒤에는 file → socket → sock 의 체인. `ulimit -n`, select O(N) vs epoll O(1), accept4 의 원샷 플래그.
-
-**→ 상세**: [q10-network-cpu-kernel-handle.md](./q10-network-cpu-kernel-handle.md)
-
----
-
-## §17. 응용 계층 — HTTP, MIME, FTP, Telnet
-
-이 위로는 순수하게 "바이트 약속". TCP 는 바이트 스트림만 보장하고, 그 안을 어떻게 해석할지는 응용 프로토콜의 일.
-
-**HTTP 요청 한 조각**:
-
-```text
-GET /home.html HTTP/1.1\r\n
-Host: www.example.com\r\n
-User-Agent: curl/8.0\r\n
-Accept: */*\r\n
-\r\n
-```
-
-- 시작 라인 + 헤더 + 빈 줄 + (옵션 본문)
-- `\r\n` 으로 라인 구분, 빈 줄로 헤더-본문 경계
-
-**HTTP/1.0 vs 1.1** 핵심 차이:
-
-| 항목 | 1.0 | 1.1 |
-|---|---|---|
-| 연결 | 요청 1개당 새 TCP | keep-alive 기본 |
-| Host 헤더 | 없음(선택) | 필수 (가상 호스팅) |
-| chunked encoding | 없음 | 있음 (스트리밍) |
-| pipelining | 없음 | 있음 (잘 안 씀) |
-
-Tiny 는 HTTP/1.0, 프록시 랩은 "1.1 요청을 받아도 1.0 으로 변환해서 보낸다".
-
-**MIME type**: Content-Type 에 들어가는 "이 본문은 어떤 타입인가" 의 표준 표기. `text/html`, `image/png`, `application/json`. `get_filetype` 이 확장자 → MIME 매핑.
-
-**FTP**: 파일 전송용. **제어 연결(21 포트)** + **데이터 연결(20 또는 동적)** 두 개를 사용. 프로토콜이 두 소켓을 쓰는 대표 예.
-
-**Telnet (23 포트)**: 초기엔 원격 셸용이었지만 현대엔 **평문 TCP 디버깅 도구**로 쓴다.
-
-```bash
-$ telnet www.example.com 80
-GET / HTTP/1.0
-<빈 줄>
-<응답 HTML 이 뜬다>
-```
-
-HTTP/SMTP/POP3 같은 텍스트 프로토콜은 telnet 으로 직접 칠 수 있다.
-
-**→ 상세**: [q09-http-ftp-mime-telnet.md](./q09-http-ftp-mime-telnet.md)
-
----
-
-## §18. 가장 단순한 HTTP 서버 — Tiny 의 구조
-
-지금까지의 모든 층을 합치면 "가장 단순한 서버" 가 만들어진다. CSAPP 의 Tiny 다.
-
-```text
-main
- ├─ Open_listenfd(port)           ← socket+bind+listen
- └─ while (1)
-     ├─ Accept → connfd
-     └─ doit(connfd); Close(connfd)
-
-doit
- ├─ 요청 라인 읽기 (Rio_readlineb)
- ├─ sscanf → method / uri / version
- ├─ read_requesthdrs  ← 빈 줄까지 헤더 소비(쓰진 않음)
- ├─ parse_uri → is_static, filename, cgiargs
- ├─ stat(filename) → 존재/권한 확인
- ├─ static 이면 serve_static
- └─ dynamic 이면 serve_dynamic
-
-serve_static
- ├─ get_filetype → "text/html" 등
- ├─ 응답 헤더 구성 + Rio_writen
- ├─ open + mmap 으로 파일 매핑
- ├─ Rio_writen 으로 본문 전송
- └─ munmap
-```
-
-- **iterative** 서버. 요청 1개씩 순서대로. 수십 qps 까지는 문제 없음.
-- GET 만 지원. cgi-bin 포함이면 dynamic.
-- HTTP/1.0. Connection: close. 매 요청마다 새 TCP.
-
-Tiny 는 "진짜 서버의 뼈대는 이 정도" 를 보여준다. 이후 모든 서버(프록시, 동시성, SQL API 서버)는 이 뼈대를 변형한 것이다.
-
-**→ 상세**: [q12-tiny-web-server.md](./q12-tiny-web-server.md)
-
----
-
-## §19. 동적 콘텐츠 — CGI, fork, dup2, execve
-
-정적 파일만 돌려주면 밋밋하다. **CGI** 는 "요청이 오면 외부 프로그램을 실행해서 그 출력을 응답으로" 쓰는 표준.
-
-```text
-요청:  GET /cgi-bin/adder?15000&213 HTTP/1.0
-
-서버 환경변수 설정:
-  QUERY_STRING = "15000&213"
-  REQUEST_METHOD = "GET"
-  ...
-```
-
-**serve_dynamic 코드** (Tiny Figure 11.31):
+### 11.4 DMA — 커널이 "이 영역을 장치가 직접 건드리게 허락"
 
 ```c
-void serve_dynamic(int fd, char *filename, char *cgiargs) {
-    char buf[MAXLINE], *emptylist[] = { NULL };
+// 커널 드라이버 (간단화)
+dma_addr_t dma_handle;
+void *cpu_vaddr = dma_alloc_coherent(dev, PAGE_SIZE, &dma_handle, GFP_KERNEL);
 
-    sprintf(buf, "HTTP/1.0 200 OK\r\n");     Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Server: Tiny Web Server\r\n"); Rio_writen(fd, buf, strlen(buf));
+// cpu_vaddr   = 커널 VA (CPU 가 쓰는 주소)
+// dma_handle  = 버스 주소 (NIC 이 DMA 에 쓰는 주소)
+```
 
-    if (Fork() == 0) {                        /* child */
-        setenv("QUERY_STRING", cgiargs, 1);
-        Dup2(fd, STDOUT_FILENO);              /* stdout → socket */
-        Execve(filename, emptylist, environ);
+```
+ CPU      ┌────────────┐        ┌────────────┐
+ ────────>│ page cache │        │  NIC 내부  │
+          └────────────┘        └────────────┘
+              ^                        |
+              | DMA 를 통한 장치 쓰기 (읽기도 가능)
+              +────────────────────────+
+              (CPU 안 거침)
+```
+
+**dma_map_single** 은 기존 버퍼를 "DMA 가능" 하게 준비 (IOMMU 가 있으면 이때 주소 번역 테이블 만듦).
+
+### 11.5 MMIO vs DMA 역할 구분
+
+| 동작 | MMIO | DMA |
+| --- | --- | --- |
+| 누가 | CPU | 장치 (NIC) |
+| 크기 | 보통 1~4B 레지스터 | 큰 버퍼 전체 |
+| 용도 | "작업 시작해" / "상태 봐" | 실제 데이터 운반 |
+| 예 | tail pointer write | skb 데이터 -> NIC |
+
+### 11.6 MSI-X 와 NAPI
+
+**MSI-X** = PCIe 장치가 CPU 에 인터럽트를 **특정 메모리 주소에 write 해서** 통지하는 방식. 레거시 INTx pin 이 아니다.
+
+**NAPI** = "인터럽트 받으면 한 번만 깨고, 이후엔 폴링으로 배치 처리". 고속 NIC 이 매 패킷마다 인터럽트를 쏘면 CPU 가 마비되니까.
+
+```c
+// drivers/net/ethernet/intel/e1000e/netdev.c (단순화)
+static irqreturn_t e1000_msix_rx(int irq, void *data) {
+    struct e1000_adapter *adapter = data;
+    // 인터럽트 마스크 off, napi 스케줄
+    napi_schedule_irqoff(&adapter->napi);
+    return IRQ_HANDLED;
+}
+
+static int e1000_clean(struct napi_struct *napi, int budget) {
+    int work_done = e1000_clean_rx_irq(adapter, budget);
+    if (work_done < budget) {
+        napi_complete_done(napi, work_done);
+        // 인터럽트 다시 활성화
     }
-    Wait(NULL);                               /* reap zombie */
+    return work_done;
 }
 ```
 
-네 개의 마법:
-
-- `fork()` : 자식은 부모의 fd 테이블 통째로 복사 → connfd=4 가 자식에게도 4 로 보임
-- `dup2(fd, 1)` : 자식의 stdout 을 socket 에 연결 → 자식이 `printf` 하면 소켓으로 나감
-- `setenv("QUERY_STRING", ...)` : CGI 프로그램이 `getenv` 로 읽을 수 있게 전달
-- `execve(filename, ...)` : 코드만 CGI 프로그램으로 교체(환경변수/fd 는 유지)
-
-**fork 시 fd 테이블이 "통째로 복사된다" 의 진짜 의미**:
-
-부모가 연 **모든 fd** 가 복사된다. 세 개든 천 개든 전부. 파일, 소켓, 파이프, tty, eventfd 등 종류 구분 없이 `struct file` 포인터가 복사되고 참조 카운트가 +1 된다.
-
-```text
-부모 PID=100                    자식 PID=200 (fork 직후)
-fdtable (1024 슬롯)             fdtable (동일 크기, 새 배열)
-  [0]  stdin                      [0]  stdin         ◀─ 같은 struct file
-  [1]  stdout                     [1]  stdout        ◀─ 같은 struct file
-  [2]  stderr                     [2]  stderr        ◀─ 같은 struct file
-  [3]  listenfd (소켓)            [3]  listenfd      ◀─ 복사
-  [4]  connfd #1                  [4]  connfd #1     ◀─ 복사
-  [5]  connfd #2                  [5]  connfd #2     ◀─ 복사
-  [6]  /var/log/server.log        [6]  /var/log/...  ◀─ 복사
-  [7]  DB 커넥션 #1               [7]  DB 커넥션     ◀─ 복사
-   ...                             ...                  ...
-  [997] eventfd                   [997] eventfd     ◀─ 복사
-
-fdtable 크기: 기본 64 슬롯, 필요하면 자동 2배씩 확장.
-상한은 RLIMIT_NOFILE (`ulimit -n`). 리눅스 기본 1024, 서버는 보통 올림.
-```
-
-얕은 복사 (struct file 포인터 공유) 이므로 **파일 offset 이 공유된다**. 자식이 read 로 진행한 위치가 부모에게도 반영.
-
-**CLOEXEC — execve 시 자동 close**:
-
-자식이 `execve` 로 다른 프로그램이 되는 순간, 들고 있던 fd 가 의도치 않게 그쪽에 노출되면 곤란하다. `O_CLOEXEC` (또는 `fcntl(fd, F_SETFD, FD_CLOEXEC)`) 를 걸어두면 fork 때는 복사되지만 execve 때 자동 close 된다. fork+exec 패턴에서는 거의 모든 fd 에 걸어두는 게 안전.
-
-```c
-int fd = open("log.txt", O_RDONLY | O_CLOEXEC);
-int s  = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-```
-
-**→ 상세**: [q11-cgi-fork-args.md](./q11-cgi-fork-args.md)
+> **-> 상세**: [q10-io-bridge.md](./q10-io-bridge.md)
+> IMC/PCH 진화, PCIe TLP 필드, DMA coherent vs streaming, IOMMU(VT-d), cache coherent DMA, 메모리 배리어 (mb/wmb/dma_wmb), MSI-X 설정, NAPI 예산, 프레임 송신 [1]~[9] 와 커널 레이어 매핑.
 
 ---
 
-## §20. Echo 서버와 EOF — 짧은 read/write, 데이터그램
+## §12. 수신 파이프라인 — 프레임이 read() 까지 올라오는 길
 
-**Echo 서버** = 받은 걸 그대로 되돌려주는 가장 단순한 TCP 서버. CSAPP 11.4 의 예제.
+```
+[1] NIC 하드웨어   프레임 수신 -> FCS 검사 OK -> DMA 로 수신 descriptor 의 buf 로 쓰기
+[2] NIC           MSI-X 인터럽트 발사
+[3] 커널          irq handler -> napi_schedule
+[4] NAPI          softirq 에서 rx ring 폴링 -> skb 만듦
+[5] Ethernet      헤더 벗김 (EtherType 판단) -> IP 계층
+[6] IP            헤더 벗김 -> TCP 계층
+[7] TCP           소켓 찾음 (4-tuple 매칭)
+                  sk_receive_queue 에 skb enqueue
+                  process_task 를 깨움 (wait_queue 에서)
+[8] 유저          잠자던 read() 가 깨어나 copy_to_user 로 데이터 받음
+```
+
+**accept 큐와 receive 큐는 다름에 주의**:
+
+```
+ listen 소켓
+   ├── SYN queue        (incomplete, SYN 만 받은 상태)
+   └── accept queue     (ESTABLISHED, 3-way 완료, accept() 가 꺼낼 것)
+
+ connected 소켓
+   └── sk_receive_queue (실제 데이터 skb)
+```
+
+---
+
+## §13. 네 개의 렌즈 — CPU / 메모리 / 커널 / 핸들
+
+같은 통신 이벤트를 보는 네 시점.
+
+```
+ CPU 시점       "어떤 CPU 코어에서, CPL 몇에서, 어떤 명령이 실행 중인가"
+ 메모리 시점    "데이터가 유저 VA / 커널 VA / DMA 버스 어디에 있나"
+ 커널 시점      "어떤 struct 가 어떤 큐/해시/RB 트리에 들어있나"
+ 핸들 시점      "유저가 쥐고 있는 fd / pid / tid 가 어떤 커널 객체를 가리키나"
+```
+
+예: `read(4, buf, 95)` 를 네 렌즈로.
+
+| 렌즈 | 보이는 것 |
+| --- | --- |
+| CPU | CPL 3 -> 0 전환, syscall 진입, 이후 vfs_read 분기 |
+| 메모리 | 커널의 sk_receive_queue -> skb 데이터 -> copy_to_user -> 유저 buf |
+| 커널 | fdtable[4] -> file -> socket -> sock -> sk_receive_queue |
+| 핸들 | fd=4 (유저 쪽 번호), struct file * (커널 포인터) |
+
+> **-> 상세**: [q09-network-cpu-kernel-handle.md](./q09-network-cpu-kernel-handle.md)
+
+---
+
+## §14. 응용 계층 — HTTP / MIME / FTP / Telnet
+
+### 14.1 HTTP 요청/응답 예
+
+```
+ 요청 (클라 -> 서버)
+ ─────────────────
+ GET /home.html HTTP/1.1
+ Host: www.google.com
+ User-Agent: curl/8.0
+ Accept: */*
+ \r\n
+
+ 응답 (서버 -> 클라)
+ ─────────────────
+ HTTP/1.1 200 OK
+ Content-Type: text/html
+ Content-Length: 137
+ \r\n
+ <html>...</html>
+```
+
+### 14.2 HTTP/1.0 vs 1.1
+
+| 관점 | 1.0 | 1.1 |
+| --- | --- | --- |
+| 연결 | 요청마다 새로 | keep-alive 기본 |
+| Host 헤더 | 없어도 됨 | 필수 (가상 호스팅) |
+| 파이프라이닝 | 불가 | 가능 (실제론 잘 안 씀) |
+| chunked encoding | 없음 | 있음 |
+
+### 14.3 MIME 과 Content-Type
+
+| MIME 타입 | 용도 |
+| --- | --- |
+| text/html | HTML |
+| text/plain | 순수 텍스트 |
+| image/png | PNG 이미지 |
+| application/json | JSON |
+| application/octet-stream | 바이너리 기본 |
+| multipart/form-data | 파일 업로드 |
+
+### 14.4 FTP / Telnet
+
+- **FTP** : 제어 연결(21) + 데이터 연결(20 / passive 랜덤). HTTP 이전의 파일 전송.
+- **Telnet** : 평문 원격 쉘. 보안이 없어서 SSH 로 대체됨.
+
+> **-> 상세**: [q11-http-ftp-mime-telnet.md](./q11-http-ftp-mime-telnet.md)
+
+---
+
+## §15. Tiny Web Server — 가장 단순한 HTTP 서버
+
+Tiny (CSAPP 11.6) 의 뼈대:
 
 ```c
-void echo(int connfd) {
-    size_t n;
-    char buf[MAXLINE];
-    rio_t rio;
-
-    Rio_readinitb(&rio, connfd);
-    while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-        /* n == 0 이면 EOF = 상대가 close(FIN) 함 */
-        printf("server received %d bytes\n", (int)n);
-        Rio_writen(connfd, buf, n);
+int main(int argc, char **argv) {
+    int listenfd = Open_listenfd(argv[1]);   // socket + bind + listen
+    while (1) {
+        int connfd = Accept(listenfd, ...);
+        doit(connfd);
+        Close(connfd);
     }
+}
+
+void doit(int fd) {
+    parse_request(fd, ...);
+    if (static)  serve_static(fd, ...);
+    else         serve_dynamic(fd, ...);
 }
 ```
 
-**EOF 의 의미** (TCP 에서):
+**루틴 구조**:
 
-- `read` 가 `0` 을 리턴 = 상대가 close/shutdown 해서 이쪽으로 보낼 게 더 없음.
-- 시그널 아니고 에러 아님. 정상 종료 신호.
+```
+ Tiny
+  ├── main          : listen 루프
+  ├── doit          : 요청 한 건 처리 (정적/동적 분기)
+  ├── read_requesthdrs: HTTP 헤더 읽기/버리기
+  ├── parse_uri     : URI 를 파일명/CGI 인자로 분리
+  ├── serve_static  : 파일 mmap 해서 write
+  ├── get_filetype  : 확장자 -> MIME
+  ├── serve_dynamic : fork + dup2 + execve (§16)
+  └── clienterror   : 4xx/5xx 응답
+```
 
-**short read / short write 와 Rio 래퍼**:
+> **-> 상세**: [q12-tiny-web-server.md](./q12-tiny-web-server.md)
 
-기본 `read/write` 는 "요청한 만큼 꼭 다 읽어/써준다" 가 아니다. 일부만 처리하고 돌아올 수 있다.
+---
 
-왜 short 가 생기나:
-- `read` : 소켓 버퍼에 **지금 들어있는 만큼만** 돌려줌. 4KB 요청해도 1KB 만 올 수 있음.
-- `write` : 송신 버퍼(`sk_sndbuf`)에 들어갈 만큼만 씀. 남으면 호출자가 다시 보내야 함.
-- 시그널 도착으로 `EINTR` 중단되는 경우도 있음.
+## §16. 동적 콘텐츠 — CGI, fork, dup2, execve
 
-그래서 유저가 매번 루프를 돌아야 하는데, 이걸 감싼 게 CSAPP 의 **Rio (Robust I/O)**:
+```
+                     부모(Tiny)
+                        │
+               fork()  ─┤
+                        ├─── 자식 프로세스
+                        │        │
+                        │        │ dup2(connfd, STDOUT_FILENO)
+                        │        │ execve("/cgi-bin/adder", argv, envp)
+                        │        │
+                        │        └── adder 의 printf 가
+                        │            곧바로 클라이언트에게 감
+                        │
+                  wait() 으로 자식 회수
+```
+
+**왜 dup2?** CGI 스크립트는 `printf` 로 쓸 뿐인데, 이 `printf` 가 소켓으로 나가게 하려면 `stdout (fd=1)` 을 `connfd` 로 바꿔 줘야 한다.
+
+**왜 fork?** 자식 프로세스가 독립 주소 공간/환경을 가져야 execve 로 완전히 다른 프로그램이 될 수 있다.
+
+**QUERY_STRING 과 argv**:
+
+```
+ /cgi-bin/adder?x=15&y=27
+
+ 커널: fork -> 자식
+       dup2(connfd, 1)
+       envp["QUERY_STRING"] = "x=15&y=27"
+       execve("/cgi-bin/adder", ["adder"], envp)
+
+ adder 내부:
+   getenv("QUERY_STRING")  -> "x=15&y=27"
+   sscanf 로 파싱 -> 계산 -> printf("%d\n", x+y)
+```
+
+> **-> 상세**: [q13-cgi-fork-args.md](./q13-cgi-fork-args.md)
+
+---
+
+## §17. Echo Server, EOF, Datagram
+
+### 17.1 Echo 서버 루프
 
 ```c
-/* 원하는 n 바이트를 다 쓸 때까지 반복 */
-ssize_t rio_writen(int fd, void *usrbuf, size_t n) {
-    size_t nleft = n;
-    ssize_t nwritten;
-    char *bufp = usrbuf;
-
-    while (nleft > 0) {
-        if ((nwritten = write(fd, bufp, nleft)) <= 0) {
-            if (errno == EINTR) nwritten = 0;   /* 시그널 → 재시도 */
-            else return -1;                      /* 진짜 에러 */
-        }
-        nleft   -= nwritten;
-        bufp    += nwritten;
-    }
-    return n;
+while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+    Rio_writen(connfd, buf, n);   // 받은 만큼 그대로 보냄
 }
 ```
 
-주요 함수:
+### 17.2 EOF 는 "0 바이트 리턴"
 
-- `rio_readn / rio_writen` : n 바이트 다 채울 때까지 루프 (EOF 면 일찍 반환)
-- `rio_readinitb` : 내부 버퍼를 초기화 — 아래 두 버퍼드 함수의 전제
-- `rio_readlineb` : **한 줄씩**(`\n` 까지) 읽는 버퍼드 버전. HTTP 요청 라인 읽기에 쓰임
-- `rio_readnb` : 버퍼드 n바이트 읽기
+| 상황 | read() 리턴 |
+| --- | --- |
+| 정상 데이터 | 양의 정수 |
+| 상대가 close -> FIN | 0 (EOF) |
+| 에러 | -1 (errno 확인) |
+| non-blocking 데이터 없음 | -1 + EAGAIN |
 
-왜 **버퍼드** 가 필요한가: 라인 단위로 읽으려면 1바이트씩 read 하는 게 가장 단순하지만, 매번 syscall 해서 너무 느리다. 내부적으로 큰 청크를 한 번에 읽어두고, 유저에겐 요청한 모양으로 쪼개 돌려준다.
+### 17.3 TCP vs UDP echo
 
-한 줄 요약: **`rio_*` = "short read/write 와 EINTR 을 숨긴 안전한 I/O 래퍼"**.
+```
+ TCP               bytes stream. boundary 없음. 여러 번 write 한 게 한 번 read 에 올 수 있음
+ UDP               datagram. 한 번 send = 한 번 recv (여럿 뭉치지 않음)
+```
 
-**UDP 의 데이터그램**:
-
-- TCP 는 바이트 스트림 → 경계 없음.
-- UDP 는 메시지 단위 → **sendto 한 번 = recvfrom 한 번** 이 데이터그램 1개. 경계가 유지됨.
-- 단 100B 보냈는데 상대 recvfrom 버퍼가 50B 면 잘림(+ `MSG_TRUNC`).
-
-**→ 상세**: [q08-echo-server-datagram-eof.md](./q08-echo-server-datagram-eof.md)
+> **-> 상세**: [q14-echo-server-datagram-eof.md](./q14-echo-server-datagram-eof.md)
 
 ---
 
-## §21. Tiny → Proxy — "서버이자 클라이언트"
+## §18. Proxy — 서버이자 클라이언트
 
-프록시는 **중간 서버**다. 클라이언트에게는 서버이고, 오리진 서버에게는 클라이언트다.
-
-```text
-클라 ──HTTP──▶ 프록시 ──HTTP(변환)──▶ 오리진
-             │
-             │ Tiny 의 main 루프 + doit 을 그대로
-             │ 다만 "응답을 만들어라" 대신 "상위 서버에 연결해 받아라"
+```
+  [클라이언트] <-- TCP --> [Proxy] <-- TCP --> [Origin 서버]
+                             |
+                             ├─ accept()  쪽 = 서버처럼
+                             └─ connect() 쪽 = 클라이언트처럼
 ```
 
-Tiny 대비 바뀌는 것:
-
-1. `parse_uri` → **절대 URL 파서** (host/port/path 로 쪼개기)
-2. 헤더 변환 → HTTP/1.1 → 1.0, Connection: close, Proxy-Connection: close
-3. `serve_static/serve_dynamic` → `open_clientfd(host, port)` + `Rio_writen` + `Rio_readnb` + 릴레이
-
-**프록시 종류**:
-- **Forward** : 사내 → 바깥 나갈 때 통과 (클라가 명시적으로 설정)
-- **Reverse** : 외부 → 내부 서버 분배 (nginx, Cloudflare, ALB)
-- **Caching** : 응답 저장 재사용 (Squid, Varnish, CDN)
-- **Tunnel** : CONNECT 로 TCP 파이프 (HTTPS 프록시)
-
-**캐시를 붙이면** (Proxy Lab Part B):
-- key = URL
-- HIT → 바로 반환, MISS → 오리진 가서 받고 저장
-- MAX_OBJECT_SIZE 초과는 패스, LRU eviction
-- **readers-writers lock** 필수 (동시성)
-
-**→ 상세**: [q13-proxy-extension.md](./q13-proxy-extension.md)
-
----
-
-## §22. Iterative → Concurrent — 스레드 풀, epoll, io_uring
-
-Tiny 는 iterative. 연결 한 번에 하나씩. 실전은 동시에 수천~수십만 처리해야 한다. 세 가지 전략.
-
-**(1) 요청마다 스레드 생성**: 단순, 하지만 생성 비용.
-
-**(2) 스레드 풀 + blocking I/O** (이번 주 SQL API 서버가 택하는 방식):
-
-```text
-main 스레드: accept 만
-         → connfd 를 작업 큐에 enqueue (sbuf_insert)
-
-worker N 개: 큐에서 dequeue (sbuf_remove, condvar wait)
-           → doit(connfd) → close
-```
-
-- mutex + condvar 로 큐 동기화
-- 각 worker 는 독립적으로 blocking read/write
-- 하나가 block 되어도 다른 worker 가 계속 일함
-- 장점: 코드 단순, "I/O 블로킹을 스레드 개수만큼 병렬화"
-- 단점: 연결 수 > 스레드 수 면 대기, 스레드당 8MB 스택
-
-**(3) 이벤트 루프 + epoll (Reactor)**:
+한 프로세스 안에 **두 소켓**이 있다.
 
 ```c
-int ep = epoll_create1(0);
-epoll_ctl(ep, EPOLL_CTL_ADD, listenfd, &ev);
+int connfd  = Accept(listenfd, ...);              // 클라 -> proxy
+int backfd  = Open_clientfd(origin_host, 80);     // proxy -> origin
+
+// 클라가 보낸 것을 읽어 origin 에 쓰기
+n = Rio_readnb(&rio_client, buf, ...);
+Rio_writen(backfd, buf, n);
+
+// origin 응답을 읽어 클라에 쓰기
+n = Rio_readnb(&rio_back, buf, ...);
+Rio_writen(connfd, buf, n);
+```
+
+Proxy 는 동시에 여러 클라를 처리해야 하므로 §19 의 스레드 풀/epoll 과 필연적으로 합쳐진다.
+
+> **-> 상세**: [q15-proxy-extension.md](./q15-proxy-extension.md)
+
+---
+
+## §19. Iterative -> Concurrent — 스레드 풀, epoll, io_uring
+
+### 19.1 Iterative 서버의 한계
+
+```c
 while (1) {
-    int n = epoll_wait(ep, events, MAX, -1);
-    for (i = 0; i < n; i++) {
-        if (events[i].data.fd == listenfd) {
-            int cfd = accept4(listenfd, ..., SOCK_NONBLOCK);
-            epoll_ctl(ep, EPOLL_CTL_ADD, cfd, &ev_in);
-        } else {
-            handle_request(events[i].data.fd);
-        }
-    }
+    connfd = accept(...);
+    doit(connfd);       // 이거 끝날 때까지 다음 클라가 못 들어옴
+    close(connfd);
 }
 ```
 
-- 한 스레드가 수만 fd 를 관리. 커널이 "준비된 fd" 만 알려줌.
-- 스케일: nginx, Node.js, Netty, Go 런타임.
-- 단점: 상태 머신 작성 필요. 콜백 지옥 → async/await 으로 완화.
+### 19.2 세 가지 동시성 모델
 
-**(4) io_uring** (리눅스 5.1+) :
+| 모델 | 방식 | 장점 | 단점 |
+| --- | --- | --- | --- |
+| Process per connection | accept 후 fork | 격리 강함 | fork 비싸고 메모리 |
+| Thread per connection | accept 후 pthread_create | 메모리 공유, 저렴 | 10k 스레드면 스택만 10GB |
+| Event-driven (epoll) | 한 스레드가 수천 fd | 스레드 수 적음 | 복잡. blocking syscall 하나면 망함 |
 
-- submission/completion 링 버퍼 두 개로 "시스템콜 자체를 배치"
-- 컨텍스트 스위치 거의 사라짐
-- 극한 성능 인프라용
+### 19.3 Thread Pool
 
-**선택 기준 요약**:
+```
+ ┌── listen accept 루프 (1 스레드) ──┐
+ │   while(1) {                       │
+ │     connfd = accept();             │
+ │     queue.push(connfd);            │   <- Producer
+ │     signal(cond);                  │
+ │   }                                │
+ └────────────────────────────────────┘
+                 │
+                 v   (mutex / cond)
+ ┌── worker 스레드들 (N 개) ──────────┐
+ │   while(1) {                       │
+ │     connfd = queue.pop();           │   <- Consumer
+ │     doit(connfd);                  │
+ │   }                                │
+ └────────────────────────────────────┘
+```
 
-| 상황 | 선택 |
-|---|---|
-| 수천 연결, 단순성 우선 | 스레드 풀 (= 이번 주) |
-| 수만~수십만 연결, 레이턴시 민감 | epoll/kqueue |
-| 극한 성능, 커스텀 | io_uring, DPDK |
+### 19.4 epoll 과 io_uring
 
-> **동시성/락 심화**: 스레드 풀에서 실제로 필요한 **뮤텍스/조건 변수/데드락/thread-safe/RWLock/SQL API 서버 실전 락 설계** 는 별도 문서 [q15-concurrency-locks.md](./q15-concurrency-locks.md) 에서 카페 비유로 상세 다룬다.
+```
+ select   : O(n), fd 최대 1024, 커널-유저 메모리 복사 매번
+ poll     : O(n), 사이즈 제한 없음
+ epoll    : O(1), 인터레스트 세트 커널이 유지
+ io_uring : 비동기 ring 버퍼. syscall 도 전부 큐에 제출
+```
 
-**→ 상세**: [q14-thread-pool-async.md](./q14-thread-pool-async.md), [q15-concurrency-locks.md](./q15-concurrency-locks.md)
+> **-> 상세**: [q16-thread-pool-async.md](./q16-thread-pool-async.md)
 
 ---
 
-## §23. 마무리 — 이번 주 SQL API 서버로의 연결
+## §20. 동시성과 락 — 기본
 
-지금까지 쌓은 모든 것이 이번 주 과제의 그림으로 수렴한다.
+### 20.1 race condition 이 발생하는 순간
 
-```text
-[클라이언트]
-   │ HTTP 요청 (본문에 SQL)
-   ▼
-[SQL API 서버]  ← Tiny 의 "main + accept 루프" + "스레드 풀 worker"
-   │
-   ├─ 요청 파싱     (Tiny 의 doit 와 같은 자리)
-   ├─ SQL 추출      (parse_uri 대신 "본문에서 SQL 꺼내기")
-   ├─ DB 실행       (serve_static 대신 "DB 엔진에 실행")
-   ├─ 결과 직렬화    (HTML/JSON 으로)
-   └─ HTTP 응답
-
-[DB 엔진]
+```c
+int counter = 0;
+// 두 스레드가 동시에
+counter++;   // 이건 원자적이지 않다
 ```
 
-매핑하면:
+기계 수준:
 
-| Tiny 구성 요소 | SQL API 서버의 역할 |
-|---|---|
-| main + accept | 동일 |
-| Rio_readlineb / read_requesthdrs | HTTP 요청 파싱 |
-| parse_uri | SQL 본문 추출 |
-| serve_static/dynamic | DB 쿼리 실행 + 결과 직렬화 |
-| (iterative) | **스레드 풀로 동시성 확장** |
+```
+ load  [counter], %eax
+ add   $1, %eax
+ store %eax, [counter]
+```
 
-이번 문서 순서대로 이해했다면:
+이 세 명령 사이에 context switch 가 일어나면 다른 스레드가 끼어들 수 있다.
 
-- "왜 sockfd 를 read/write 로 다룰 수 있나?" → §6 VFS + sockfs
-- "write 한 번이 어떻게 NIC 까지 가나?" → §9 파이프라인
-- "TCP 가 왜 순서 보장이 되나?" → §11 seq/ack
-- "프레임이 라우터를 지날 때 뭐가 바뀌나?" → §13 MAC/IP
-- "왜 스레드 풀을 쓰나?" → §22 concurrent
+### 20.2 기본 도구
 
-각 의문이 이 문서의 한 섹션으로 매핑된다.
+| 도구 | 용도 | 비용 |
+| --- | --- | --- |
+| `atomic` | 단일 변수 증감/교환 | 싸다 (CAS 1회) |
+| `mutex` | 임계 구역 보호 | 중 (futex, 슬립) |
+| `rwlock` | 읽기 N, 쓰기 1 | 중 |
+| `spinlock` | 짧은 임계, 인터럽트 컨텍스트 | 경우에 따라 매우 쌈 |
+| `cond var` | "어떤 조건 될 때까지 대기" | mutex 와 세트 |
+| `semaphore` | N 개 자원 카운트 | 중 |
+
+### 20.3 올바른 패턴: lock ordering
+
+```c
+// 데드락 방지: 항상 주소가 작은 쪽을 먼저 잠금
+Account *first  = (a < b) ? a : b;
+Account *second = (a < b) ? b : a;
+pthread_mutex_lock(&first->lock);
+pthread_mutex_lock(&second->lock);
+// ... 작업 ...
+pthread_mutex_unlock(&second->lock);
+pthread_mutex_unlock(&first->lock);
+```
+
+> **-> 상세**: [q17-concurrency-locks.md](./q17-concurrency-locks.md)
+
+---
+
+## §21. 스레드 동시성 실패 13선 [DFS 심화 구역]
+
+이 섹션은 "락을 안 걸면 실제로 어떻게 죽는가" 의 실전. 각 시나리오의 종료 신호와 원인.
+
+### 21.1 스레드는 주소 공간 공유 실행 흐름
+
+```
+ task_struct (thread 1) ─┐
+ task_struct (thread 2) ─┼── 같은 mm_struct (페이지 테이블) 공유
+ task_struct (thread 3) ─┘      같은 files_struct 공유
+                               각자 stack / registers 만 다름
+```
+
+그래서 **한 스레드의 잘못이 프로세스 전체를 죽인다**.
+
+### 21.2 MESI 캐시 일관성
+
+```
+ 상태      의미                          설명
+ M (Modified)   나만 가짐, 수정됨          메모리는 stale
+ E (Exclusive)  나만 가짐, 수정 안 됨      깨끗
+ S (Shared)     여럿이 읽기만 함
+ I (Invalid)    버려짐
+
+ 코어 A 가 쓰기 -> 다른 코어에 "Invalidate" 브로드캐스트 (RFO)
+ 이 때 버스/링 트래픽이 생기고, 읽는 쪽이 stall 걸린다.
+```
+
+**False Sharing** : 서로 다른 변수가 같은 캐시 라인(64B) 에 있으면 서로 무관한데도 invalidate 가 튀어서 느려진다.
+
+### 21.3 13개 실패 시나리오 요약
+
+| # | 시나리오 | 증상 | 신호/종료 |
+| --- | --- | --- | --- |
+| S1 | Lost Update (count++) | 카운터 손실 | 데이터 오염 (크래시 없음) |
+| S2 | Torn Write | 절반만 갱신된 값 | 데이터 오염 |
+| S3 | Use-After-Free | 이미 free 된 포인터 역참조 | SIGSEGV |
+| S4 | Double-Free | glibc 감지 -> abort | SIGABRT |
+| S5 | Null Deref | NULL 역참조 | SIGSEGV |
+| S6 | Publish-Before-Init | 초기화 끝나기 전 객체 노출 | SIGSEGV / 논리 오류 |
+| S7 | Linked List 경쟁 | 노드 손실 / 순환 | 무한 루프 또는 SIGSEGV |
+| S8 | ABA | CAS 가 속음 | 데이터 오염 |
+| S9 | Deadlock | 두 스레드 영구 대기 | 프로세스 hang |
+| S10 | errno 경쟁 | 잘못된 에러 처리 | 논리 오류 |
+| S11 | malloc 경합 | 힙 손상 | SIGABRT |
+| S12 | Signal 안전성 위반 | 핸들러에서 malloc | 데드락 또는 SIGSEGV |
+| S13 | False Sharing | 성능 급락 | 크래시 없음, 처리량 저하 |
+
+각 시나리오에 대해 ① 코드 ② 실제 실행 트레이스 ③ 증상 ④ 수정 을 q18 에서 상세히 다룬다.
+
+> **-> 상세**: [q18-thread-concurrency.md](./q18-thread-concurrency.md)
+> 13 개 시나리오 코드/어셈블리/수정안 + Linux 커널 락 결정 트리 (atomic_t / spinlock / mutex / rwsem / seqlock / RCU) + TSan/Helgrind/KCSAN.
+
+---
+
+## §22. 마무리 — 이번 주 SQL API 서버로의 연결
+
+이번 주 과제의 골격은 결국 아래 흐름의 구현이다.
+
+```
+[클라] ── HTTP(GET/POST) ──> [API 서버]
+                                │
+                                ├─ accept (§8, §15)
+                                ├─ parse request  (§14)
+                                ├─ thread pool 에서 실행 (§19)
+                                │     ├─ mutex 로 DB connection 풀 보호 (§20, §21)
+                                │     └─ SQL 실행 -> JSON 직렬화
+                                │
+                                └─ write response (§10 송신 파이프라인)
+```
+
+읽기 순서 권장:
+
+```
+ 1일차   §1 ~ §5                큰 그림 + 유저/커널 경계
+ 2일차   §6 (-> q04 전체)        파일시스템 바닥
+ 3일차   §7 ~ §10 (+ q05,q06,q07,q08)    소켓 + 송신 파이프라인
+ 4일차   §11 (-> q10 전체)       I/O 브릿지 바닥
+ 5일차   §12 ~ §18 (+ q09,q11~q15)        수신 + 응용 + Tiny/CGI/Echo/Proxy
+ 6일차   §19 ~ §21 (-> q16,q17,q18 전체)  동시성 + 실패 시나리오 바닥
+ 7일차   과제 구현 + 리뷰
+```
 
 ---
 
 ## 참고 연결
 
-- [README.md — 문서 전체 인덱스](./README.md)
-- [csapp-11/02-keyword-tree.md](../../csapp-11/02-keyword-tree.md) — CSAPP 11장 키워드 트리
-- [csapp-11/05-ch11-sequential-numeric-walkthrough.md](../../csapp-11/05-ch11-sequential-numeric-walkthrough.md) — 95B HTTP 요청의 수치적 전 과정
-- [csapp-11/07-ch11-code-reference.md](../../csapp-11/07-ch11-code-reference.md) — 주요 구조체/함수 소스 레퍼런스
+### q 문서 전체 링크 (DFS 순서)
 
-### q 문서 전체 링크
-
-- [q01-network-hardware.md](./q01-network-hardware.md) — §2 상세
-- [q02-host-network-pipeline.md](./q02-host-network-pipeline.md) — §9, §15 상세
-- [q03-tcp-udp-socket-syscall.md](./q03-tcp-udp-socket-syscall.md) — §8, §11 상세
-- [q04-ip-address-byte-order.md](./q04-ip-address-byte-order.md) — §3 상세
-- [q05-dns-domain-cloudflare.md](./q05-dns-domain-cloudflare.md) — §4 상세
-- [q06-socket-principle.md](./q06-socket-principle.md) — §7 상세
-- [q07-ch11-4-sockets-interface.md](./q07-ch11-4-sockets-interface.md) — §8 상세
-- [q08-echo-server-datagram-eof.md](./q08-echo-server-datagram-eof.md) — §20 상세
-- [q09-http-ftp-mime-telnet.md](./q09-http-ftp-mime-telnet.md) — §17 상세
-- [q10-network-cpu-kernel-handle.md](./q10-network-cpu-kernel-handle.md) — §16 상세
-- [q11-cgi-fork-args.md](./q11-cgi-fork-args.md) — §19 상세
-- [q12-tiny-web-server.md](./q12-tiny-web-server.md) — §18 상세
-- [q13-proxy-extension.md](./q13-proxy-extension.md) — §21 상세
-- [q14-thread-pool-async.md](./q14-thread-pool-async.md) — §22 상세
-- [q15-concurrency-locks.md](./q15-concurrency-locks.md) — §22 동시성/락 심화 (카페 비유, SQL API 서버 실전)
+1. [q01-network-hardware.md](./q01-network-hardware.md) — 네트워크 하드웨어 (Ethernet/Bridge/Router/LAN/WAN/프레임 비트맵)
+2. [q02-ip-address-byte-order.md](./q02-ip-address-byte-order.md) — IP 주소 체계 / 바이트 순서
+3. [q03-dns-domain-cloudflare.md](./q03-dns-domain-cloudflare.md) — DNS / Cloudflare
+4. [q04-filesystem.md](./q04-filesystem.md) — 파일시스템 완전 해부 (VFS/ext4/페이지캐시/blk-mq)
+5. [q05-socket-principle.md](./q05-socket-principle.md) — 소켓 3층 구조
+6. [q06-ch11-4-sockets-interface.md](./q06-ch11-4-sockets-interface.md) — 11.4 Sockets Interface 함수 + addrinfo
+7. [q07-tcp-udp-socket-syscall.md](./q07-tcp-udp-socket-syscall.md) — TCP/UDP, 소켓 시스템콜
+8. [q08-host-network-pipeline.md](./q08-host-network-pipeline.md) — 호스트 송신 파이프라인
+9. [q09-network-cpu-kernel-handle.md](./q09-network-cpu-kernel-handle.md) — CPU/메모리/커널/핸들 네 렌즈
+10. [q10-io-bridge.md](./q10-io-bridge.md) — I/O Bridge 완전 해부 (IMC/PCH/PCIe/DMA/MSI-X)
+11. [q11-http-ftp-mime-telnet.md](./q11-http-ftp-mime-telnet.md) — HTTP/FTP/MIME/Telnet
+12. [q12-tiny-web-server.md](./q12-tiny-web-server.md) — Tiny Web Server
+13. [q13-cgi-fork-args.md](./q13-cgi-fork-args.md) — CGI / fork / dup2
+14. [q14-echo-server-datagram-eof.md](./q14-echo-server-datagram-eof.md) — Echo Server / EOF / Datagram
+15. [q15-proxy-extension.md](./q15-proxy-extension.md) — Proxy
+16. [q16-thread-pool-async.md](./q16-thread-pool-async.md) — Thread Pool / epoll / io_uring
+17. [q17-concurrency-locks.md](./q17-concurrency-locks.md) — 동시성과 락 기본
+18. [q18-thread-concurrency.md](./q18-thread-concurrency.md) — 스레드 동시성 실패 13선
