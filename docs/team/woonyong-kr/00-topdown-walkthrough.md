@@ -245,7 +245,7 @@ task_struct (PID=1234)
 
 - fd 는 이 배열의 **인덱스**일 뿐이다.
 - 프로세스마다 고유. 같은 fd 번호가 다른 프로세스에선 다른 파일.
-- `fork()` 하면 자식이 테이블 복사. 그래서 부모-자식이 같은 fd 번호로 같은 file 을 공유.
+- `fork()` 하면 자식이 **현재 열려있는 모든 fd 를 전부** 복사(§19 참조). 몇 개든, 종류가 무엇이든(파일/소켓/파이프/tty) 가리지 않는다. fdtable 은 기본 64 슬롯, 필요시 자동 확장, 상한은 `RLIMIT_NOFILE`.
 
 **struct file vs struct inode vs struct dentry**:
 
@@ -443,32 +443,128 @@ struct sk_buff
 - `skb_push(len)` 은 data 포인터를 앞으로 이동해서 헤더를 앞에 붙일 공간을 만든다. 그래서 TCP→IP→Ethernet 으로 내려가면서 **헤더를 앞에 "밀어 넣을" 수 있다**.
 - `skb_pull(len)` 은 반대. 수신 때 헤더를 벗긴다.
 
-**sk_write_queue / sk_receive_queue**:
+**sk_write_queue / sk_receive_queue — 소켓마다 한 쌍씩**:
 
-각 struct sock 은 두 개의 FIFO 리스트를 가진다.
+중요한 점: 이 두 큐는 전역 단일이 아니라 **각 struct sock 안에 박혀 있는 리스트 헤드**다. 소켓 하나당 한 쌍. 관리 주체는 커널의 TCP/UDP 프로토콜 계층(`net/ipv4/tcp.c`, `net/core/sock.c`).
 
 ```text
-sk_write_queue   [skb A] → [skb B] → [skb C] → NULL
-                   ↑                    ↑
-                   오래된 것(head)       새 것(tail)
+커널 DRAM 안
 
-sk_receive_queue [skb D] → [skb E] → NULL
+struct sock (소켓 A)
+  ├── sk_write_queue  = { prev, next, qlen=3 }
+  │       │
+  │       ▼
+  │   [skb1] ⇄ [skb2] ⇄ [skb3]        ← 이중 연결 리스트
+  │     ↑                    ↑
+  │     오래된 것(head)        새 것(tail)
+  └── sk_receive_queue = { prev, next, qlen=1 }
+          │
+          ▼
+      [skb_rx1]
+
+struct sock (소켓 B) ─ 자기만의 write/receive_queue 를 따로
+struct sock (소켓 C) ─ ...
 ```
 
-- 유저가 write() → 새 skb 가 write_queue tail 에 추가
-- TCP 가 실제로 보낼 때 → head 에서 꺼내 IP 로 넘김
+동작:
+
+- 유저가 `write()` → 새 skb 가 write_queue **tail** 에 추가
+- TCP 가 실제로 내보낼 때 → **head** 부터 꺼내 IP 로 넘김
 - NIC 에서 수신된 skb → receive_queue tail 에 추가
-- 유저가 read() → head 에서 꺼내 copy_to_user
+- 유저가 `read()` → head 에서 꺼내 copy_to_user
 
-**slab allocator**:
+**skb 한 개는 "메타데이터 + 데이터" 두 조각**:
 
-sk_buff 는 끊임없이 할당/해제된다. 초당 수백만 개 가능. 이를 빠르게 하려고 커널은 **slab** 이라는 "같은 크기 객체를 미리 모아둔 풀" 을 쓴다. `kmem_cache_alloc(skbuff_head_cache)` 같은 식. 새 페이지를 통째로 잡아두고 그 안에서 고정 크기로 나눠쓴다.
+```text
+skb 하나
+  ① struct sk_buff (메타데이터, 약 224B)    ← slab "skbuff_head_cache" 에서 할당
+  ② 데이터 영역 (패킷 바이트)                ← page_frag_alloc (페이지 조각)
+```
+
+- 작은 패킷(MTU 1500 정도): 한 페이지(4KB) 안에서 조각을 떼서 씀.
+- 큰 데이터(TSO 64KB 세그먼트 등): 한 skb 에 **흩어진 페이지 여러 조각**이 `skb_frag[]` 배열로 매달림. scatter-gather DMA 로 NIC 에 전송될 때 하나의 프레임처럼 이어붙여진다. **연속된 물리 메모리일 필요가 없다**.
+
+**sk_sndbuf / sk_rcvbuf — 큐의 상한과 백프레셔**:
+
+큐가 무한정 커지면 DRAM 이 터진다. 커널은 소켓마다 두 상한을 둔다.
+
+```text
+/proc/sys/net/ipv4/tcp_wmem
+4096   16384    4194304       ← min   default   max
+       (16 KB)   (4 MB)
+
+setsockopt(fd, SOL_SOCKET, SO_SNDBUF, ...) 로 개별 설정 가능.
+전역 상한은 net.core.wmem_max.
+```
+
+**한도를 넘어도 연결을 끊지 않는다. 속도를 줄인다**.
+
+- **송신 쪽이 꽉 찬 경우** (내가 너무 빨리 write):
+  - blocking 소켓 → `write()` 가 block, 공간 생기면 깨어남
+  - non-blocking → `write()` 가 -1, `errno = EAGAIN/EWOULDBLOCK`
+- **수신 쪽이 꽉 찬 경우** (상대가 빨리 보내는데 내가 안 읽음):
+  - TCP 가 ACK 의 `Window` 필드를 0 으로 알려줌 (= Zero Window)
+  - 상대 TCP 가 송신을 멈춤
+  - 내가 `read()` 로 큐를 비우면 window 가 다시 열리고 상대가 재개
+
+"연결 닫힘(RST)" 은 별개 사건이다. 버퍼가 꽉 찼다는 이유만으로 RST 를 보내지 않는다.
+
+**slab allocator — 계란판 모형으로**:
+
+`sk_buff` 는 초당 수백만 번 할당/해제된다. 매번 페이지 받아서 224B 만 쓰고 버리면 낭비라, 커널은 **slab** 이라는 "같은 크기 객체 전용 풀" 을 쓴다.
+
+두 단계로 쌓여 있다.
+
+```text
+[ Buddy Allocator ]    ← 페이지(4KB) 단위 관리인
+                          2^n 페이지 크기로 반씩 쪼개고, 반납시 짝꿍과 다시 합침(단편화 방지)
+       │ "페이지 줘"
+       ▼
+[ Slab Allocator  ]    ← "같은 크기 객체 N칸짜리 계란판" 만듦
+   대표 cache:
+     - skbuff_head_cache    224B
+     - TCPv4                2304B
+     - inode_cache          592B
+     - kmalloc-64, -128 ...
+
+계란판 모형:
+  buddy 에서 4KB 페이지 한 장 받음
+  → 224B 씩 줄 그어 18칸짜리 계란판 완성 (= slab 하나)
+  → 요청 올 때마다 빈 칸 하나씩 반환
+  → 18칸 다 차면 buddy 에 새 페이지 요청 → 새 계란판 추가 (이제 36칸)
+
+확인:  /proc/slabinfo
+  skbuff_head_cache   12340 / 12800   objsize=224  objperslab=36  pagesperslab=2
+  (현재 12,340칸 사용 / 총 12,800칸. 2페이지짜리 slab 하나에 36칸.)
+```
+
+**요청 경로 요약**:
+
+```text
+kmem_cache_alloc(skbuff_head_cache)
+  ├─ 현재 CPU 의 per-CPU 캐시에 남는 칸 있음 → 바로 반환 (락 없음, 최고속)
+  ├─ 없으면 slab 에서 다음 칸 할당 (가벼운 락)
+  └─ slab 도 꽉 찼으면 buddy 에 새 페이지 요청 → 새 slab 만들어 칸 반환
+```
+
+**SLAB / SLUB / SLOB** 은 "Slab" 이라는 개념의 **구현 엔진** 이름. API 는 모두 동일.
+- SLAB : 옛 구현, 복잡
+- SLUB : 현대 리눅스 기본(2.6.23+), 단순하고 빠름
+- SLOB : 초소형 임베디드용
+
+커스텀 커널이 아니면 보통 SLUB 가 돌고 있다. 신경 쓸 필요 없음.
 
 ---
 
 ## §11. TCP 의 핵심 — seq/ack/flag/window 를 비트 단위로
 
 TCP 헤더 (20B, 옵션 제외):
+
+> **비트맵 읽는 법**: 이 다이어그램은 마크다운 표가 아니라 **RFC 스타일 비트 레이아웃**이다.
+> - 맨 위 눈금 `0 1 2 … 31` 은 **비트 번호**.
+> - 한 줄 = **32비트 = 4바이트**.
+> - 줄이 5개면 20바이트, 6개면 24바이트 식으로 읽는다.
+> - 한 줄 안에 칸이 두 개면 2+2바이트, 칸이 4개면 1+1+1+1바이트.
 
 ```text
  0                   1                   2                   3
@@ -487,6 +583,8 @@ TCP 헤더 (20B, 옵션 제외):
 |                    Options (길이 가변)                         |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
+
+첫 줄 해석: `Source Port` (비트 0~15, 2바이트) + `Destination Port` (비트 16~31, 2바이트). 전체 5행 = **20바이트 고정 헤더**.
 
 **seq / ack — 바이트 번호** (내 대화에서 이미 짚었던 것):
 
@@ -535,6 +633,9 @@ TCP 헤더 (20B, 옵션 제외):
 
 IP 헤더 (20B, 옵션 제외):
 
+> **읽는 법** (TCP 와 동일): 한 줄 = 32비트 = 4바이트. 5행이면 20바이트.
+> 첫 줄은 4비트+4비트+8비트+16비트 식으로 쪼개져 있다. 칸 위에 쓰인 숫자가 해당 필드의 **비트 폭**.
+
 ```text
 +---+---+---+---+---+---+---+---+
 | Ver=4 | IHL=5 |   TOS         |   Total Length (16)           |
@@ -548,6 +649,12 @@ IP 헤더 (20B, 옵션 제외):
 |                  Destination IP Address (32)                  |
 +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 ```
+
+첫 줄 풀어 읽기:
+- `Version=4` → IPv4 (4비트)
+- `IHL=5` → 헤더 길이 5 × 4바이트 = **20바이트** (4비트)
+- `TOS` → 서비스 타입 (8비트)
+- `Total Length` → 헤더+본문 총 길이 (16비트)
 
 - **TTL (Time To Live)** : 라우터 한 번 통과할 때마다 1 감소. 0 되면 버리고 ICMP Time Exceeded 로 돌려줌. 루프 방지. 리눅스 기본 64, Windows 128.
 - **Protocol** : 상위 계층 식별. 6=TCP, 17=UDP, 1=ICMP.
@@ -703,6 +810,38 @@ TX ring (송신)
 
 - **드라이버** = 소프트웨어. 커널 모듈. `drivers/net/ethernet/...` 의 C 코드. descriptor ring 관리, skb 와의 연결, IRQ 처리.
 - **NIC 내부** = 하드웨어. PCIe 카드 안의 칩들. 실제 프레임 송수신.
+
+**TSO (TCP Segmentation Offload) & Scatter-Gather DMA**:
+
+TSO 는 "CPU 가 TCP 를 쪼개지 말고 NIC 가 대신 쪼개" 라고 떠넘기는 기능.
+
+```text
+[ TSO 없음 ]
+  CPU: 64KB 를 1460B × 45개 세그먼트로 손수 쪼갬
+       각 세그먼트마다 TCP 헤더 만들고 체크섬 계산
+       → 45회 헤더 작업
+
+[ TSO 있음 ]
+  CPU: 64KB 덩어리 1개 + "이걸 MSS=1460 으로 쪼개줘" 만 NIC 에 넘김
+  NIC: 내부에서 45개 프레임 만들고 헤더 복제, 체크섬, 송출
+       → CPU 는 1번만 작업
+```
+
+여기서 핵심: "64KB 덩어리" 가 **연속된 물리 메모리일 필요가 없다**. skb 는 `skb_frag[]` 배열로 흩어진 페이지 조각들을 엮는다.
+
+```text
+skb
+  ├── head/data/tail  (선형 영역 — 헤더가 들어가는 첫 조각)
+  └── frags[]
+       ├── { page 물리주소 A, offset 0, 4096 }
+       ├── { page 물리주소 B, offset 0, 4096 }
+       ├── { page 물리주소 C, offset 0, 4096 }
+       └── ... (최대 MAX_SKB_FRAGS, 보통 17)
+```
+
+NIC 의 DMA 엔진은 **scatter-gather DMA** 를 지원해서 여러 물리주소를 받아 순서대로 끌어간다. 즉 **메모리는 흩어져 있어도 전선에 나갈 땐 이어진다**.
+
+정리: "페이지" 는 메모리 관리 단위(4KB), "TSO 세그먼트" 는 NIC 에 넘기는 덩어리 크기(최대 ~64KB). 서로 다른 층이다.
 
 **IRQ (인터럽트) 처리**:
 
@@ -903,7 +1042,38 @@ void serve_dynamic(int fd, char *filename, char *cgiargs) {
 - `setenv("QUERY_STRING", ...)` : CGI 프로그램이 `getenv` 로 읽을 수 있게 전달
 - `execve(filename, ...)` : 코드만 CGI 프로그램으로 교체(환경변수/fd 는 유지)
 
-이게 CGI 가 "서버와 분리된 별도 프로세스" 를 깔끔하게 쓰는 원리. 대신 매 요청마다 fork+exec 비용이 든다 → FastCGI, WSGI, 서블릿이 이걸 재사용 풀로 해결.
+**fork 시 fd 테이블이 "통째로 복사된다" 의 진짜 의미**:
+
+부모가 연 **모든 fd** 가 복사된다. 세 개든 천 개든 전부. 파일, 소켓, 파이프, tty, eventfd 등 종류 구분 없이 `struct file` 포인터가 복사되고 참조 카운트가 +1 된다.
+
+```text
+부모 PID=100                    자식 PID=200 (fork 직후)
+fdtable (1024 슬롯)             fdtable (동일 크기, 새 배열)
+  [0]  stdin                      [0]  stdin         ◀─ 같은 struct file
+  [1]  stdout                     [1]  stdout        ◀─ 같은 struct file
+  [2]  stderr                     [2]  stderr        ◀─ 같은 struct file
+  [3]  listenfd (소켓)            [3]  listenfd      ◀─ 복사
+  [4]  connfd #1                  [4]  connfd #1     ◀─ 복사
+  [5]  connfd #2                  [5]  connfd #2     ◀─ 복사
+  [6]  /var/log/server.log        [6]  /var/log/...  ◀─ 복사
+  [7]  DB 커넥션 #1               [7]  DB 커넥션     ◀─ 복사
+   ...                             ...                  ...
+  [997] eventfd                   [997] eventfd     ◀─ 복사
+
+fdtable 크기: 기본 64 슬롯, 필요하면 자동 2배씩 확장.
+상한은 RLIMIT_NOFILE (`ulimit -n`). 리눅스 기본 1024, 서버는 보통 올림.
+```
+
+얕은 복사 (struct file 포인터 공유) 이므로 **파일 offset 이 공유된다**. 자식이 read 로 진행한 위치가 부모에게도 반영.
+
+**CLOEXEC — execve 시 자동 close**:
+
+자식이 `execve` 로 다른 프로그램이 되는 순간, 들고 있던 fd 가 의도치 않게 그쪽에 노출되면 곤란하다. `O_CLOEXEC` (또는 `fcntl(fd, F_SETFD, FD_CLOEXEC)`) 를 걸어두면 fork 때는 복사되지만 execve 때 자동 close 된다. fork+exec 패턴에서는 거의 모든 fd 에 걸어두는 게 안전.
+
+```c
+int fd = open("log.txt", O_RDONLY | O_CLOEXEC);
+int s  = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+```
 
 **→ 상세**: [q11-cgi-fork-args.md](./q11-cgi-fork-args.md)
 
@@ -933,10 +1103,46 @@ void echo(int connfd) {
 - `read` 가 `0` 을 리턴 = 상대가 close/shutdown 해서 이쪽으로 보낼 게 더 없음.
 - 시그널 아니고 에러 아님. 정상 종료 신호.
 
-**short read / short write**:
+**short read / short write 와 Rio 래퍼**:
 
-- 요청한 n 보다 적게 돌아오는 경우. 파이프/소켓/느린 디스크에서 흔함.
-- CSAPP 의 **Rio (Robust I/O)** 래퍼 `rio_readn`, `rio_writen` 은 내부 루프로 "요청한 만큼 채울 때까지" 반복.
+기본 `read/write` 는 "요청한 만큼 꼭 다 읽어/써준다" 가 아니다. 일부만 처리하고 돌아올 수 있다.
+
+왜 short 가 생기나:
+- `read` : 소켓 버퍼에 **지금 들어있는 만큼만** 돌려줌. 4KB 요청해도 1KB 만 올 수 있음.
+- `write` : 송신 버퍼(`sk_sndbuf`)에 들어갈 만큼만 씀. 남으면 호출자가 다시 보내야 함.
+- 시그널 도착으로 `EINTR` 중단되는 경우도 있음.
+
+그래서 유저가 매번 루프를 돌아야 하는데, 이걸 감싼 게 CSAPP 의 **Rio (Robust I/O)**:
+
+```c
+/* 원하는 n 바이트를 다 쓸 때까지 반복 */
+ssize_t rio_writen(int fd, void *usrbuf, size_t n) {
+    size_t nleft = n;
+    ssize_t nwritten;
+    char *bufp = usrbuf;
+
+    while (nleft > 0) {
+        if ((nwritten = write(fd, bufp, nleft)) <= 0) {
+            if (errno == EINTR) nwritten = 0;   /* 시그널 → 재시도 */
+            else return -1;                      /* 진짜 에러 */
+        }
+        nleft   -= nwritten;
+        bufp    += nwritten;
+    }
+    return n;
+}
+```
+
+주요 함수:
+
+- `rio_readn / rio_writen` : n 바이트 다 채울 때까지 루프 (EOF 면 일찍 반환)
+- `rio_readinitb` : 내부 버퍼를 초기화 — 아래 두 버퍼드 함수의 전제
+- `rio_readlineb` : **한 줄씩**(`\n` 까지) 읽는 버퍼드 버전. HTTP 요청 라인 읽기에 쓰임
+- `rio_readnb` : 버퍼드 n바이트 읽기
+
+왜 **버퍼드** 가 필요한가: 라인 단위로 읽으려면 1바이트씩 read 하는 게 가장 단순하지만, 매번 syscall 해서 너무 느리다. 내부적으로 큰 청크를 한 번에 읽어두고, 유저에겐 요청한 모양으로 쪼개 돌려준다.
+
+한 줄 요약: **`rio_*` = "short read/write 와 EINTR 을 숨긴 안전한 I/O 래퍼"**.
 
 **UDP 의 데이터그램**:
 
@@ -1039,7 +1245,9 @@ while (1) {
 | 수만~수십만 연결, 레이턴시 민감 | epoll/kqueue |
 | 극한 성능, 커스텀 | io_uring, DPDK |
 
-**→ 상세**: [q14-thread-pool-async.md](./q14-thread-pool-async.md)
+> **동시성/락 심화**: 스레드 풀에서 실제로 필요한 **뮤텍스/조건 변수/데드락/thread-safe/RWLock/SQL API 서버 실전 락 설계** 는 별도 문서 [q15-concurrency-locks.md](./q15-concurrency-locks.md) 에서 카페 비유로 상세 다룬다.
+
+**→ 상세**: [q14-thread-pool-async.md](./q14-thread-pool-async.md), [q15-concurrency-locks.md](./q15-concurrency-locks.md)
 
 ---
 
@@ -1107,3 +1315,4 @@ while (1) {
 - [q12-tiny-web-server.md](./q12-tiny-web-server.md) — §18 상세
 - [q13-proxy-extension.md](./q13-proxy-extension.md) — §21 상세
 - [q14-thread-pool-async.md](./q14-thread-pool-async.md) — §22 상세
+- [q15-concurrency-locks.md](./q15-concurrency-locks.md) — §22 동시성/락 심화 (카페 비유, SQL API 서버 실전)
