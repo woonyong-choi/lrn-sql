@@ -28,28 +28,28 @@ Tiny 는 "교재용 참조 구현" 이라 의도적으로 단순하다. HTTPS, k
 
 ```text
 main
- ├─ Open_listenfd(port)          ← socket + bind + listen 래퍼
+ ├─ Open_listenfd(port)          <- socket + bind + listen 래퍼
  └─ while (1)
-     ├─ Accept(listenfd, ...)    ← 연결 하나 받기, connfd 반환
-     ├─ Getnameinfo(...)          ← 클라 이름/포트 출력(로깅)
-     ├─ doit(connfd)             ← 한 요청 처리
+     ├─ Accept(listenfd, ...)    <- 연결 하나 받기, connfd 반환
+     ├─ Getnameinfo(...)          <- 클라 이름/포트 출력(로깅)
+     ├─ doit(connfd)             <- 한 요청 처리
      └─ Close(connfd)
 
 doit
- ├─ Rio_readinitb + Rio_readlineb   ← 요청 라인 읽기
- ├─ sscanf → method, uri, version
- ├─ method != GET → clienterror(501)
- ├─ read_requesthdrs(&rio)           ← 나머지 헤더 소비(파싱하지 않음)
+ ├─ Rio_readinitb + Rio_readlineb   <- 요청 라인 읽기
+ ├─ sscanf -> method, uri, version
+ ├─ method != GET -> clienterror(501)
+ ├─ read_requesthdrs(&rio)           <- 나머지 헤더 소비(파싱하지 않음)
  ├─ parse_uri(uri, filename, cgiargs)
- │    → 반환값 is_static
- ├─ stat(filename, &sbuf)             ← 파일 존재/권한 확인
- │    └─ 실패 → clienterror(404)
+ │    -> 반환값 is_static
+ ├─ stat(filename, &sbuf)             <- 파일 존재/권한 확인
+ │    └─ 실패 -> clienterror(404)
  ├─ is_static
- │    ├─ S_ISREG && S_IRUSR         ← 일반 파일 + 읽기 가능인지
+ │    ├─ S_ISREG && S_IRUSR         <- 일반 파일 + 읽기 가능인지
  │    │    └─ 아니면 clienterror(403)
  │    └─ serve_static(fd, filename, size)
  └─ dynamic
-      ├─ S_ISREG && S_IXUSR         ← 일반 파일 + 실행 가능인지
+      ├─ S_ISREG && S_IXUSR         <- 일반 파일 + 실행 가능인지
       │    └─ 아니면 clienterror(403)
       └─ serve_dynamic(fd, filename, cgiargs)
 
@@ -61,7 +61,7 @@ parse_uri
  │    └─ 마지막이 '/' 이면 home.html 을 덧붙임
  │    └─ 반환 1 (static)
  └─ else (dynamic)
-      ├─ '?' 찾아서 쿼리스트링 분리 → cgiargs
+      ├─ '?' 찾아서 쿼리스트링 분리 -> cgiargs
       └─ 반환 0 (dynamic)
 
 serve_static
@@ -74,10 +74,10 @@ serve_static
  │    Content-type: filetype
  │    \r\n
  ├─ Rio_writen(fd, headerbuf, ...)
- ├─ Open(filename, O_RDONLY) → srcfd
- ├─ Mmap(0, size, PROT_READ, MAP_PRIVATE, srcfd, 0) → srcp
+ ├─ Open(filename, O_RDONLY) -> srcfd
+ ├─ Mmap(0, size, PROT_READ, MAP_PRIVATE, srcfd, 0) -> srcp
  ├─ Close(srcfd)
- ├─ Rio_writen(fd, srcp, size)      ← 본문 전송
+ ├─ Rio_writen(fd, srcp, size)      <- 본문 전송
  └─ Munmap(srcp, size)
 
 serve_dynamic
@@ -87,7 +87,7 @@ serve_dynamic
  │         setenv("QUERY_STRING", cgiargs, 1)
  │         Dup2(fd, STDOUT_FILENO)
  │         Execve(filename, emptylist, environ)
- └─ Wait(NULL)                      ← 좀비 회수
+ └─ Wait(NULL)                      <- 좀비 회수
 
 clienterror
  ├─ body 는 작은 HTML 문자열
@@ -101,7 +101,7 @@ clienterror
 - `read_requesthdrs` : 1.0 은 헤더를 거의 쓰지 않기 때문에 **빈 줄(`\r\n`) 전까지 소비만** 한다. Host 같은 값을 쓰고 싶으면 여기서 파싱을 추가해야 한다.
 - `parse_uri` : URI 만 보고 **정적/동적** 을 결정하고 `filename`, `cgiargs` 로 분리. `cgi-bin` 이라는 규칙이 전부다.
 - `serve_static` : `mmap` 으로 파일을 메모리에 매핑한 뒤 통째로 `rio_writen`.
-- `get_filetype` : 확장자 → MIME 타입 (`.html → text/html`, `.png → image/png` 등).
+- `get_filetype` : 확장자 -> MIME 타입 (`.html -> text/html`, `.png -> image/png` 등).
 - `serve_dynamic` : `fork + dup2 + execve` 로 CGI 실행 (q11 상세).
 - `clienterror` : 에러 응답 HTML 을 조립해 바로 보낸다.
 
@@ -110,19 +110,19 @@ clienterror
 **정적 요청** 예시: `GET /home.html HTTP/1.0`
 
 ```text
-1) Accept → connfd
-2) Rio_readlineb → "GET /home.html HTTP/1.0\r\n"
-3) sscanf → method="GET", uri="/home.html", version="HTTP/1.0"
-4) read_requesthdrs → 빈 줄까지 소비
+1) Accept -> connfd
+2) Rio_readlineb -> "GET /home.html HTTP/1.0\r\n"
+3) sscanf -> method="GET", uri="/home.html", version="HTTP/1.0"
+4) read_requesthdrs -> 빈 줄까지 소비
 5) parse_uri:
-     uri 에 "cgi-bin" 없음 → static
+     uri 에 "cgi-bin" 없음 -> static
      filename = "./home.html"
      cgiargs  = ""
      returns 1
-6) stat("./home.html") → sbuf.st_size = 2048
+6) stat("./home.html") -> sbuf.st_size = 2048
    접근 권한 OK
 7) serve_static(connfd, "./home.html", 2048)
-     ㄴ get_filetype → "text/html"
+     ㄴ get_filetype -> "text/html"
      ㄴ 응답 헤더 구성
         HTTP/1.0 200 OK
         Server: Tiny Web Server
@@ -131,7 +131,7 @@ clienterror
         Content-type: text/html
         \r\n
      ㄴ Rio_writen(connfd, headers, ~91B)
-     ㄴ open + mmap → srcp 포인터
+     ㄴ open + mmap -> srcp 포인터
      ㄴ Rio_writen(connfd, srcp, 2048)
      ㄴ munmap
 8) Close(connfd)
@@ -142,24 +142,24 @@ clienterror
 **동적 요청** 예시: `GET /cgi-bin/adder?15000&213 HTTP/1.0`
 
 ```text
-1) Accept → connfd
+1) Accept -> connfd
 2) 요청 라인 파싱
-3) read_requesthdrs → 빈 줄까지 소비
+3) read_requesthdrs -> 빈 줄까지 소비
 4) parse_uri:
-     "cgi-bin" 포함 → dynamic
+     "cgi-bin" 포함 -> dynamic
      '?' 기준으로 path = "./cgi-bin/adder", cgiargs = "15000&213"
      returns 0
-5) stat → 실행 가능 확인
+5) stat -> 실행 가능 확인
 6) serve_dynamic(connfd, "./cgi-bin/adder", "15000&213")
      ㄴ "HTTP/1.0 200 OK\r\nServer: Tiny Web Server\r\n" 전송
      ㄴ Fork() == 0 (자식)
           setenv("QUERY_STRING", "15000&213", 1)
-          Dup2(connfd, 1)                         ← stdout → connfd
+          Dup2(connfd, 1)                         <- stdout -> connfd
           Execve("./cgi-bin/adder", [NULL], environ)
             adder 가 getenv("QUERY_STRING") = "15000&213"
-            → 15000 + 213 = 15213 계산
-            → stdout 에 Content-* 헤더 + 본문 출력
-            → 소켓으로 바로 나감
+            -> 15000 + 213 = 15213 계산
+            -> stdout 에 Content-* 헤더 + 본문 출력
+            -> 소켓으로 바로 나감
      ㄴ Wait(NULL)
 7) Close(connfd)
 ```

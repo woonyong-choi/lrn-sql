@@ -14,12 +14,12 @@
 
 > DNS 는 무엇이고 어떤 용도로 쓰이는가.
 
-DNS(Domain Name System)는 "**사람이 읽는 도메인 이름 ↔ 기계가 쓰는 IP 주소**"를 매핑해주는 **전 세계 분산 데이터베이스**다. 인터넷에서 주소록 역할을 한다.
+DNS(Domain Name System)는 "**사람이 읽는 도메인 이름 <-> 기계가 쓰는 IP 주소**"를 매핑해주는 **전 세계 분산 데이터베이스**다. 인터넷에서 주소록 역할을 한다.
 
 용도는 크게 넷이다.
 
-- **A / AAAA 레코드**: 도메인 → IPv4 / IPv6 매핑. 가장 기본적인 용도.
-- **CNAME**: 도메인 → 다른 도메인 별칭. (예: `www.example.com → example.com`)
+- **A / AAAA 레코드**: 도메인 -> IPv4 / IPv6 매핑. 가장 기본적인 용도.
+- **CNAME**: 도메인 -> 다른 도메인 별칭. (예: `www.example.com -> example.com`)
 - **MX**: 메일 서버 호스트. 이메일 라우팅에 사용.
 - **TXT**: 임의 텍스트. 도메인 소유권 증명(SPF, DKIM, ACME challenge 등).
 
@@ -32,13 +32,13 @@ DNS 가 없으면 사람이 IP 를 외워야 하고, 서버를 옮길 때마다 
 ```text
 ICANN (전체 규칙 관리)
    │
-   ▼
+   v
 Registry (TLD 관리: .com 은 Verisign, .kr 은 KISA 등)
    │
-   ▼
+   v
 Registrar (도메인 판매자: Cloudflare, GoDaddy, Gabia ...)
    │
-   ▼
+   v
 Registrant (나 = 도메인 구매자)
 ```
 
@@ -49,27 +49,27 @@ Registrant (나 = 도메인 구매자)
 ```text
 브라우저
    │  1. gethostbyname / getaddrinfo("www.example.net")
-   ▼
+   v
 stub resolver (libc)
    │  2. /etc/hosts, /etc/nsswitch.conf 확인
    │  3. systemd-resolved, 또는 /etc/resolv.conf 의 DNS 서버에 UDP 53 질의
-   ▼
+   v
 Recursive resolver  (ISP, 또는 1.1.1.1, 8.8.8.8)
    │
    │  4. 캐시 miss 이면 루트로 올라간다
-   ▼
+   v
 Root nameserver (.) ── "com 은 .com TLD 에게 물어봐"
    │
-   ▼
+   v
 TLD nameserver (.net) ── "example.net 의 네임서버는 ns1.cloudflare.com"
    │
-   ▼
+   v
 Authoritative nameserver (Cloudflare) ── "www.example.net 은 208.216.181.15"
    │
-   ▼
-Recursive resolver  ──→ stub resolver ──→ 브라우저
+   v
+Recursive resolver  ──-> stub resolver ──-> 브라우저
    │                                       │
-   ▼                                       ▼
+   v                                       v
 결과 IP 획득 (+ TTL 동안 캐싱)         connect(208.216.181.15:80)
 ```
 
@@ -114,19 +114,19 @@ $ nslookup www.example.net
 ```text
 사용자가 브라우저에 http://www.example.net 입력
 
-1) 브라우저/OS 캐시 확인 → miss
+1) 브라우저/OS 캐시 확인 -> miss
 2) stub resolver 가 /etc/resolv.conf 의 nameserver 에 질의
-     → ISP resolver 또는 1.1.1.1 (recursive)
-3) recursive resolver 가 루트 → .net → Cloudflare NS 까지 재귀 질의
-4) Cloudflare NS 가 www.example.net → 208.216.181.15 응답 (+ TTL)
+     -> ISP resolver 또는 1.1.1.1 (recursive)
+3) recursive resolver 가 루트 -> .net -> Cloudflare NS 까지 재귀 질의
+4) Cloudflare NS 가 www.example.net -> 208.216.181.15 응답 (+ TTL)
 5) 브라우저가 208.216.181.15:80 으로 TCP connect + HTTP GET
-6) 서버가 HTML 응답 → 렌더링
+6) 서버가 HTML 응답 -> 렌더링
 ```
 
 여기서 Cloudflare 가 특별한 이유는 두 가지다.
 
 - **Registrar + Authoritative NS + CDN 프록시**가 한 몸이라 "도메인 사면 자동으로 CF 네임서버에 붙는" 일관된 경험을 준다.
-- "Proxied" (주황색 구름) 상태로 둔 레코드는 실제 IP 가 아니라 **Cloudflare 자체 엣지 IP**가 응답된다. 즉 외부에서 보면 `www.example.net → 104.x.x.x (Cloudflare 엣지)` 로 보이고, Cloudflare 가 뒤에서 오리진 서버(`208.216.181.15`) 로 요청을 대신 보낸다. 이게 DDoS 완화, 캐싱, TLS 종단점 역할까지 하는 원리다.
+- "Proxied" (주황색 구름) 상태로 둔 레코드는 실제 IP 가 아니라 **Cloudflare 자체 엣지 IP**가 응답된다. 즉 외부에서 보면 `www.example.net -> 104.x.x.x (Cloudflare 엣지)` 로 보이고, Cloudflare 가 뒤에서 오리진 서버(`208.216.181.15`) 로 요청을 대신 보낸다. 이게 DDoS 완화, 캐싱, TLS 종단점 역할까지 하는 원리다.
 
 결론적으로 **"도메인을 샀다"** = registrar 가 TLD 에 NS 권한을 등록해준 것이고, **"DNS 에 등록했다"** = 그 NS 에 A/CNAME/MX 레코드를 써둔 것이다. 브라우저 접속은 이 두 가지를 따라 재귀 질의로 IP 를 알아낸 뒤 TCP+HTTP 로 이어지는 것.
 

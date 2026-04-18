@@ -25,7 +25,7 @@
   바리스타 1명. 손님 올 때마다 처음부터 끝까지. 줄 길어짐.
 
 [ 방법 B: 손님마다 바리스타 고용 ]  = per-request thread
-  손님 올 때마다 면접+채용+훈련 → 음료 만들고 → 해고.
+  손님 올 때마다 면접+채용+훈련 -> 음료 만들고 -> 해고.
   낭비 심함 (스레드 생성 비용).
 
 [ 방법 C: 바리스타 팀 N명 상시 대기 ]  = thread pool
@@ -46,7 +46,7 @@
                    └──┬─────────────────────────────┘
                       │
   main (매니저)        │              worker 1..N (바리스타들)
-  accept → enqueue    │              dequeue → doit → close
+  accept -> enqueue    │              dequeue -> doit -> close
 ```
 
 > 왜 락이 필요한가. race condition 이 실제로 어떻게 나는가.
@@ -57,8 +57,8 @@
 
 ```text
 매니저 (main):  위치 5에 주문지 A 꽂기
-바리스타 1:     위치 5에서 주문지 떼내기       ← 동시에!
-바리스타 2:     위치 5에서 주문지 떼내기       ← 또 동시에!
+바리스타 1:     위치 5에서 주문지 떼내기       <- 동시에!
+바리스타 2:     위치 5에서 주문지 떼내기       <- 또 동시에!
 
 결과: 절반만 쓴 주문지를 가져가거나, 한 종이를 둘이 찢거나,
       큐의 front/rear 인덱스가 망가짐.
@@ -69,15 +69,15 @@
 C 의 `count++` 은 CPU 에서 **세 개 명령**으로 쪼개진다.
 
 ```text
-① load   count  → 레지스터
-② add    1       → 레지스터
-③ store  레지스터 → count
+① load   count  -> 레지스터
+② add    1       -> 레지스터
+③ store  레지스터 -> count
 
-두 스레드가 100 → 102 로 올리려 할 때:
+두 스레드가 100 -> 102 로 올리려 할 때:
   A: load  (reg=100)
-  B: load  (reg=100)      ← A 가 쓰기 전!
+  B: load  (reg=100)      <- A 가 쓰기 전!
   A: store (count=101)
-  B: store (count=101)    ← 한 번의 증가가 사라짐
+  B: store (count=101)    <- 한 번의 증가가 사라짐
 
 두 번 ++ 했는데 결과는 +1.
 ```
@@ -100,7 +100,7 @@ void *worker(void *arg) {
 
 > 뮤텍스와 조건 변수, 세마포어의 차이.
 
-**뮤텍스 (mutex)** = "한 번에 하나만". 카페의 대기판 앞 자물쇠. lock → 임계 구역 → unlock.
+**뮤텍스 (mutex)** = "한 번에 하나만". 카페의 대기판 앞 자물쇠. lock -> 임계 구역 -> unlock.
 
 **조건 변수 (condvar)** = "할 일 없으면 자고 있어, 일 생기면 깨워줘". 뮤텍스와 함께 쓰임.
 
@@ -114,7 +114,7 @@ while (1) {
     else                 { unlock; /* 바로 while 재시작 */ }
 }
 ```
-→ 일 없어도 CPU 100% 돌림. 전기 낭비.
+-> 일 없어도 CPU 100% 돌림. 전기 낭비.
 
 **좋은 방법 — condvar**:
 ```c
@@ -198,10 +198,10 @@ int sbuf_remove(sbuf_t *sp) {                /* consumer */
 실전 규칙: **스레드 풀에서 `_r` 접미사 함수만 써라**.
 
 ```c
-/* ❌ 위험 */
+/* [X] 위험 */
 char *p = strtok(str, " ");
 
-/* ✓ 안전 */
+/* [x] 안전 */
 char *save;
 char *p = strtok_r(str, " ", &save);
 ```
@@ -226,9 +226,9 @@ char *p = strtok_r(str, " ", &save);
 카페 예시: 바리스타 둘이 "우유통" 과 "초콜릿통" 을 **둘 다** 써야 하는 메뉴를 만든다. 각 통은 한 명만 쓸 수 있다.
 
 ```text
-바리스타 1: 우유통 잡음 → 초콜릿통 기다림
-바리스타 2: 초콜릿통 잡음 → 우유통 기다림
-   → 둘 다 영원히 멈춤
+바리스타 1: 우유통 잡음 -> 초콜릿통 기다림
+바리스타 2: 초콜릿통 잡음 -> 우유통 기다림
+   -> 둘 다 영원히 멈춤
 ```
 
 **회피법 = 락 획득 순서 고정**:
@@ -236,8 +236,8 @@ char *p = strtok_r(str, " ", &save);
 ```text
 규칙: 무조건 "우유통 먼저, 초콜릿통 나중" 순서로만 잡는다.
 
-바리스타 1: 우유통 → 초콜릿통 → 사용 → 둘 다 풀기
-바리스타 2: (1 이 풀 때까지 대기) → 우유통 → 초콜릿통 → ...
+바리스타 1: 우유통 -> 초콜릿통 -> 사용 -> 둘 다 풀기
+바리스타 2: (1 이 풀 때까지 대기) -> 우유통 -> 초콜릿통 -> ...
 ```
 
 코드로는 보통 "주소 순서" 를 규칙으로 쓴다.
@@ -294,28 +294,28 @@ GCC 내장 `__atomic_fetch_add` 도 같은 역할.
 요청 처리 흐름과 각 지점의 공유 자원:
 
 ```text
-클라 ──HTTP──▶ 서버
+클라 ──HTTP──> 서버
                 │
                 ① main 스레드: accept 루프
-                │   └─ sbuf_insert(&jobs, connfd)   ◀── 세마포어 3개로 보호
-                ▼
+                │   └─ sbuf_insert(&jobs, connfd)   <── 세마포어 3개로 보호
+                v
            ┌─ job queue ─┐
            │  [f1][f2]   │
            └─────┬───────┘
                  │ sbuf_remove
    ┌─────────────┼─────────────┐
-   ▼             ▼             ▼
+   v             v             v
   worker1     worker2       workerN
    │             │             │
    ├─ HTTP 파싱
    ├─ SQL 추출
-   ├─ DB 커넥션 풀에서 획득    ◀── 뮤텍스 + condvar (pool_get)
+   ├─ DB 커넥션 풀에서 획득    <── 뮤텍스 + condvar (pool_get)
    ├─ SQL 실행 (blocking)
    ├─ 결과 받음
-   ├─ DB 커넥션 반납            ◀── 뮤텍스 + condvar (pool_put)
-   ├─ 통계 카운터 ++            ◀── atomic
-   ├─ (필요시) 캐시 조회/갱신    ◀── RWLock
-   ├─ 로그 기록                ◀── 뮤텍스 or per-thread 버퍼
+   ├─ DB 커넥션 반납            <── 뮤텍스 + condvar (pool_put)
+   ├─ 통계 카운터 ++            <── atomic
+   ├─ (필요시) 캐시 조회/갱신    <── RWLock
+   ├─ 로그 기록                <── 뮤텍스 or per-thread 버퍼
    ├─ HTTP 응답 write
    └─ close(connfd)
 ```
@@ -430,7 +430,7 @@ pthread_sigmask(SIG_BLOCK, &mask, NULL);
 
 추가로 `SIGPIPE` 는 서버에서는 반드시 무시:
 ```c
-signal(SIGPIPE, SIG_IGN);     /* 끊긴 소켓에 write → EPIPE 로 받기 */
+signal(SIGPIPE, SIG_IGN);     /* 끊긴 소켓에 write -> EPIPE 로 받기 */
 ```
 
 > 전체 코드 스케치를 보여달라.
@@ -494,8 +494,8 @@ int main(int argc, char **argv) {
 
 ## 연결 키워드
 
-- [00-topdown-walkthrough.md §22 — Iterative → Concurrent](./00-topdown-walkthrough.md#22-iterative--concurrent--스레드-풀-epoll-io_uring)
-- [q14-thread-pool-async.md — 스레드 풀 vs epoll vs io_uring](./q14-thread-pool-async.md)
-- [q10-network-cpu-kernel-handle.md — CPU/메모리/커널/핸들 관점](./q10-network-cpu-kernel-handle.md)
+- [00-topdown-walkthrough.md §22 — Iterative -> Concurrent](./00-topdown-walkthrough.md#22-iterative--concurrent--스레드-풀-epoll-io_uring)
+- [q16-thread-pool-async.md — 스레드 풀 vs epoll vs io_uring](./q16-thread-pool-async.md)
+- [q09-network-cpu-kernel-handle.md — CPU/메모리/커널/핸들 관점](./q09-network-cpu-kernel-handle.md)
 - CSAPP 12장 — Concurrent Programming
 - `man 3 pthread_mutex_lock`, `man 3 pthread_cond_wait`, `man 7 pthreads`
