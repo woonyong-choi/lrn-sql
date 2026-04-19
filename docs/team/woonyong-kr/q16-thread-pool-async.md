@@ -31,7 +31,7 @@
     ─────────         │              ─────────────────────
     listenfd = open_listenfd(port)
     while (1) {
-        connfd = accept(listenfd, ...);   ── enqueue ──▶  (condvar wait) ── dequeue ─▶
+        connfd = accept(listenfd, ...);   ── enqueue ──>  (condvar wait) ── dequeue ─>
         sbuf_insert(&sbuf, connfd);                         doit(connfd)
     }                                                       close(connfd)
 ```
@@ -52,7 +52,7 @@
 **메모리 관점**
 
 - 각 스레드는 자기 스택을 가진다(기본 8MB). 스레드 수 × 8MB = 스레드 풀의 최소 메모리 오버헤드.
-- 공유 자료구조(캐시, B+Tree, 버퍼)는 **DRAM 의 같은 페이지**를 여러 스레드가 접근 → false sharing, 캐시 무효화 주의.
+- 공유 자료구조(캐시, B+Tree, 버퍼)는 **DRAM 의 같은 페이지**를 여러 스레드가 접근 -> false sharing, 캐시 무효화 주의.
 - `sk_buff` 는 커널이 할당. 연결 폭증 시 slab 단편화.
 
 **커널 관점**
@@ -72,15 +72,15 @@
 
 ```text
 main:
-   accept  →  sys_accept4  (listen 큐 → 새 sk, 새 file, 새 fd)
-   (queue push 는 뮤텍스 덕분에 syscall 없을 수 있음 → pthread 는 futex 만)
+   accept  ->  sys_accept4  (listen 큐 -> 새 sk, 새 file, 새 fd)
+   (queue push 는 뮤텍스 덕분에 syscall 없을 수 있음 -> pthread 는 futex 만)
 
 worker:
-   pthread_cond_wait  →  futex(FUTEX_WAIT) → 블록
-   (job 들어오면 signal → futex(FUTEX_WAKE) → worker 깨어남)
-   read  →  sys_read  → sock_read_iter → tcp_recvmsg  (큐에 없으면 블록)
-   write →  sys_write → sock_write_iter → tcp_sendmsg
-   close →  sys_close → sock_release → ... FIN 전송
+   pthread_cond_wait  ->  futex(FUTEX_WAIT) -> 블록
+   (job 들어오면 signal -> futex(FUTEX_WAKE) -> worker 깨어남)
+   read  ->  sys_read  -> sock_read_iter -> tcp_recvmsg  (큐에 없으면 블록)
+   write ->  sys_write -> sock_write_iter -> tcp_sendmsg
+   close ->  sys_close -> sock_release -> ... FIN 전송
 ```
 
 정리하면 **"blocking I/O + 여러 스레드"** 전략은 커널에게 "네가 알아서 block 해줘" 라고 위임하는 방식이다. 간단하지만 스레드 수가 많아지면 커널 스케줄링과 메모리가 부담.
@@ -128,9 +128,9 @@ while (1) {
 
 우리 코드 레벨에서 의사 결정은 이렇게 하면 된다.
 
-- 연결 수 ≤ 수천, 코드 단순성 우선 → **스레드 풀 + blocking I/O** (= Tiny 확장 방식). SQL API 서버는 이걸로 충분.
-- 연결 수 수만 이상, 레이턴시 민감 → **epoll/kqueue reactor** 또는 언어 런타임의 async.
-- 극한 성능 필요, 커스텀 인프라 → **io_uring / DPDK / 유저공간 TCP**.
+- 연결 수 ≤ 수천, 코드 단순성 우선 -> **스레드 풀 + blocking I/O** (= Tiny 확장 방식). SQL API 서버는 이걸로 충분.
+- 연결 수 수만 이상, 레이턴시 민감 -> **epoll/kqueue reactor** 또는 언어 런타임의 async.
+- 극한 성능 필요, 커스텀 인프라 -> **io_uring / DPDK / 유저공간 TCP**.
 
 결국 "동시성" 은 **커널에게 block 을 위임할지, 유저가 상태 기계로 전부 관리할지** 를 고르는 문제다. 이 선택이 곧 CPU/메모리/커널/핸들 비용의 분포를 결정한다.
 
