@@ -98,7 +98,7 @@ int main(int argc, char **argv)
 포인트:
 
 - `Open_listenfd` / `Open_clientfd` 는 CSAPP 의 래퍼다 (q07 참고).
-- 에코 서버는 **iterative server** 다. `while` 루프 한 번에 클라이언트 한 명만 처리한다. 다중 연결을 위해선 fork/pthread/select/epoll 로 확장해야 한다(→ q14).
+- 에코 서버는 **iterative server** 다. `while` 루프 한 번에 클라이언트 한 명만 처리한다. 다중 연결을 위해선 fork/pthread/select/epoll 로 확장해야 한다(-> q14).
 - `rio_readlineb` 는 "\n 까지 읽는" 버퍼드 I/O. `rio_writen` 은 "원하는 길이를 다 쓸 때까지 반복" 하는 robust writer. 짧은 read/write 를 방지한다.
 
 > 네트워크 통신은 파일 입출력과 비슷하고, 그래서 EOF 가 중요하다는데, 그 과정을 자세히 설명해 달라.
@@ -112,13 +112,13 @@ CSAPP 가 10장(Unix I/O) 바로 뒤에 11장(네트워크)을 놓은 이유가 
 ```text
 클라이언트                                    서버
 ───────                                      ────
-write(connfd, "hello", 5)                    read → "hello"
+write(connfd, "hello", 5)                    read -> "hello"
                                              write("hello", 5)
-read → "hello"                               ...
-close(clientfd)  ── FIN ──▶                  read → 0  (EOF!)
+read -> "hello"                               ...
+close(clientfd)  ── FIN ──>                  read -> 0  (EOF!)
                                              [서버는 이제 더 읽을 게 없음을 안다]
-                                             close(connfd)  ── FIN ──▶
-read → 0 (이미 끝)
+                                             close(connfd)  ── FIN ──>
+read -> 0 (이미 끝)
 ```
 
 에코 서버의 루프가 `while ((n = rio_readlineb(...)) != 0)` 인 이유가 여기다. `n == 0` 이면 클라이언트가 연결을 닫았다는 뜻이므로 루프를 빠져나와 `close(connfd)` 하고 다음 클라이언트를 받는다.
@@ -136,4 +136,4 @@ read → 0 (이미 끝)
 - [07-ch11-code-reference.md — Figure 11.20 ~ 11.22 echo 관련](../../csapp-11/07-ch11-code-reference.md)
 - q07. Open_listenfd 내부
 - q12. Tiny 의 doit 루프가 에코 서버와 구조적으로 같다
-- q14. iterative → concurrent 로 확장
+- q14. iterative -> concurrent 로 확장
