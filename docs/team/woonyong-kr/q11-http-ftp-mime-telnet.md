@@ -124,4 +124,4 @@ CSAPP 가 11.6 Tiny 에서 다루는 과제는 **1.1 요청을 받아도 1.0 으
 - [02-keyword-tree.md — 11.5 Web Servers](../../csapp-11/02-keyword-tree.md)
 - q11. CGI (동적 콘텐츠)
 - q12. Tiny 의 응답 헤더/Content-Type 구현
-- q13. Proxy 의 HTTP/1.1 → 1.0 변환
+- q13. Proxy 의 HTTP/1.1 -> 1.0 변환
