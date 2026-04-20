@@ -135,6 +135,21 @@ Server port = 80
 
 `Port 는 프로세스를, IP 는 호스트를, MAC 은 현재 홉의 링크 대상만 식별합니다.`
 
+### 직접 검증 — 4-tuple 을 실제로 뽑아 보기
+
+```bash
+# 터미널 1
+python3 -m http.server 8080
+
+# 터미널 2
+curl -s http://127.0.0.1:8080/ > /dev/null &
+ss -tanp '( sport = :8080 or dport = :8080 )'
+# ESTAB 0 0 127.0.0.1:8080  127.0.0.1:51213  users:(("python3",pid=1234,fd=4))
+# ESTAB 0 0 127.0.0.1:51213 127.0.0.1:8080   users:(("curl",pid=1235,fd=3))
+```
+
+두 줄이 **같은 연결의 양쪽 끝** 이다. `(127.0.0.1, 51213, 127.0.0.1, 8080)` 이 칠판에 쓴 4-tuple 이다. macOS 에서는 `lsof -nP -iTCP:8080` 로 같은 정보를 본다.
+
 ---
 
 ## Scene 3. IPv4 / IPv6 와 prefix 감각
@@ -173,6 +188,27 @@ IPv6  = 128bit = 16B
 - IPv6 는 128비트라 주소 공간이 사실상 매우 넓다.
 
 이 장면은 Part B 전체에서 주소 체계를 너무 얕게 보지 않게 만들어 준다.
+
+### 직접 검증 — IPv4 = uint32_t 라는 말의 증거
+
+```bash
+# (1) 문자열을 32비트 정수로 풀어 본다
+python3 - <<'PY'
+import socket, struct
+ip = "128.2.194.242"
+n  = struct.unpack("!I", socket.inet_aton(ip))[0]
+print(f"{ip} -> 0x{n:08x} = {n} = {n:032b}")
+# 128.2.194.242 -> 0x8002c2f2 = 2147664114 = 10000000 00000010 11000010 11110010
+PY
+
+# (2) prefix /24 안에 내 IP 가 들어 있는지 확인
+python3 -c "import ipaddress; print(ipaddress.ip_address('128.2.194.242') in ipaddress.ip_network('128.2.194.0/24'))"
+
+# (3) 내 호스트의 IPv4/IPv6 비교
+ip -4 addr ; ip -6 addr
+```
+
+화이트보드에서 강조: 두 번째 출력 `10000000 ...` 이 Scene 3 에서 미리 써 둔 이진 비트 4조각과 **완벽히 동일** 하다는 걸 보여 준다.
 
 ---
 
@@ -222,6 +258,29 @@ htons   = 숫자 바이트 순서 변환
 inet_pton = 문자열 IP 를 binary address 로 변환
 ```
 
+### 직접 검증 — host ↔ network byte order 실물 확인
+
+```bash
+python3 - <<'PY'
+import socket, struct
+print("htons(80)   =", hex(socket.htons(80)))        # 0x5000 on little-endian host
+print("ntohs(0x5000)=", socket.ntohs(0x5000))        # 80
+print("htonl(0x0A00_0001) =", hex(socket.htonl(0x0A000001)))
+
+# sockaddr_in 실제 바이트
+addr = socket.inet_aton("128.2.194.242")
+port = struct.pack("!H", 80)
+print("network bytes =", (port + addr).hex())
+# 0050 8002c2f2  <- Scene 4 의 [0x00, 0x50] 과 동일
+PY
+
+# inet_pton/ntop 도 바로 확인
+python3 -c "import socket; print(socket.inet_pton(socket.AF_INET,'128.2.194.242').hex())"
+# 8002c2f2
+```
+
+화이트보드에서 강조: `htons(80) = 0x5000` 이 little-endian 머신 메모리에서 `[0x00, 0x50]` 으로 찍히는 것이 **"네트워크 표준으로 정렬됐다"** 의 증거다.
+
 ---
 
 ## Scene 5. DNS resolve 는 실제로 어떻게 일어나나
@@ -268,6 +327,32 @@ getaddrinfo("www.example.net", "80")
 - DNS 는 "그냥 서버 하나"가 아니다.
 - 매번 root 부터 끝까지 가는 것도 아니다. 캐시가 있다.
 - DNS 가 끝나야 `connect(208.216.181.15:80)` 로 넘어갈 수 있다.
+
+### 직접 검증 — DNS 질의를 루트부터 실제로 쫓기
+
+```bash
+# (1) 내 호스트의 resolver 설정
+cat /etc/resolv.conf                     # Linux
+scutil --dns | head -30                  # macOS
+
+# (2) root -> TLD -> authoritative 를 한 번에 추적
+dig +trace +nodnssec www.example.net
+# .          NS a.root-servers.net.
+# net.       NS a.gtld-servers.net.
+# example.net. NS a.iana-servers.net.
+# www.example.net. 86400 IN A 93.184.216.34
+
+# (3) getaddrinfo 가 실제로 어디에 쿼리하는지 엿보기
+strace -f -e trace=openat,connect,sendto,recvfrom getent hosts www.example.net 2>&1 | grep -E '53|resolv'
+# connect(3, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("1.1.1.1")}, ...)
+
+# (4) 동일 도메인 두 번 질의해서 캐시 시간 줄어드는 것 확인
+dig www.example.net | grep -E 'ANSWER|IN\s+A' ; sleep 1
+dig www.example.net | grep -E 'ANSWER|IN\s+A'
+# TTL 이 줄어드는 것 = 캐시 증거
+```
+
+화이트보드에서 강조: `dig +trace` 의 다섯 줄 (root → .net → authoritative → A 레코드) 이 Scene 5 에서 그린 DNS 피라미드와 **그대로 1:1 대응** 한다.
 
 ---
 
@@ -326,6 +411,39 @@ ai_next      -> 다음 후보
 
 `getaddrinfo -> socket -> connect 는 준비물 생성 -> 엔드포인트 생성 -> 연결 시도의 세 단계입니다.`
 
+### 직접 검증 — 세 개의 시스템콜이 순서대로 나오는지
+
+```bash
+# curl 한 번에 3-단계가 전부 찍힌다
+strace -e trace=socket,connect,sendto,recvfrom,close -f -tt \
+  curl -s http://127.0.0.1:8080/ -o /dev/null 2>&1 | head -20
+
+# 주요 라인 예시
+# 00:00.000001 socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_TCP) = 3
+# 00:00.000012 connect(3, {sa_family=AF_INET, sin_port=htons(8080),
+#                          sin_addr=inet_addr("127.0.0.1")}, 16) = 0
+# 00:00.000020 sendto(3, "GET / HTTP/1.1\r\n...", ...) = ...
+
+# addrinfo 자체를 직접 찍고 싶으면 C 예제로
+cat > /tmp/gai.c <<'C'
+#include <netdb.h>
+#include <stdio.h>
+int main(void){
+    struct addrinfo hints = {.ai_socktype = SOCK_STREAM}, *list, *p;
+    getaddrinfo("www.example.net","80",&hints,&list);
+    for (p = list; p; p = p->ai_next) {
+        char host[64];
+        getnameinfo(p->ai_addr, p->ai_addrlen, host, sizeof host, 0, 0, NI_NUMERICHOST);
+        printf("family=%d socktype=%d proto=%d addr=%s\n",
+               p->ai_family, p->ai_socktype, p->ai_protocol, host);
+    }
+}
+C
+cc /tmp/gai.c -o /tmp/gai && /tmp/gai
+```
+
+화이트보드에서 강조: `socket` 의 리턴값 3 이 바로 다음 `connect` 의 첫 인자 3 으로 이어진다는 점. Scene 6 에 그린 체인이 그대로 시스템콜 로그에 찍힌다.
+
 ---
 
 ## Scene 7. TCP 3-way handshake
@@ -379,6 +497,30 @@ SYN/ACK 에 들어가는 것:
 
 `SYN 과 FIN 은 sequence 공간을 1칸 소비하기 때문에, 상대는 다음에 기대하는 번호를 ack 로 보냅니다.`
 
+### 직접 검증 — 세 번의 handshake 실제 캡처
+
+```bash
+# (1) 더미 서버
+python3 -m http.server 8080 >/dev/null &
+
+# (2) SYN/SYN-ACK/ACK 세 줄만 뽑기
+sudo tcpdump -i lo -nn -S -tttt 'tcp port 8080 and (tcp[tcpflags] & (tcp-syn|tcp-ack) != 0)' -c 3 &
+sleep 0.3
+curl -s http://127.0.0.1:8080/ >/dev/null
+wait
+
+# 출력 예시
+# IP 127.0.0.1.51213 > 127.0.0.1.8080: Flags [S],  seq 1000, win 65535, options [mss 65495 ...]
+# IP 127.0.0.1.8080  > 127.0.0.1.51213: Flags [S.], seq 9000, ack 1001, win 65535, ...
+# IP 127.0.0.1.51213 > 127.0.0.1.8080: Flags [.],  seq 1001, ack 9001, win 512, length 0
+
+# (3) 커널이 본 연결 상태 천이
+ss -tanpio '( dport = :8080 or sport = :8080 )'
+# ESTAB ... rto:204 rtt:0.04/0.02 ... bytes_sent:... bytes_acked:...
+```
+
+화이트보드에서 강조: `Flags [S]` → `Flags [S.]` → `Flags [.]` 와 seq/ack 쌍이 Scene 7 의 `seq=1000, seq=9000, ack=1001, ack=9001` 과 **완벽히 같은 모양** 이다.
+
 ---
 
 ## Scene 8. TCP stream vs UDP datagram
@@ -414,6 +556,39 @@ UDP sendto(50B)
 꼭 말해야 하는 문장:
 
 `두 번 write 했으니 두 번 read 될 것이라는 기대는 TCP 에서는 틀립니다.`
+
+### 직접 검증 — stream vs datagram 차이 실물 재현
+
+```bash
+# (1) TCP: 두 write 가 한 read 로 합쳐질 수 있다
+( python3 -c "
+import socket
+s = socket.socket(); s.bind(('127.0.0.1',9001)); s.listen(1)
+c,_ = s.accept()
+print('read1=', c.recv(4096))   # 보통 b'AAA...BBB...' 로 합쳐짐
+" & ) && sleep 0.2 && python3 -c "
+import socket, time
+s = socket.create_connection(('127.0.0.1',9001))
+s.send(b'A'*50); time.sleep(0.05); s.send(b'B'*50)
+s.close()
+"
+
+# (2) UDP: 경계 그대로 두 번
+( python3 -c "
+import socket
+s = socket.socket(type=socket.SOCK_DGRAM); s.bind(('127.0.0.1',9002))
+print('dgram1=', len(s.recvfrom(4096)[0]))
+print('dgram2=', len(s.recvfrom(4096)[0]))
+" & ) && sleep 0.2 && python3 -c "
+import socket
+s = socket.socket(type=socket.SOCK_DGRAM)
+s.sendto(b'A'*50, ('127.0.0.1',9002))
+s.sendto(b'B'*50, ('127.0.0.1',9002))
+"
+# 결과: TCP 는 read1 = 100, UDP 는 dgram1=50 dgram2=50
+```
+
+화이트보드에서 강조: TCP 쪽 "한 번에 100B 가 왔다" 가 Scene 8 의 `read(100B) 가능` 을 **코드로 증명** 한다.
 
 ---
 
@@ -452,6 +627,38 @@ client port 51213
 - accept socket 이라 해서 서버 포트가 매번 바뀌지 않는다.
 - 클라이언트가 서버의 모든 내부 소켓 포트를 알아야 하는 것도 아니다.
 
+### 직접 검증 — listen fd 와 accept fd 가 "다른 소켓" 임을 보이기
+
+```bash
+# (1) 서버 포트 범위 확인
+cat /proc/sys/net/ipv4/ip_local_port_range
+# 32768  60999     <- 여기서 ephemeral 이 뽑힌다
+
+# (2) 서버 프로세스의 fd 테이블 관찰
+python3 -m http.server 8080 >/dev/null &
+SRV=$!
+ls -l /proc/$SRV/fd | grep socket
+# lrwx... 3 -> socket:[123]    <- listen socket
+
+# (3) 동시 접속 3개를 열고 다시 본다
+for i in 1 2 3; do (curl -s http://127.0.0.1:8080/ >/dev/null & ) ; done ; sleep 0.2
+ls -l /proc/$SRV/fd | grep socket
+# lrwx... 3 -> socket:[123]    <- listen socket (항상 존재)
+# lrwx... 4 -> socket:[456]    <- accept socket #1
+# lrwx... 5 -> socket:[457]    <- accept socket #2
+# lrwx... 6 -> socket:[458]    <- accept socket #3
+
+# (4) ss 로 4-tuple 확인
+ss -tanp '( sport = :8080 )'
+# LISTEN 0 5 *:8080         *:*
+# ESTAB  0 0 127.0.0.1:8080 127.0.0.1:51213
+# ESTAB  0 0 127.0.0.1:8080 127.0.0.1:51214
+# ESTAB  0 0 127.0.0.1:8080 127.0.0.1:51215
+# ^-- 서버 포트는 계속 8080, 클라 포트만 ephemeral 로 다름
+```
+
+화이트보드에서 강조: listen socket 은 계속 한 개(fd 3), accept 는 연결 수만큼 늘어난다. 서버 포트는 고정 80/8080. 구분은 클라의 ephemeral port.
+
 ---
 
 ## Scene 10. close, FIN, timeout, 인터넷이 갑자기 끊기면
@@ -475,6 +682,34 @@ ACK  ------------>
 꼭 말할 문장:
 
 `connect와 close는 둘 다 TCP 상태 머신 위에서 동작합니다. 연결 성립과 종료는 모두 커널이 상태를 기억하며 관리합니다.`
+
+### 직접 검증 — FIN / TIME_WAIT / RST 관찰
+
+```bash
+# (1) 정상 close 시 FIN 캡처
+python3 -m http.server 8080 >/dev/null &
+sudo tcpdump -i lo -nn -S 'tcp port 8080 and (tcp[tcpflags] & tcp-fin != 0)' -c 4 &
+sleep 0.3
+curl -s http://127.0.0.1:8080/ -o /dev/null
+# IP ...: Flags [F.], seq X, ack Y    <- client -> server
+# IP ...: Flags [F.], seq Y, ack X+1  <- server -> client
+
+# (2) TIME_WAIT 상태 확인
+ss -tan state time-wait '( sport = :8080 or dport = :8080 )'
+
+# (3) 강제 종료 시 RST 실험
+python3 - <<'PY' &
+import socket, os
+s = socket.socket(); s.connect(('127.0.0.1',8080))
+# linger 0 -> close 가 FIN 대신 RST 를 보내게 함
+import struct; s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii',1,0))
+s.close()
+PY
+sudo tcpdump -i lo -nn -c 2 'tcp port 8080 and tcp[tcpflags] & tcp-rst != 0'
+# Flags [R.], seq ..., ack ...  <- "그냥 끊어진" 경우
+```
+
+화이트보드에서 강조: FIN 은 양방향이 따로 닫힌다 (active/passive close), RST 는 커널이 강제로 정리한다. `ss state time-wait` 가 남아 있는 게 TCP 상태 머신이 "살아 있다" 는 증거.
 
 ---
 
@@ -516,10 +751,31 @@ ACK  ------------>
 - `인터넷이 갑자기 끊기면 close 는 어떻게 되나요?`
   - Scene 10 으로 내려간다
 
+## 발표 중 한 화면에 띄울 검증 치트시트
+
+```bash
+# 이름 -> 주소
+dig +trace <host> ; cat /etc/resolv.conf ; getent hosts <host>
+
+# 바이트 배열
+python3 -c "import socket,struct;print(hex(socket.htons(80)));print(socket.inet_aton('1.2.3.4').hex())"
+
+# 시스템콜 순서
+strace -e trace=socket,connect,sendto,recvfrom,close curl -s http://<host>/
+
+# 핸드셰이크 / stream / close
+sudo tcpdump -i lo -nn -S 'tcp port 8080' -c 6
+ss -tanpi '( sport = :8080 or dport = :8080 )'
+ss -tan state time-wait
+
+# 4-tuple 과 listen/accept
+ss -tanp '( sport = :8080 )'
+ls -l /proc/$(pgrep -n python3)/fd | grep socket
+```
+
 ## 연결 문서
 
 - `q02-ip-address-byte-order.md`
 - `q03-dns-domain-cloudflare.md`
 - `q06-ch11-4-sockets-interface.md`
 - `q07-tcp-udp-socket-syscall.md`
-- `docs/question/q12-socket-connection-lifecycle.md`
