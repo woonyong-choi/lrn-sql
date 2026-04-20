@@ -147,6 +147,24 @@ dst IP   = 208.216.181.15
 - 왜 라우터는 MAC 이 두 개냐
 - 왜 IP 는 유지되고 MAC 은 바뀌냐
 
+### 직접 검증 — 내 호스트의 3층 주소 뜯어보기
+
+```bash
+# 내 IP 와 MAC 을 동시에 본다
+ip -o -4 addr show               # IP
+ip -o link show                  # MAC (link/ether 뒤의 값)
+
+# 기본 라우트 = 이 호스트의 "첫 hop"
+ip route show default
+# default via 192.168.0.1 dev en0  <- 192.168.0.1 이 곧 R
+
+# 그 R 의 MAC 은 ARP/neigh 테이블에 있다
+ip neigh show | grep $(ip route show default | awk '{print $3}')
+# 192.168.0.1 dev en0 lladdr 11:11:11:11:11:11 REACHABLE
+```
+
+화이트보드에서 강조: 방금 `ip neigh` 가 보여준 MAC 이 **바로 다음 프레임의 dst MAC** 이고, 서버 B 의 MAC 이 아니다. macOS 라면 `ifconfig`, `netstat -rn`, `arp -an` 으로 동일한 세 값을 뽑아낼 수 있다.
+
 ---
 
 ## Scene 3. write() 가 들어가면 커널은 무엇을 찾는가
@@ -193,6 +211,26 @@ write(4, buf, 95)
 - 소켓은 "물리 장치"가 아니라 커널 객체다.
 - 실제 물리 장치는 NIC 이고, 소켓은 그 NIC 를 쓰기 위한 논리적 엔드포인트다.
 
+### 직접 검증 — sockfd 를 따라 커널 객체로 내려가기
+
+```bash
+# 터미널 1: 서버 역할
+nc -l 8080
+
+# 터미널 2: 클라이언트 프로세스를 붙잡은 상태에서
+# (1) 내 프로세스가 들고 있는 fd 목록
+ls -l /proc/$$/fd              # 0 1 2 외에 방금 연 소켓이 socket:[xxxx] 로 뜬다
+
+# (2) 그 socket inode 가 실제 tcp 소켓으로 잡혀 있는지
+ss -tanpie | grep <사용 중인 포트>
+
+# (3) write() 가 어느 시스템콜로 내려가는지 눈으로 확인
+strace -e trace=write,sendto,sendmsg -f nc 127.0.0.1 8080
+# write(3, "hello\n", 6) = 6    <- fd 3 이 바로 struct socket 의 입구
+```
+
+화이트보드에서 강조: 유저가 본 정수 `3` → `/proc/PID/fd/3` 의 `socket:[inode]` → `ss` 로 같은 inode 가 TCP 상태로 잡혀 있다는 것까지 **한 호흡에 이어서 설명한다**.
+
 ---
 
 ## Scene 4. user -> kernel 복사는 왜 필요한가
@@ -227,6 +265,27 @@ wire transmit = 그 이후의 일
 
 - 일반 `write` 에서는 유저 -> 커널 복사가 한 번 일어난다.
 - `sendfile`, `splice`, `MSG_ZEROCOPY` 는 이 복사를 줄이기 위한 최적화다.
+
+### 직접 검증 — 소켓 버퍼 크기와 아직 안 나간 바이트
+
+```bash
+# (1) 현재 시스템의 기본 송신 버퍼 크기
+cat /proc/sys/net/core/wmem_default        # bytes
+cat /proc/sys/net/core/wmem_max
+cat /proc/sys/net/ipv4/tcp_wmem            # min default max
+
+# (2) 내 연결이 실제로 쓰는 SO_SNDBUF
+ss -tmi '( dport = :8080 )' | grep -E 'skmem|cwnd|bytes_acked'
+# skmem:(r0,rb131072,t0,tb2626560,...)   <- tb = tx buffer size
+# bytes_acked:N                          <- 실제 peer 가 받았다고 확인된 bytes
+
+# (3) "write return 했는데 아직 wire 로 안 나간" 증거
+ss -tanp | grep 8080
+# State   Recv-Q  Send-Q
+# ESTAB   0       4096       <- Send-Q 가 남아 있으면 커널 안에 쌓여 있다는 뜻
+```
+
+화이트보드에서 강조: `Send-Q > 0` 이 **"write 리턴 != wire 송신 완료"의 실물 증거**다. 이 표를 그대로 그려 놓고, 나중에 Scene 10 에서 다시 가리킨다.
 
 ---
 
@@ -270,6 +329,28 @@ window   = rwnd
 MSS = 1500 - 20(IP) - 20(TCP) = 1460B
 95B < 1460B -> 이번 예시는 분할 없음
 ```
+
+### 직접 검증 — TCP 헤더를 실제 바이트로 뜯기
+
+```bash
+# loopback 이라도 port 8080 트래픽을 잡아서 바이트 단위로 본다
+sudo tcpdump -i lo -X -nn -vv 'tcp port 8080' -c 4
+
+# 예상 출력 일부
+# ... seq 1000:1095, ack 9001, win 64240, options [...], length 95
+# 0x0000:  4500 0087 ... 0608 ...  <- IP header (20B)
+# 0x0014:  c82d 0050 000003e8      <- src_port=0xc82d(51213) dst_port=0x0050(80) seq=1000
+```
+
+추가 확인:
+
+```bash
+# 현재 연결의 MSS / cwnd / rto / rtt 실시간
+ss -tin '( dport = :8080 )'
+# rto:204 rtt:0.1/0.05 mss:1460 cwnd:10 bytes_sent:95 bytes_acked:95
+```
+
+화이트보드에서 강조: `mss:1460` 이 곧 **Scene 5 의 "1500 - 20 - 20"** 계산 값이다. 같은 숫자가 두 군데서 나온다는 점을 반드시 짚는다.
 
 ---
 
@@ -316,6 +397,29 @@ Total Length = 135
 
 `라우팅은 최종 목적지를 향해 매 홉마다 가장 가까운 다음 홉을 고르는 과정입니다.`
 
+### 직접 검증 — TTL 이 홉마다 줄어드는 것 보기
+
+```bash
+# (1) 라우팅 테이블 = "목적지별로 어떤 dev 를 쓸 것인가" 의 맵
+ip route show
+
+# (2) 특정 목적지에 대해 커널이 "다음 홉" 을 어떻게 결정하는지 질의
+ip route get 208.216.181.15
+# 208.216.181.15 via 192.168.0.1 dev en0 src 192.168.0.42
+
+# (3) TTL 변화를 한 홉씩 시각화
+traceroute -n -q 1 www.example.net
+#  1  192.168.0.1        0.5 ms
+#  2  10.0.0.1           3.1 ms
+#  3  ...
+
+# (4) 내가 쏜 패킷의 TTL 기본값
+sudo tcpdump -i any -v 'host www.example.net' -c 2
+# ... IP (tos 0x0, ttl 64, ...)   <- Linux default = 64
+```
+
+화이트보드에서 강조: `traceroute` 가 작동하는 원리 자체가 **"TTL 을 1, 2, 3 ... 으로 점점 늘리면서 각 홉에서 ICMP Time Exceeded 를 받아오는 것"**. TTL 의 hop-by-hop 감소가 실재한다는 직접 증거다.
+
 ---
 
 ## Scene 7. Ethernet framing: MAC 을 다시 붙인다
@@ -356,6 +460,28 @@ ARP cache hit  -> 바로 Ethernet header 작성
 정리 문장:
 
 `IP 는 유지되지만 Ethernet header 는 hop 단위로 새로 만들어집니다. 그래서 MAC 은 계속 바뀝니다.`
+
+### 직접 검증 — Ethernet header 와 ARP 를 실제로 보기
+
+```bash
+# (1) ARP 가 "IP -> MAC" 을 어떻게 채웠는지
+ip neigh show                   # Linux
+# 192.168.0.1 dev en0 lladdr 11:22:33:44:55:66 REACHABLE
+
+arp -an                         # macOS / BSD 호환
+
+# (2) Ethernet header 까지 포함한 덤프 (-e 가 핵심)
+sudo tcpdump -i any -e -nn 'host 192.168.0.1' -c 2
+# 11:22:33:44:55:66 > AA:BB:CC:DD:EE:FF, ethertype IPv4 (0x0800), length ...
+#  ^dst MAC         ^src MAC            ^Scene 7 의 EtherType = 0x0800
+
+# (3) ARP 자체를 캡처
+sudo tcpdump -i any -nn arp -c 4
+# ARP, Request who-has 192.168.0.1 tell 192.168.0.42
+# ARP, Reply 192.168.0.1 is-at 11:22:33:44:55:66
+```
+
+화이트보드에서 강조: `who-has ... tell ...` 와 `is-at` 이 정확히 Scene 7 에서 그린 **ARP cache miss → reply → cache hit** 3줄과 같은 것이다.
 
 ---
 
@@ -416,6 +542,30 @@ CPU / DRAM / PCIe NIC 사이 경로를
 IO bridge / memory controller / PCIe root complex 가 중재
 ```
 
+### 직접 검증 — qdisc · TX ring · IRQ 의 실재
+
+```bash
+# (1) 현재 달린 qdisc (기본은 fq_codel/pfifo_fast)
+tc qdisc show dev <iface>
+# qdisc fq_codel 0: root refcnt 2 limit 10240p ...
+
+# (2) NIC 의 TX descriptor ring 크기
+ethtool -g <iface>
+# Current hardware settings:
+# RX:     1024
+# TX:     1024                <- 이 값이 곧 Scene 8 의 "TX descriptor ring"
+
+# (3) NIC 통계: 실제 DMA/NIC 레벨에서 송신된 프레임 수
+ethtool -S <iface> | grep -Ei 'tx_(packets|bytes|dma)'
+
+# (4) NIC IRQ 가 어떤 CPU 에서 뜨고 있는가 (Scene 8 의 "NIC interrupt")
+cat /proc/interrupts | awk 'NR==1 || /<iface>/'
+```
+
+macOS 에서는 `netstat -I <iface> -b` 로 송수신 바이트만 뽑을 수 있다 (ring/irq 세부는 커널 권한 필요).
+
+화이트보드에서 강조: `ethtool -g` 의 `TX: 1024` 가 바로 **"descriptor ring 엔트리 1024 개"** 이고, 이게 다 차면 qdisc 가 backpressure 를 받는 구조다.
+
 ---
 
 ## Scene 9. 라우터를 한 번 지나면 실제로 무엇이 바뀌나
@@ -456,6 +606,33 @@ Frame on LAN2
 - IP checksum 은 재계산
 - TCP checksum 은 보통 end-to-end 유지
 
+### 직접 검증 — "라우터 전/후" 를 한 화면에 띄우기
+
+라우터를 가상으로 만드는 가장 쉬운 방법은 리눅스의 network namespace 이다.
+
+```bash
+# (1) 두 개의 네임스페이스 + 브리지
+sudo ip netns add ns1
+sudo ip netns add ns2
+sudo ip link add veth1 type veth peer name veth2
+sudo ip link set veth1 netns ns1
+sudo ip link set veth2 netns ns2
+sudo ip -n ns1 addr add 10.1.0.2/24 dev veth1 && sudo ip -n ns1 link set veth1 up
+sudo ip -n ns2 addr add 10.1.0.3/24 dev veth2 && sudo ip -n ns2 link set veth2 up
+
+# (2) ns1 에서 ping 을 쏘면서 ns2 에서 덤프
+sudo ip netns exec ns2 tcpdump -i veth2 -e -nn -v icmp &
+sudo ip netns exec ns1 ping -c 1 10.1.0.3
+# ns2 에서 본 프레임:
+#   <ns2 MAC> > <ns1 MAC>     <- MAC 이 바뀜
+#   src 10.1.0.2 dst 10.1.0.3 <- IP 는 유지
+#   ttl 63                     <- ns1 기본 64 에서 -1
+```
+
+실제 라우터(공유기) 앞뒤를 관찰하려면 `traceroute -n -I -q 1 <target>` 의 hop 별 TTL 감소가 같은 증거를 준다.
+
+화이트보드에서 강조: Scene 9 의 `TTL: 64 → 63` 표에 **실험에서 본 `ttl 63`** 을 그대로 겹쳐 쓴다.
+
 ---
 
 ## Scene 10. write 의 리턴, IRQ, echo, EOF 로 마무리
@@ -484,6 +661,29 @@ peer receives
 그리고 echo/EOF 를 연결해서 마무리:
 
 `이 과정을 반대로 뒤집으면 수신 경로가 되고, 그 왕복 대칭을 가장 단순하게 보여 주는 예가 echo 서버입니다. close와 EOF를 붙이면 "보내는 것"뿐 아니라 "끝났다는 사실"까지 설명할 수 있습니다.`
+
+### 직접 검증 — write 리턴 시점 vs 실제 완료 시점
+
+```bash
+# (1) echo 서버/클라이언트 한 줄
+python3 -c "
+import socket, time
+s = socket.create_connection(('127.0.0.1', 8080))
+t0 = time.time()
+n  = s.send(b'x' * (4*1024*1024))          # 4 MB
+t1 = time.time()
+print(f'write returned in {t1-t0:.4f}s, returned bytes = {n}')
+"
+
+# (2) 같은 순간에 옆 터미널에서
+watch -n 0.1 "ss -tanpi '( dport = :8080 )' | grep -E 'Send-Q|bytes_acked|retrans'"
+
+# (3) FIN 도 직접 본다
+sudo tcpdump -i lo -nn 'tcp port 8080' -c 20
+# Flags [F.], seq ..., ack ...     <- close() 가 FIN 을 실제로 쏘는 증거
+```
+
+화이트보드에서 강조: `write returned in 0.0001s` 와 `Send-Q: 3932160` 이 동시에 뜨면 **"return ≠ wire 송신 완료"** 의 살아 있는 증거다. Scene 4 의 `ss -tanp` 표를 이 지점에서 다시 가리킨다.
 
 ---
 
@@ -521,6 +721,31 @@ peer receives
 
 - `write가 리턴했는데 왜 아직 안 나갔다고 하나요?`
   - Scene 4, Scene 10 으로 간다
+
+## 발표 중 한 화면에 띄울 검증 치트시트
+
+```bash
+# 3층 주소
+ip -o -4 addr; ip -o link; ip route show default; ip neigh
+
+# fd -> socket
+ls -l /proc/$$/fd ; ss -tanpie
+
+# 버퍼 / MSS / cwnd / send-Q
+ss -tmi ; ss -tanp ; ss -tin
+
+# wire 덤프 + ARP + TTL
+sudo tcpdump -i any -e -X -vv -c 4 'tcp port 8080'
+sudo tcpdump -i any -nn arp -c 4
+traceroute -n <host>
+
+# 하드웨어 쪽
+tc qdisc show dev <iface> ; ethtool -g <iface>
+ethtool -S <iface> | grep tx_
+cat /proc/interrupts | grep <iface>
+```
+
+이 열 줄이 Part A 전체 스크립트의 증거 세트다.
 
 ## 연결 문서
 
