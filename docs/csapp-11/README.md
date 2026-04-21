@@ -20,6 +20,10 @@
 - `06-resources.md`: 학습 자료, 참고 링크, 숙제 문제 가이드, 디버깅 도구 정리
 - `07-ch11-code-reference.md`: 11장의 모든 구조체, 함수 원형, 전체 소스 코드(Tiny/Echo/adder), Aside 박스, 연습문제 풀이, 숙제 전문
 
+관련 문서:
+
+- `../sql/08-wk07-minidb-to-wk08-sql-api-server.md`: 지난 주 디스크 기반 MiniDB와 이번 주 SQL API 서버 과제의 연결, 역할 분리, 동시성/캐시 이슈, AI 협업 운영안
+
 ## 이번 주 핵심 흐름
 
 ```text
