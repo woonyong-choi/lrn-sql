@@ -94,16 +94,17 @@ int http_read_request(int client_fd, http_request_t *req)
 
 /* ── HTTP 응답 전송 헬퍼 ── */
 static void send_response(int client_fd, int status, const char *status_text,
-                           const char *body, size_t body_len)
+                          const char *body, size_t body_len, int keep_alive)
 {
     char header[512];
     int hlen = snprintf(header, sizeof(header),
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: text/plain; charset=utf-8\r\n"
         "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
+        "Connection: %s\r\n"
         "\r\n",
-        status, status_text, body_len);
+        status, status_text, body_len,
+        keep_alive ? "keep-alive" : "close");
 
     send(client_fd, header, (size_t)hlen, MSG_NOSIGNAL);
     if (body_len > 0)
@@ -112,26 +113,20 @@ static void send_response(int client_fd, int status, const char *status_text,
 
 void http_send_ok(int client_fd, const char *body, size_t body_len)
 {
-    send_response(client_fd, 200, "OK", body, body_len);
+    send_response(client_fd, 200, "OK", body, body_len, 0);
 }
 
 void http_send_ok_keepalive(int client_fd, const char *body, size_t body_len)
 {
-    char header[512];
-    int hlen = snprintf(header, sizeof(header),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain; charset=utf-8\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: keep-alive\r\n"
-        "\r\n",
-        body_len);
-
-    send(client_fd, header, (size_t)hlen, MSG_NOSIGNAL);
-    if (body_len > 0)
-        send(client_fd, body, body_len, MSG_NOSIGNAL);
+    send_response(client_fd, 200, "OK", body, body_len, 1);
 }
 
 void http_send_error(int client_fd, const char *body, size_t body_len)
 {
-    send_response(client_fd, 400, "Bad Request", body, body_len);
+    send_response(client_fd, 400, "Bad Request", body, body_len, 0);
+}
+
+void http_send_error_keepalive(int client_fd, const char *body, size_t body_len)
+{
+    send_response(client_fd, 400, "Bad Request", body, body_len, 1);
 }

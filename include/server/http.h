@@ -37,4 +37,7 @@ void http_send_ok_keepalive(int client_fd, const char *body, size_t body_len);
 /* HTTP 400 응답을 client_fd에 전송한다 */
 void http_send_error(int client_fd, const char *body, size_t body_len);
 
+/* HTTP 400 응답 (keep-alive 헤더 포함) */
+void http_send_error_keepalive(int client_fd, const char *body, size_t body_len);
+
 #endif /* HTTP_H */
