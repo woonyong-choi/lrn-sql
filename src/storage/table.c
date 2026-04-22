@@ -426,14 +426,75 @@ int heap_delete(pager_t *pager, row_ref_t ref)
  */
 void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
 {
-    (void)row_size;
     uint32_t pid = pager->header.first_heap_page_id;
     while (pid != 0) {
         uint8_t *page = pager_get_page_rlatch(pager, pid);
+        if (page == NULL) {
+            return;
+        }
+
         heap_page_header_t hph;
         memcpy(&hph, page, sizeof(hph));
+        uint32_t next = hph.next_heap_page_id;
+
+        uint16_t live_count = 0;
+        for (uint16_t i = 0; i < hph.slot_count; i++) {
+            slot_t slot;
+            size_t slot_off = sizeof(heap_page_header_t) + i * sizeof(slot_t);
+            memcpy(&slot, page + slot_off, sizeof(slot));
+            if (slot.status == SLOT_ALIVE) {
+                live_count++;
+            }
+        }
+
+        size_t refs_size = (size_t)live_count * sizeof(row_ref_t);
+        size_t rows_size = (size_t)live_count * row_size;
+        uint8_t *snapshot = NULL;
+        row_ref_t *refs = NULL;
+        uint8_t *rows = NULL;
+
+        if (live_count > 0 && row_size > 0) {
+            snapshot = (uint8_t *)malloc(refs_size + rows_size);
+            if (snapshot != NULL) {
+                refs = (row_ref_t *)snapshot;
+                rows = snapshot + refs_size;
+
+                uint16_t out = 0;
+                for (uint16_t i = 0; i < hph.slot_count; i++) {
+                    slot_t slot;
+                    size_t slot_off = sizeof(heap_page_header_t) + i * sizeof(slot_t);
+                    memcpy(&slot, page + slot_off, sizeof(slot));
+                    if (slot.status != SLOT_ALIVE) {
+                        continue;
+                    }
+
+                    refs[out].page_id = pid;
+                    refs[out].slot_id = i;
+                    memcpy(rows + (size_t)out * row_size, page + slot.offset, row_size);
+                    out++;
+                }
+            }
+        }
+
+        pager_unlatch_r(pager, pid);
+
+        if (snapshot != NULL) {
+            for (uint16_t i = 0; i < live_count; i++) {
+                if (!cb(rows + (size_t)i * row_size, refs[i], ctx)) {
+                    free(snapshot);
+                    return;
+                }
+            }
+            free(snapshot);
+            pid = next;
+            continue;
+        }
 
         for (uint16_t i = 0; i < hph.slot_count; i++) {
+            page = pager_get_page_rlatch(pager, pid);
+            if (page == NULL) {
+                return;
+            }
             slot_t slot;
             size_t slot_off = sizeof(heap_page_header_t) + i * sizeof(slot_t);
             memcpy(&slot, page + slot_off, sizeof(slot));
@@ -444,10 +505,8 @@ void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
                     return;
                 }
             }
+            pager_unlatch_r(pager, pid);
         }
-
-        uint32_t next = hph.next_heap_page_id;
-        pager_unlatch_r(pager, pid);
         pid = next;
     }
 }
