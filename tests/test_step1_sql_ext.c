@@ -147,7 +147,41 @@ static void test_update_by_scan(void) {
 }
 
 /* ════════════════════════════════════════════════════════════ */
-/*  3. 비교 연산자 (>, <, >=, <=, !=)                          */
+/*  3. 시스템 컬럼 id 수정 차단                                 */
+/* ════════════════════════════════════════════════════════════ */
+static void test_update_system_id_rejected(void) {
+    printf(CLR_YELLOW "\n[test_update_system_id_rejected]" CLR_RESET "\n");
+    pager_t pager;
+    setup_test_db(&pager, "update_id_reject");
+    create_and_populate(&pager, 3);
+
+    exec_result_t r = db_execute(&pager,
+        "UPDATE users SET id = 99 WHERE id = 1");
+    ASSERT_EQ_INT(r.status, -1, "UPDATE id is rejected");
+    ASSERT_TRUE(strstr(r.message, "시스템 컬럼") != NULL,
+                "error mentions system column");
+    if (r.out_buf) free(r.out_buf);
+
+    r = db_execute(&pager, "SELECT * FROM users WHERE id = 1");
+    ASSERT_EQ_INT(r.status, 0, "original row still searchable by id=1");
+    if (r.out_buf) {
+        ASSERT_TRUE(strstr(r.out_buf, "Alice") != NULL,
+                    "id update rejection keeps original row");
+        ASSERT_TRUE(strstr(r.out_buf, "99") == NULL,
+                    "id field was not rewritten");
+        free(r.out_buf);
+    }
+
+    r = db_execute(&pager, "SELECT * FROM users WHERE id = 99");
+    ASSERT_EQ_INT(r.status, 0, "SELECT id=99 returns normal empty result");
+    ASSERT_TRUE(r.out_buf == NULL, "no new row for id=99");
+    if (r.out_buf) free(r.out_buf);
+
+    teardown_test_db(&pager, "update_id_reject");
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/*  4. 비교 연산자 (>, <, >=, <=, !=)                          */
 /* ════════════════════════════════════════════════════════════ */
 static void test_comparison_operators(void) {
     printf(CLR_YELLOW "\n[test_comparison_operators]" CLR_RESET "\n");
@@ -212,7 +246,7 @@ static void test_comparison_operators(void) {
 }
 
 /* ════════════════════════════════════════════════════════════ */
-/*  4. COUNT(*)                                                */
+/*  5. COUNT(*)                                                */
 /* ════════════════════════════════════════════════════════════ */
 static void test_count(void) {
     printf(CLR_YELLOW "\n[test_count]" CLR_RESET "\n");
@@ -245,7 +279,7 @@ static void test_count(void) {
 }
 
 /* ════════════════════════════════════════════════════════════ */
-/*  5. ORDER BY                                                */
+/*  6. ORDER BY                                                */
 /* ════════════════════════════════════════════════════════════ */
 static void test_order_by(void) {
     printf(CLR_YELLOW "\n[test_order_by]" CLR_RESET "\n");
@@ -290,7 +324,7 @@ static void test_order_by(void) {
 }
 
 /* ════════════════════════════════════════════════════════════ */
-/*  6. LIMIT                                                   */
+/*  7. LIMIT                                                   */
 /* ════════════════════════════════════════════════════════════ */
 static void test_limit(void) {
     printf(CLR_YELLOW "\n[test_limit]" CLR_RESET "\n");
@@ -312,11 +346,16 @@ static void test_limit(void) {
         free(r.out_buf);
     }
 
+    r = db_execute(&pager, "SELECT * FROM users LIMIT 0");
+    ASSERT_EQ_INT(r.status, 0, "LIMIT 0 succeeds");
+    ASSERT_TRUE(r.out_buf == NULL, "LIMIT 0 returns no rows");
+    if (r.out_buf) free(r.out_buf);
+
     teardown_test_db(&pager, "limit");
 }
 
 /* ════════════════════════════════════════════════════════════ */
-/*  7. ORDER BY + LIMIT 복합                                   */
+/*  8. ORDER BY + LIMIT 복합                                   */
 /* ════════════════════════════════════════════════════════════ */
 static void test_order_by_limit(void) {
     printf(CLR_YELLOW "\n[test_order_by_limit]" CLR_RESET "\n");
@@ -340,7 +379,7 @@ static void test_order_by_limit(void) {
 }
 
 /* ════════════════════════════════════════════════════════════ */
-/*  8. DROP TABLE                                              */
+/*  9. DROP TABLE                                              */
 /* ════════════════════════════════════════════════════════════ */
 static void test_drop_table(void) {
     printf(CLR_YELLOW "\n[test_drop_table]" CLR_RESET "\n");
@@ -376,7 +415,7 @@ static void test_drop_table(void) {
 }
 
 /* ════════════════════════════════════════════════════════════ */
-/*  9. EXPLAIN 확장                                            */
+/* 10. EXPLAIN 확장                                            */
 /* ════════════════════════════════════════════════════════════ */
 static void test_explain_extended(void) {
     printf(CLR_YELLOW "\n[test_explain_extended]" CLR_RESET "\n");
@@ -425,6 +464,7 @@ int main(void)
 
     test_update_by_id();
     test_update_by_scan();
+    test_update_system_id_rejected();
     test_comparison_operators();
     test_count();
     test_order_by();

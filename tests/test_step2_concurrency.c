@@ -296,6 +296,25 @@ static void test_concurrent_read_write(void)
     remove("__test__rw.db");
 }
 
+typedef struct {
+    lock_table_t *lt;
+    uint64_t row_id;
+    lock_mode_t mode;
+    int delay_ms;
+    int result;
+} db_lock_thread_arg_t;
+
+static void *db_lock_thread_fn(void *arg)
+{
+    db_lock_thread_arg_t *a = (db_lock_thread_arg_t *)arg;
+    a->result = lock_acquire(a->lt, a->row_id, a->mode);
+    if (a->result == 0 && a->delay_ms > 0) {
+        usleep((unsigned)(a->delay_ms * 1000));
+    }
+    lock_release_all(a->lt);
+    return NULL;
+}
+
 /* INSERT는 활성 range lock과 충돌해야 한다 */
 typedef struct {
     uint64_t low;
@@ -349,6 +368,59 @@ static void test_insert_gap_conflict(void)
     remove("__test__gap.db");
 }
 
+static void test_delete_scan_lock_conflict(void)
+{
+    remove("__test__scan_delete.db");
+    ASSERT(pager_open(&g_pager, "__test__scan_delete.db", true) == 0, "DB 생성");
+    db_init();
+
+    exec_result_t r = db_execute(&g_pager, "CREATE TABLE users (name VARCHAR(32), score INT)");
+    ASSERT(r.status == 0, "CREATE TABLE 성공");
+    free(r.out_buf);
+
+    r = db_execute(&g_pager, "INSERT INTO users VALUES ('alice', 100)");
+    ASSERT(r.status == 0, "alice INSERT 성공");
+    free(r.out_buf);
+
+    r = db_execute(&g_pager, "INSERT INTO users VALUES ('bob', 200)");
+    ASSERT(r.status == 0, "bob INSERT 성공");
+    free(r.out_buf);
+
+    db_lock_thread_arg_t holder_arg = {
+        .lt = db_get_lock_table(),
+        .row_id = 1,
+        .mode = LOCK_X,
+        .delay_ms = 3500,
+        .result = -1
+    };
+
+    pthread_t holder;
+    pthread_create(&holder, NULL, db_lock_thread_fn, &holder_arg);
+    usleep(50000);
+
+    r = db_execute(&g_pager, "DELETE FROM users WHERE name = 'alice'");
+    ASSERT(r.status == -1, "scan DELETE is blocked by held row lock");
+    if (r.message[0] != '\0') {
+        ASSERT(strstr(r.message, "row lock 획득 timeout") != NULL,
+               "scan DELETE timeout message 확인");
+    }
+    free(r.out_buf);
+
+    pthread_join(holder, NULL);
+    ASSERT(holder_arg.result == 0, "holder row lock 획득 성공");
+
+    r = db_execute(&g_pager, "SELECT * FROM users WHERE id = 1");
+    ASSERT(r.status == 0, "conflicted DELETE 후 원본 행 조회 성공");
+    if (r.out_buf) {
+        ASSERT(strstr(r.out_buf, "alice") != NULL, "alice row remains after timeout");
+        free(r.out_buf);
+    }
+
+    db_destroy();
+    pager_close(&g_pager);
+    remove("__test__scan_delete.db");
+}
+
 static void test_http_keepalive_error_header(void)
 {
     int fds[2];
@@ -386,6 +458,7 @@ int main(void)
     TEST(test_concurrent_insert);
     TEST(test_concurrent_read_write);
     TEST(test_insert_gap_conflict);
+    TEST(test_delete_scan_lock_conflict);
     TEST(test_http_keepalive_error_header);
 
     fprintf(stderr, "\n========================================\n");

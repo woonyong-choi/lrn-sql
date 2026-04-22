@@ -57,6 +57,10 @@ static void buf_init(out_buf_t *b)
     b->cap  = 4096;
     b->data = (char *)malloc(b->cap);
     b->len  = 0;
+    if (b->data == NULL) {
+        b->cap = 0;
+        return;
+    }
     b->data[0] = '\0';
 }
 
@@ -65,6 +69,10 @@ static void buf_append(out_buf_t *b, const char *fmt, ...)
 
 static void buf_append(out_buf_t *b, const char *fmt, ...)
 {
+    if (b->data == NULL || b->cap == 0) {
+        return;
+    }
+
     va_list ap;
     va_start(ap, fmt);
     int need = vsnprintf(NULL, 0, fmt, ap);
@@ -73,7 +81,9 @@ static void buf_append(out_buf_t *b, const char *fmt, ...)
 
     while (b->len + (size_t)need + 1 > b->cap) {
         b->cap *= 2;
-        b->data = (char *)realloc(b->data, b->cap);
+        char *tmp = (char *)realloc(b->data, b->cap);
+        if (!tmp) return;   /* realloc 실패 시 기존 버퍼 유지 */
+        b->data = tmp;
     }
     va_start(ap, fmt);
     vsnprintf(b->data + b->len, (size_t)need + 1, fmt, ap);
@@ -413,8 +423,16 @@ typedef struct {
     pager_t *pager;
     const statement_t *stmt;
     uint32_t count;
+    uint32_t limit;
+    bool stop_at_limit;
     out_buf_t *buf;
 } scan_ctx_t;
+
+typedef struct {
+    pager_t *pager;
+    const statement_t *stmt;
+    uint64_t count;
+} count_ctx_t;
 
 /*
  * select_scan_cb - SELECT의 테이블 스캔 콜백
@@ -440,6 +458,24 @@ static bool select_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
     }
     append_row(sc->buf, hdr, values);
     sc->count++;
+    if (sc->stop_at_limit && sc->count >= sc->limit) {
+        return false;
+    }
+    return true;
+}
+
+static bool count_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
+{
+    (void)ref;
+    count_ctx_t *cc = (count_ctx_t *)ctx;
+    const db_header_t *hdr = &cc->pager->header;
+
+    row_value_t values[MAX_COLUMNS];
+    row_deserialize(hdr, row_data, values);
+
+    if (match_predicate(hdr, values, cc->stmt)) {
+        cc->count++;
+    }
     return true;
 }
 
@@ -497,30 +533,62 @@ typedef struct {
     row_value_t *rows;   /* 수집된 행 배열 */
     uint32_t count;
     uint32_t cap;
+    bool alloc_failed;
 } row_collect_t;
+
+static void row_collect_init_with_cap(row_collect_t *rc, uint32_t initial_cap)
+{
+    rc->cap   = initial_cap;
+    rc->count = 0;
+    rc->alloc_failed = false;
+
+    if (initial_cap == 0) {
+        rc->rows = NULL;
+        return;
+    }
+
+    rc->rows  = (row_value_t *)malloc(initial_cap * MAX_COLUMNS * sizeof(row_value_t));
+    if (rc->rows == NULL) {
+        rc->cap = 0;
+        rc->alloc_failed = true;
+    }
+}
 
 static void row_collect_init(row_collect_t *rc)
 {
-    rc->cap   = 256;
-    rc->count = 0;
-    rc->rows  = (row_value_t *)malloc(rc->cap * MAX_COLUMNS * sizeof(row_value_t));
+    row_collect_init_with_cap(rc, 256);
 }
 
-static void row_collect_push(row_collect_t *rc, const row_value_t *vals)
+static bool row_collect_push(row_collect_t *rc, const row_value_t *vals)
 {
+    if (rc->rows == NULL || rc->cap == 0) {
+        rc->alloc_failed = true;
+        return false;
+    }
+
     if (rc->count >= rc->cap) {
-        rc->cap *= 2;
-        rc->rows = (row_value_t *)realloc(rc->rows,
-                    rc->cap * MAX_COLUMNS * sizeof(row_value_t));
+        uint32_t new_cap = rc->cap * 2;
+        row_value_t *tmp = (row_value_t *)realloc(
+            rc->rows, new_cap * MAX_COLUMNS * sizeof(row_value_t));
+        if (tmp == NULL) {
+            rc->alloc_failed = true;
+            return false;
+        }
+        rc->cap = new_cap;
+        rc->rows = tmp;
     }
     memcpy(&rc->rows[rc->count * MAX_COLUMNS], vals, MAX_COLUMNS * sizeof(row_value_t));
     rc->count++;
+    return true;
 }
 
 static void row_collect_free(row_collect_t *rc)
 {
     free(rc->rows);
     rc->rows = NULL;
+    rc->cap = 0;
+    rc->count = 0;
+    rc->alloc_failed = false;
 }
 
 static row_value_t *row_collect_get(row_collect_t *rc, uint32_t idx)
@@ -547,21 +615,16 @@ static bool collect_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
     if (!match_predicate(hdr, values, cc->stmt)) {
         return true;
     }
-    row_collect_push(cc->collector, values);
-    return true;
+    return row_collect_push(cc->collector, values);
 }
 
-/* qsort 비교용 전역 (ORDER BY) */
-static const db_header_t *g_sort_hdr;
-static int g_sort_col_idx;
-static bool g_sort_desc;
-
-static int sort_compare(const void *a, const void *b)
+static int compare_row_values(const row_value_t *lhs, const row_value_t *rhs,
+                              const db_header_t *hdr, int col_idx, bool desc)
 {
-    const row_value_t *ra = (const row_value_t *)a + g_sort_col_idx;
-    const row_value_t *rb = (const row_value_t *)b + g_sort_col_idx;
+    const row_value_t *ra = lhs + col_idx;
+    const row_value_t *rb = rhs + col_idx;
     int cmp = 0;
-    switch (g_sort_hdr->columns[g_sort_col_idx].type) {
+    switch (hdr->columns[col_idx].type) {
         case COL_TYPE_INT:
             cmp = (ra->int_val > rb->int_val) - (ra->int_val < rb->int_val);
             break;
@@ -572,7 +635,132 @@ static int sort_compare(const void *a, const void *b)
             cmp = strcmp(ra->str_val, rb->str_val);
             break;
     }
-    return g_sort_desc ? -cmp : cmp;
+    return desc ? -cmp : cmp;
+}
+
+static void swap_row_blocks(row_value_t *rows, uint32_t a, uint32_t b)
+{
+    row_value_t tmp[MAX_COLUMNS];
+
+    if (a == b) {
+        return;
+    }
+
+    memcpy(tmp, &rows[a * MAX_COLUMNS], sizeof(tmp));
+    memcpy(&rows[a * MAX_COLUMNS], &rows[b * MAX_COLUMNS], sizeof(tmp));
+    memcpy(&rows[b * MAX_COLUMNS], tmp, sizeof(tmp));
+}
+
+static void quicksort_row_blocks(row_value_t *rows, int left, int right,
+                                 const db_header_t *hdr, int col_idx, bool desc)
+{
+    int i = left;
+    int j = right;
+    row_value_t pivot[MAX_COLUMNS];
+
+    memcpy(pivot, &rows[((left + right) / 2) * MAX_COLUMNS], sizeof(pivot));
+
+    while (i <= j) {
+        while (compare_row_values(&rows[i * MAX_COLUMNS], pivot,
+                                  hdr, col_idx, desc) < 0) {
+            i++;
+        }
+        while (compare_row_values(&rows[j * MAX_COLUMNS], pivot,
+                                  hdr, col_idx, desc) > 0) {
+            j--;
+        }
+        if (i <= j) {
+            swap_row_blocks(rows, (uint32_t)i, (uint32_t)j);
+            i++;
+            j--;
+        }
+    }
+
+    if (left < j) {
+        quicksort_row_blocks(rows, left, j, hdr, col_idx, desc);
+    }
+    if (i < right) {
+        quicksort_row_blocks(rows, i, right, hdr, col_idx, desc);
+    }
+}
+
+typedef struct {
+    pager_t *pager;
+    const statement_t *stmt;
+    row_collect_t *collector;
+    int order_col_idx;
+    bool order_desc;
+    uint32_t limit;
+} topk_ctx_t;
+
+static void topk_sift_up(row_collect_t *rc, uint32_t idx,
+                         const db_header_t *hdr, int col_idx, bool desc)
+{
+    while (idx > 0) {
+        uint32_t parent = (idx - 1) / 2;
+        if (compare_row_values(row_collect_get(rc, idx), row_collect_get(rc, parent),
+                               hdr, col_idx, desc) <= 0) {
+            break;
+        }
+        swap_row_blocks(rc->rows, idx, parent);
+        idx = parent;
+    }
+}
+
+static void topk_sift_down(row_collect_t *rc, uint32_t idx,
+                           const db_header_t *hdr, int col_idx, bool desc)
+{
+    while (true) {
+        uint32_t left = idx * 2 + 1;
+        uint32_t right = left + 1;
+        uint32_t worst = idx;
+
+        if (left < rc->count &&
+            compare_row_values(row_collect_get(rc, left), row_collect_get(rc, worst),
+                               hdr, col_idx, desc) > 0) {
+            worst = left;
+        }
+        if (right < rc->count &&
+            compare_row_values(row_collect_get(rc, right), row_collect_get(rc, worst),
+                               hdr, col_idx, desc) > 0) {
+            worst = right;
+        }
+        if (worst == idx) {
+            break;
+        }
+        swap_row_blocks(rc->rows, idx, worst);
+        idx = worst;
+    }
+}
+
+static bool topk_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
+{
+    (void)ref;
+    topk_ctx_t *tc = (topk_ctx_t *)ctx;
+    const db_header_t *hdr = &tc->pager->header;
+    row_collect_t *rc = tc->collector;
+
+    row_value_t values[MAX_COLUMNS];
+    row_deserialize(hdr, row_data, values);
+
+    if (!match_predicate(hdr, values, tc->stmt)) {
+        return true;
+    }
+
+    if (rc->count < tc->limit) {
+        if (!row_collect_push(rc, values)) {
+            return false;
+        }
+        topk_sift_up(rc, rc->count - 1, hdr, tc->order_col_idx, tc->order_desc);
+        return true;
+    }
+
+    if (compare_row_values(values, row_collect_get(rc, 0),
+                           hdr, tc->order_col_idx, tc->order_desc) < 0) {
+        memcpy(row_collect_get(rc, 0), values, MAX_COLUMNS * sizeof(row_value_t));
+        topk_sift_down(rc, 0, hdr, tc->order_col_idx, tc->order_desc);
+    }
+    return true;
 }
 
 static int find_column_index(const db_header_t *hdr, const char *name)
@@ -584,6 +772,96 @@ static int find_column_index(const db_header_t *hdr, const char *name)
     return -1;
 }
 
+static int compare_u64(const void *lhs, const void *rhs)
+{
+    uint64_t a = *(const uint64_t *)lhs;
+    uint64_t b = *(const uint64_t *)rhs;
+    return (a > b) - (a < b);
+}
+
+/*
+ * scan 경로는 먼저 대상 row id를 모두 모은 뒤, 정렬된 순서로 row lock을 획득한다.
+ * 이렇게 해야 동시 scan UPDATE/DELETE 사이의 lock 순서가 고정되어 데드락을 줄이고,
+ * lock timeout 전에 일부 row만 수정되는 부분 성공 상태도 피할 수 있다.
+ */
+static int lock_collected_ids(lock_table_t *lt, uint64_t *ids, uint32_t *count,
+                              lock_mode_t mode, uint64_t *failed_id)
+{
+    if (*count == 0) {
+        return 0;
+    }
+
+    qsort(ids, *count, sizeof(ids[0]), compare_u64);
+
+    uint32_t write = 0;
+    for (uint32_t read = 0; read < *count; read++) {
+        if (write == 0 || ids[read] != ids[write - 1]) {
+            ids[write++] = ids[read];
+        }
+    }
+
+    for (uint32_t i = 0; i < write; i++) {
+        if (lock_acquire(lt, ids[i], mode) != 0) {
+            if (failed_id != NULL) {
+                *failed_id = ids[i];
+            }
+            *count = write;
+            return -1;
+        }
+    }
+
+    *count = write;
+    return 0;
+}
+
+static bool fetch_matching_row_by_id(pager_t *pager, const db_header_t *hdr,
+                                     uint64_t id, const statement_t *stmt,
+                                     row_ref_t *out_ref, row_value_t *out_values)
+{
+    row_ref_t ref;
+
+    if (!bptree_search(pager, id, &ref)) {
+        return false;
+    }
+
+    const uint8_t *row_data = heap_fetch(pager, ref, hdr->row_size);
+    if (row_data == NULL) {
+        return false;
+    }
+
+    row_deserialize(hdr, row_data, out_values);
+    bool match = match_predicate(hdr, out_values, stmt);
+    pager_unlatch_r(pager, ref.page_id);
+
+    if (!match) {
+        return false;
+    }
+
+    if (out_ref != NULL) {
+        *out_ref = ref;
+    }
+    return true;
+}
+
+static int validate_update_target(const db_header_t *hdr, const statement_t *stmt,
+                                  exec_result_t *res)
+{
+    int col_idx = find_column_index(hdr, stmt->update_field);
+    if (col_idx < 0) {
+        res->status = -1;
+        snprintf(res->message, sizeof(res->message),
+                 "오류: 컬럼 '%s'을(를) 찾을 수 없습니다", stmt->update_field);
+        return -1;
+    }
+    if (hdr->columns[col_idx].is_system) {
+        res->status = -1;
+        snprintf(res->message, sizeof(res->message),
+                 "오류: 시스템 컬럼 '%s'은(는) 수정할 수 없습니다", stmt->update_field);
+        return -1;
+    }
+    return col_idx;
+}
+
 static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
 {
     exec_result_t res = {0, "", NULL, 0};
@@ -593,34 +871,82 @@ static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
     if (stmt->select_count) {
         out_buf_t buf;
         buf_init(&buf);
-        /* 간단 카운트: 조건 일치 행만 센다 */
-        row_collect_t rc;
-        row_collect_init(&rc);
-        collect_ctx_t cc = { .pager = pager, .stmt = stmt, .collector = &rc };
-        heap_scan(pager, hdr->row_size, collect_scan_cb, &cc);
-        buf_append(&buf, "COUNT(*)\n----------\n%u\n", rc.count);
+
+        uint64_t count = 0;
+        if (stmt->predicate_kind == PREDICATE_NONE) {
+            pthread_mutex_lock(&pager->header_lock);
+            count = hdr->row_count;
+            pthread_mutex_unlock(&pager->header_lock);
+        } else {
+            count_ctx_t cc = { .pager = pager, .stmt = stmt, .count = 0 };
+            heap_scan(pager, hdr->row_size, count_scan_cb, &cc);
+            count = cc.count;
+        }
+
+        buf_append(&buf, "COUNT(*)\n----------\n%" PRIu64 "\n", count);
         buf_transfer(&buf, &res);
-        snprintf(res.message, sizeof(res.message), "count = %u", rc.count);
-        row_collect_free(&rc);
+        snprintf(res.message, sizeof(res.message), "count = %" PRIu64, count);
         return res;
     }
 
-    /* ORDER BY 또는 LIMIT가 있으면 수집형 스캔 */
-    if (stmt->has_order_by || stmt->has_limit) {
+    if (stmt->has_limit && stmt->limit_count == 0) {
+        snprintf(res.message, sizeof(res.message), "0행 조회 (TABLE_SCAN)");
+        return res;
+    }
+
+    /* ORDER BY가 있으면 수집 후 정렬 */
+    if (stmt->has_order_by) {
+        int col_idx = find_column_index(hdr, stmt->order_by_field);
+        if (col_idx < 0) {
+            res.status = -1;
+            snprintf(res.message, sizeof(res.message),
+                     "오류: ORDER BY 대상 컬럼 '%s'를 찾을 수 없습니다",
+                     stmt->order_by_field);
+            return res;
+        }
+
         row_collect_t rc;
-        row_collect_init(&rc);
-        collect_ctx_t cc = { .pager = pager, .stmt = stmt, .collector = &rc };
-        heap_scan(pager, hdr->row_size, collect_scan_cb, &cc);
+        if (stmt->has_limit) {
+            row_collect_init_with_cap(&rc, stmt->limit_count);
+            if (rc.alloc_failed) {
+                res.status = -1;
+                snprintf(res.message, sizeof(res.message),
+                         "오류: ORDER BY LIMIT 버퍼 할당에 실패했습니다");
+                return res;
+            }
+            topk_ctx_t tc = {
+                .pager = pager,
+                .stmt = stmt,
+                .collector = &rc,
+                .order_col_idx = col_idx,
+                .order_desc = stmt->order_desc,
+                .limit = stmt->limit_count
+            };
+            heap_scan(pager, hdr->row_size, topk_scan_cb, &tc);
+        } else {
+            row_collect_init(&rc);
+            if (rc.alloc_failed) {
+                res.status = -1;
+                snprintf(res.message, sizeof(res.message),
+                         "오류: ORDER BY 버퍼 할당에 실패했습니다");
+                return res;
+            }
+            collect_ctx_t cc = { .pager = pager, .stmt = stmt, .collector = &rc };
+            heap_scan(pager, hdr->row_size, collect_scan_cb, &cc);
+        }
+
+        if (rc.alloc_failed) {
+            row_collect_free(&rc);
+            res.status = -1;
+            snprintf(res.message, sizeof(res.message),
+                     "오류: ORDER BY 대상 수집 중 메모리 할당에 실패했습니다");
+            return res;
+        }
 
         /* ORDER BY */
-        if (stmt->has_order_by && rc.count > 1) {
-            int col_idx = find_column_index(hdr, stmt->order_by_field);
-            if (col_idx >= 0) {
-                g_sort_hdr = hdr;
-                g_sort_col_idx = col_idx;
-                g_sort_desc = stmt->order_desc;
-                qsort(rc.rows, rc.count, MAX_COLUMNS * sizeof(row_value_t), sort_compare);
-            }
+        if (rc.count > 1) {
+            quicksort_row_blocks(rc.rows, 0, (int)rc.count - 1,
+                                 hdr, col_idx, stmt->order_desc);
         }
 
         /* 출력 (LIMIT 적용) */
@@ -649,7 +975,14 @@ static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
     /* 기본 스트리밍 스캔 (기존 로직) */
     out_buf_t buf;
     buf_init(&buf);
-    scan_ctx_t sc = { .pager = pager, .stmt = stmt, .count = 0, .buf = &buf };
+    scan_ctx_t sc = {
+        .pager = pager,
+        .stmt = stmt,
+        .count = 0,
+        .limit = stmt->has_limit ? stmt->limit_count : 0,
+        .stop_at_limit = stmt->has_limit,
+        .buf = &buf
+    };
     heap_scan(pager, hdr->row_size, select_scan_cb, &sc);
     if (sc.count > 0) {
         buf_transfer(&buf, &res);
@@ -680,6 +1013,7 @@ typedef struct {
     uint64_t *ids_to_delete;  /* 삭제할 id 배열 (동적 할당) */
     uint32_t ids_cap;          /* 배열 용량 */
     uint32_t ids_len;          /* 현재 수집된 id 수 */
+    bool alloc_failed;
 } delete_scan_ctx_t;
 
 /*
@@ -707,8 +1041,13 @@ static bool delete_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
     /* 배열 용량 부족 시 2배로 확장 (초기 64개) */
     if (dc->ids_len >= dc->ids_cap) {
         dc->ids_cap = dc->ids_cap ? dc->ids_cap * 2 : 64;
-        dc->ids_to_delete = realloc(dc->ids_to_delete,
-                                    dc->ids_cap * sizeof(uint64_t));
+        uint64_t *tmp = realloc(dc->ids_to_delete,
+                                dc->ids_cap * sizeof(uint64_t));
+        if (tmp == NULL) {
+            dc->alloc_failed = true;
+            return false;
+        }
+        dc->ids_to_delete = tmp;
     }
     /* id는 항상 columns[0] (BIGINT) */
     dc->ids_to_delete[dc->ids_len++] = values[0].bigint_val;
@@ -761,18 +1100,44 @@ static exec_result_t exec_delete_scan(pager_t *pager, statement_t *stmt)
     exec_result_t res = {0, "", NULL, 0};
     delete_scan_ctx_t dc = {
         .pager = pager, .stmt = stmt, .count = 0,
-        .ids_to_delete = NULL, .ids_cap = 0, .ids_len = 0
+        .ids_to_delete = NULL, .ids_cap = 0, .ids_len = 0,
+        .alloc_failed = false
     };
 
     /* 1차: 조건에 맞는 id 수집 */
     heap_scan(pager, pager->header.row_size, delete_scan_cb, &dc);
+    if (dc.alloc_failed) {
+        free(dc.ids_to_delete);
+        res.status = -1;
+        snprintf(res.message, sizeof(res.message),
+                 "오류: DELETE 대상 수집 중 메모리 할당에 실패했습니다");
+        return res;
+    }
 
-    /* 2차: 수집된 id에 대해 일괄 삭제 */
+    /* 2차: 대상 id 전체를 먼저 잠그고, 현재 값으로 조건을 재검증한 뒤 삭제 */
+    lock_table_t *lt = db_get_lock_table();
+    uint64_t failed_id = 0;
+    if (lock_collected_ids(lt, dc.ids_to_delete, &dc.ids_len,
+                           LOCK_X, &failed_id) != 0) {
+        free(dc.ids_to_delete);
+        res.status = -1;
+        snprintf(res.message, sizeof(res.message),
+                 "오류: row lock 획득 timeout (id=%" PRIu64 ", scan target)",
+                 failed_id);
+        return res;
+    }
+
+    db_header_t *hdr = &pager->header;
     for (uint32_t i = 0; i < dc.ids_len; i++) {
         row_ref_t ref;
-        if (bptree_search(pager, dc.ids_to_delete[i], &ref)) {
-            heap_delete(pager, ref);
-            bptree_delete(pager, dc.ids_to_delete[i]);
+        row_value_t values[MAX_COLUMNS];
+
+        if (!fetch_matching_row_by_id(pager, hdr, dc.ids_to_delete[i], stmt,
+                                      &ref, values)) {
+            continue;
+        }
+
+        if (heap_delete(pager, ref) == 0 && bptree_delete(pager, dc.ids_to_delete[i]) == 0) {
             pthread_mutex_lock(&pager->header_lock);
             pager->header.row_count--;
             pager->header_dirty = true;
@@ -789,11 +1154,17 @@ static exec_result_t exec_delete_scan(pager_t *pager, statement_t *stmt)
 /* ══════════════════════════════════════════════════════════════════════
  *  UPDATE — INDEX_UPDATE (단건) / TABLE_SCAN (다건)
  * ══════════════════════════════════════════════════════════════════════ */
+/*
+ * apply_update_to_row — 행의 지정 컬럼 값을 변경한다.
+ *
+ * 반환값:
+ *   0  = 성공
+ *  -1  = 컬럼을 찾을 수 없음
+ *  -2  = 시스템 컬럼(id) 수정 시도 → 차단
+ */
 static void apply_update_to_row(const db_header_t *hdr, row_value_t *values,
-                                 const statement_t *stmt)
+                                const statement_t *stmt, int col_idx)
 {
-    int col_idx = find_column_index(hdr, stmt->update_field);
-    if (col_idx < 0) return;
     switch (hdr->columns[col_idx].type) {
         case COL_TYPE_INT:
             values[col_idx].int_val = atoi(stmt->update_value);
@@ -812,6 +1183,10 @@ static exec_result_t exec_index_update(pager_t *pager, statement_t *stmt)
 {
     exec_result_t res = {0, "", NULL, 0};
     db_header_t *hdr = &pager->header;
+    int update_col_idx = validate_update_target(hdr, stmt, &res);
+    if (update_col_idx < 0) {
+        return res;
+    }
 
     row_ref_t ref;
     if (!bptree_search(pager, stmt->pred_id, &ref)) {
@@ -831,7 +1206,7 @@ static exec_result_t exec_index_update(pager_t *pager, statement_t *stmt)
     row_deserialize(hdr, row_data, values);
     pager_unlatch_r(pager, ref.page_id);
 
-    apply_update_to_row(hdr, values, stmt);
+    apply_update_to_row(hdr, values, stmt, update_col_idx);
 
     /* 수정된 행을 다시 직렬화하여 힙에 덮어쓰기 (쓰기 래치) */
     uint8_t *new_buf = (uint8_t *)calloc(1, hdr->row_size);
@@ -859,6 +1234,7 @@ typedef struct {
     uint64_t *ids;
     uint32_t ids_cap;
     uint32_t ids_len;
+    bool alloc_failed;
 } update_scan_ctx_t;
 
 static bool update_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
@@ -873,7 +1249,12 @@ static bool update_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
     }
     if (uc->ids_len >= uc->ids_cap) {
         uc->ids_cap = uc->ids_cap ? uc->ids_cap * 2 : 64;
-        uc->ids = realloc(uc->ids, uc->ids_cap * sizeof(uint64_t));
+        uint64_t *tmp = realloc(uc->ids, uc->ids_cap * sizeof(uint64_t));
+        if (tmp == NULL) {
+            uc->alloc_failed = true;
+            return false;
+        }
+        uc->ids = tmp;
     }
     uc->ids[uc->ids_len++] = values[0].bigint_val;
     return true;
@@ -883,26 +1264,45 @@ static exec_result_t exec_update_scan(pager_t *pager, statement_t *stmt)
 {
     exec_result_t res = {0, "", NULL, 0};
     db_header_t *hdr = &pager->header;
+    int update_col_idx = validate_update_target(hdr, stmt, &res);
+    if (update_col_idx < 0) {
+        return res;
+    }
+
     update_scan_ctx_t uc = {
         .pager = pager, .stmt = stmt, .count = 0,
-        .ids = NULL, .ids_cap = 0, .ids_len = 0
+        .ids = NULL, .ids_cap = 0, .ids_len = 0,
+        .alloc_failed = false
     };
     heap_scan(pager, hdr->row_size, update_scan_cb, &uc);
+    if (uc.alloc_failed) {
+        free(uc.ids);
+        res.status = -1;
+        snprintf(res.message, sizeof(res.message),
+                 "오류: UPDATE 대상 수집 중 메모리 할당에 실패했습니다");
+        return res;
+    }
+
+    lock_table_t *lt = db_get_lock_table();
+    uint64_t failed_id = 0;
+    if (lock_collected_ids(lt, uc.ids, &uc.ids_len, LOCK_X, &failed_id) != 0) {
+        free(uc.ids);
+        res.status = -1;
+        snprintf(res.message, sizeof(res.message),
+                 "오류: row lock 획득 timeout (id=%" PRIu64 ", scan target)",
+                 failed_id);
+        return res;
+    }
 
     for (uint32_t i = 0; i < uc.ids_len; i++) {
         row_ref_t ref;
-        if (!bptree_search(pager, uc.ids[i], &ref)) {
+        row_value_t values[MAX_COLUMNS];
+
+        if (!fetch_matching_row_by_id(pager, hdr, uc.ids[i], stmt, &ref, values)) {
             continue;
         }
 
-        const uint8_t *row_data = heap_fetch(pager, ref, hdr->row_size);
-        if (!row_data) continue;
-
-        row_value_t values[MAX_COLUMNS];
-        row_deserialize(hdr, row_data, values);
-        pager_unlatch_r(pager, ref.page_id);
-
-        apply_update_to_row(hdr, values, stmt);
+        apply_update_to_row(hdr, values, stmt, update_col_idx);
 
         uint8_t *new_buf = (uint8_t *)calloc(1, hdr->row_size);
         row_serialize(hdr, values, new_buf);
