@@ -663,6 +663,18 @@ static int find_child_idx(uint8_t* parent_page, uint32_t child_pid) {
 static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
                                        uint8_t* leaf_page,
                                        latch_stack_t* stack);
+static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
+                                           uint8_t* node_page,
+                                           latch_stack_t* stack,
+                                           int node_level);
+
+static void update_child_parent_page(pager_t* pager, uint32_t child_pid,
+                                     uint32_t parent_pid) {
+  uint8_t* cp = pager_get_page(pager, child_pid);
+  memcpy(cp + 4, &parent_pid, sizeof(uint32_t));
+  pager_mark_dirty(pager, child_pid);
+  pager_unpin(pager, child_pid);
+}
 
 /*
  * propagate_delete - merge 후 internal 노드의 underflow를 처리한다.
@@ -716,10 +728,182 @@ static void propagate_delete(pager_t* pager, latch_stack_t* stack,
     return;
   }
 
-  /* 최소 구현: internal borrow/merge는 생략.
-   * 대량 삭제 시 internal 노드가 underfull 상태로 남을 수 있으나
-   * 트리의 정합성(검색/삽입/삭제)에는 영향이 없다. */
-  ls_release_all(pager, stack);
+  fix_internal_underflow_latched(pager, node_pid, page, stack, parent_level);
+}
+
+static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
+                                           uint8_t* node_page,
+                                           latch_stack_t* stack,
+                                           int node_level) {
+  if (node_level == 0) {
+    pager_unpin(pager, node_pid);
+    ls_release_all(pager, stack);
+    return;
+  }
+
+  uint32_t parent_pid = stack->pids[node_level - 1];
+  uint8_t* pp = pager_get_page(pager, parent_pid);
+  internal_page_header_t iph;
+  memcpy(&iph, pp, sizeof(iph));
+  internal_entry_t* pentries = internal_entries(pp);
+
+  internal_page_header_t niph;
+  memcpy(&niph, node_page, sizeof(niph));
+  internal_entry_t* nentries = internal_entries(node_page);
+
+  int child_idx = find_child_idx(pp, node_pid);
+  if (child_idx < 0) {
+    pager_unpin(pager, node_pid);
+    pager_unpin(pager, parent_pid);
+    ls_release_all(pager, stack);
+    return;
+  }
+
+  /* ── 1순위: 오른쪽 형제에서 borrow ── */
+  if (child_idx < (int)iph.key_count) {
+    uint32_t sep_idx = (uint32_t)child_idx;
+    uint32_t rsib_pid = pentries[sep_idx].right_child_page_id;
+    uint8_t* rpage = pager_get_page_wlatch(pager, rsib_pid);
+    internal_page_header_t riph;
+    memcpy(&riph, rpage, sizeof(riph));
+
+    if (riph.key_count > min_internal_keys(pager)) {
+      internal_entry_t* rentries = internal_entries(rpage);
+      uint32_t moved_child = riph.leftmost_child_page_id;
+
+      nentries[niph.key_count].key = pentries[sep_idx].key;
+      nentries[niph.key_count].right_child_page_id = moved_child;
+      niph.key_count++;
+
+      pentries[sep_idx].key = rentries[0].key;
+      riph.leftmost_child_page_id = rentries[0].right_child_page_id;
+      for (uint32_t i = 0; i < riph.key_count - 1; i++) {
+        rentries[i] = rentries[i + 1];
+      }
+      riph.key_count--;
+
+      memcpy(node_page, &niph, sizeof(niph));
+      memcpy(rpage, &riph, sizeof(riph));
+      memcpy(pp, &iph, sizeof(iph));
+      pager_mark_dirty(pager, node_pid);
+      pager_mark_dirty(pager, rsib_pid);
+      pager_mark_dirty(pager, parent_pid);
+      update_child_parent_page(pager, moved_child, node_pid);
+
+      pager_unpin(pager, node_pid);
+      pager_unlatch_w(pager, rsib_pid);
+      pager_unpin(pager, parent_pid);
+      ls_release_all(pager, stack);
+      return;
+    }
+    pager_unlatch_w(pager, rsib_pid);
+  }
+
+  /* ── 2순위: 왼쪽 형제에서 borrow ── */
+  if (child_idx > 0) {
+    uint32_t sep_idx = (uint32_t)(child_idx - 1);
+    uint32_t lsib_pid = (child_idx == 1)
+                            ? iph.leftmost_child_page_id
+                            : pentries[child_idx - 2].right_child_page_id;
+    uint8_t* lpage = pager_get_page_wlatch(pager, lsib_pid);
+    internal_page_header_t liph;
+    memcpy(&liph, lpage, sizeof(liph));
+
+    if (liph.key_count > min_internal_keys(pager)) {
+      internal_entry_t* lentries = internal_entries(lpage);
+      internal_entry_t borrowed = lentries[liph.key_count - 1];
+
+      for (uint32_t i = niph.key_count; i > 0; i--) {
+        nentries[i] = nentries[i - 1];
+      }
+      nentries[0].key = pentries[sep_idx].key;
+      nentries[0].right_child_page_id = niph.leftmost_child_page_id;
+      niph.leftmost_child_page_id = borrowed.right_child_page_id;
+      niph.key_count++;
+
+      pentries[sep_idx].key = borrowed.key;
+      liph.key_count--;
+
+      memcpy(node_page, &niph, sizeof(niph));
+      memcpy(lpage, &liph, sizeof(liph));
+      memcpy(pp, &iph, sizeof(iph));
+      pager_mark_dirty(pager, node_pid);
+      pager_mark_dirty(pager, lsib_pid);
+      pager_mark_dirty(pager, parent_pid);
+      update_child_parent_page(pager, niph.leftmost_child_page_id, node_pid);
+
+      pager_unpin(pager, node_pid);
+      pager_unlatch_w(pager, lsib_pid);
+      pager_unpin(pager, parent_pid);
+      ls_release_all(pager, stack);
+      return;
+    }
+    pager_unlatch_w(pager, lsib_pid);
+  }
+
+  /* ── 3순위: merge (합병) ── */
+  if (child_idx > 0) {
+    uint32_t sep_idx = (uint32_t)(child_idx - 1);
+    uint32_t lsib_pid = (child_idx == 1)
+                            ? iph.leftmost_child_page_id
+                            : pentries[child_idx - 2].right_child_page_id;
+    uint8_t* lpage = pager_get_page_wlatch(pager, lsib_pid);
+    internal_page_header_t liph;
+    memcpy(&liph, lpage, sizeof(liph));
+    internal_entry_t* lentries = internal_entries(lpage);
+
+    uint32_t base = liph.key_count;
+    lentries[base].key = pentries[sep_idx].key;
+    lentries[base].right_child_page_id = niph.leftmost_child_page_id;
+    memcpy(lentries + base + 1, nentries, niph.key_count * sizeof(internal_entry_t));
+    liph.key_count = base + 1 + niph.key_count;
+    memcpy(lpage, &liph, sizeof(liph));
+    pager_mark_dirty(pager, lsib_pid);
+
+    update_child_parent_page(pager, niph.leftmost_child_page_id, lsib_pid);
+    for (uint32_t i = 0; i < niph.key_count; i++) {
+      update_child_parent_page(pager, nentries[i].right_child_page_id, lsib_pid);
+    }
+
+    delete_entry_from_internal(pp, &iph, sep_idx);
+    pager_mark_dirty(pager, parent_pid);
+    pager_unpin(pager, parent_pid);
+
+    pager_unpin(pager, node_pid);
+    pager_unlatch_w(pager, lsib_pid);
+    pager_free_page(pager, node_pid);
+    propagate_delete(pager, stack, node_level - 1);
+    return;
+  } else {
+    uint32_t rsib_pid = pentries[0].right_child_page_id;
+    uint8_t* rpage = pager_get_page_wlatch(pager, rsib_pid);
+    internal_page_header_t riph;
+    memcpy(&riph, rpage, sizeof(riph));
+    internal_entry_t* rentries = internal_entries(rpage);
+
+    uint32_t base = niph.key_count;
+    nentries[base].key = pentries[0].key;
+    nentries[base].right_child_page_id = riph.leftmost_child_page_id;
+    memcpy(nentries + base + 1, rentries, riph.key_count * sizeof(internal_entry_t));
+    niph.key_count = base + 1 + riph.key_count;
+    memcpy(node_page, &niph, sizeof(niph));
+    pager_mark_dirty(pager, node_pid);
+
+    update_child_parent_page(pager, riph.leftmost_child_page_id, node_pid);
+    for (uint32_t i = 0; i < riph.key_count; i++) {
+      update_child_parent_page(pager, rentries[i].right_child_page_id, node_pid);
+    }
+
+    delete_entry_from_internal(pp, &iph, 0);
+    pager_mark_dirty(pager, parent_pid);
+    pager_unpin(pager, parent_pid);
+
+    pager_unpin(pager, node_pid);
+    pager_unlatch_w(pager, rsib_pid);
+    pager_free_page(pager, rsib_pid);
+    propagate_delete(pager, stack, node_level - 1);
+    return;
+  }
 }
 
 /*

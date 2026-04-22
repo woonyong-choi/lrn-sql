@@ -281,6 +281,22 @@ static void test_bptree(void) {
     }
     ASSERT(rest_found, "remaining keys still found after partial delete");
 
+    /* 대부분 삭제한 뒤에는 internal underflow 복구로 트리 높이가 다시 줄어야 한다 */
+    for (uint32_t i = 502; i <= N; i++) {
+        rc = bptree_delete(&pager, i);
+        if (rc != 0) {
+            printf("  delete key %u failed during shrink test\n", i);
+            break;
+        }
+    }
+
+    ok = bptree_search(&pager, 501, &found);
+    ASSERT(ok, "single remaining key still found");
+    ASSERT(!bptree_search(&pager, 502, &found), "deleted tail key not found");
+
+    h = bptree_height(&pager);
+    ASSERT(h == 1, "tree height shrinks back to 1 with one remaining key");
+
     pager_close(&pager);
     unlink(TEST_DB);
 }
