@@ -99,20 +99,32 @@ static void handle_stats(pager_t *pager, int client_fd)
     http_send_ok(client_fd, body, (size_t)len);
 }
 
-/* ── 클라이언트 1건 처리 ── */
-static void handle_client(pager_t *pager, int client_fd)
+/*
+ * handle_one_request — 소켓에서 요청 하나를 읽어 처리한다.
+ *
+ * 반환값:
+ *   1  = keep-alive → 같은 소켓에서 다음 요청 대기
+ *   0  = close → 이 소켓 종료
+ *   -1 = 읽기 실패 (클라이언트가 끊음)
+ */
+static int handle_one_request(pager_t *pager, int client_fd)
 {
     http_request_t req;
-    if (http_read_request(client_fd, &req) != 0 || !req.valid) {
+    if (http_read_request(client_fd, &req) != 0)
+        return -1;  /* 연결 끊김 */
+
+    if (!req.valid) {
         const char *msg = "오류: 잘못된 요청입니다";
         http_send_error(client_fd, msg, strlen(msg));
-        return;
+        return 0;
     }
+
+    int ka = req.keep_alive;
 
     /* GET /stats 라우트 */
     if (req.route == ROUTE_STATS) {
         handle_stats(pager, client_fd);
-        return;
+        return ka ? 1 : 0;
     }
 
     exec_result_t res = db_execute(pager, req.body);
@@ -125,7 +137,6 @@ static void handle_client(pager_t *pager, int client_fd)
         memcpy(resp, res.out_buf, copy);
         off = copy;
     }
-    /* 메시지 추가 */
     if (res.message[0] != '\0' && off < sizeof(resp) - 2) {
         int n = snprintf(resp + off, sizeof(resp) - off, "%s%s\n",
                          off > 0 ? "" : "", res.message);
@@ -133,12 +144,30 @@ static void handle_client(pager_t *pager, int client_fd)
     }
 
     if (res.status == 0) {
-        http_send_ok(client_fd, resp, off);
+        if (ka)
+            http_send_ok_keepalive(client_fd, resp, off);
+        else
+            http_send_ok(client_fd, resp, off);
     } else {
         http_send_error(client_fd, resp, off);
     }
 
     if (res.out_buf) free(res.out_buf);
+    return ka ? 1 : 0;
+}
+
+/*
+ * handle_client — 연결 하나를 처리한다.
+ *
+ * keep-alive이면 같은 소켓에서 반복, 아니면 1건 후 종료.
+ */
+static void handle_client(pager_t *pager, int client_fd)
+{
+    while (1) {
+        int rc = handle_one_request(pager, client_fd);
+        if (rc <= 0) break;  /* close 또는 연결 끊김 */
+        /* rc == 1: keep-alive ��� 루프 계속 */
+    }
 }
 
 /* ── worker 메인 루프 ── */

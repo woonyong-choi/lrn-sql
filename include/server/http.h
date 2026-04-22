@@ -20,6 +20,7 @@ typedef enum {
 typedef struct {
     int          valid;          /* 1 = 유효한 요청 */
     http_route_t route;          /* 요청 라우트 */
+    int          keep_alive;     /* 1 = Connection: keep-alive */
     char         body[4096];     /* SQL 본문 (POST /query 전용) */
     size_t       body_len;
 } http_request_t;
@@ -29,6 +30,9 @@ int http_read_request(int client_fd, http_request_t *req);
 
 /* HTTP 200 응답을 client_fd에 전송한다 */
 void http_send_ok(int client_fd, const char *body, size_t body_len);
+
+/* HTTP 200 응답 (keep-alive 헤더 포함) */
+void http_send_ok_keepalive(int client_fd, const char *body, size_t body_len);
 
 /* HTTP 400 응답을 client_fd에 전송한다 */
 void http_send_error(int client_fd, const char *body, size_t body_len);
