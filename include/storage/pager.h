@@ -14,6 +14,7 @@
 #include <pthread.h>
 
 #define MAX_FRAMES 256  /* 메모리에 유지할 최대 페이지 프레임 수 */
+#define FRAME_HASH_BUCKETS 512  /* page_id -> frame_idx 해시 버킷 수 */
 
 /*
  * 쿼리 실행 통계: 각 쿼리 실행 전 초기화되어, 쿼리 동안의 I/O 패턴을 추적한다.
@@ -37,6 +38,7 @@ typedef struct {
     bool     is_dirty;   /* 수정되어 디스크에 기록이 필요한지 여부 */
     uint32_t pin_count;  /* 현재 사용 중인 참조 수 (0이면 교체 가능) */
     uint64_t used_tick;  /* 마지막 접근 시점의 틱 (LRU 판별용) */
+    int      hash_next;  /* 같은 해시 버킷의 다음 frame 인덱스 */
     uint8_t *data;       /* 페이지 데이터 버퍼 (page_size 바이트) */
     pthread_rwlock_t latch;  /* 페이지 래치: B+ tree 래치 커플링용 */
 } frame_t;
@@ -51,6 +53,7 @@ typedef struct {
     db_header_t header;              /* DB 헤더 (page 0의 인메모리 사본) */
     uint32_t    last_heap_page_id;   /* 마지막 힙 페이지 ID (순차 INSERT 최적화용 캐시) */
     frame_t     frames[MAX_FRAMES];  /* 페이지 프레임 배열 */
+    int         frame_buckets[FRAME_HASH_BUCKETS]; /* page_id -> frame_idx 해시 인덱스 */
     uint64_t    tick;                /* 전역 틱 카운터 (LRU 추적용) */
     bool        header_dirty;        /* 헤더가 수정되었는지 여부 */
     bool        log_flushes;         /* CLI에 pager flush 로그를 출력할지 여부 */
