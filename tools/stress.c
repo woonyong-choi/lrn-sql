@@ -64,20 +64,26 @@ typedef struct {
 
 static latency_store_t g_latencies;
 
-static void latency_init(uint64_t cap) {
-    if (cap > MAX_LATENCIES) cap = MAX_LATENCIES;
+static void latency_init(uint64_t cap)
+{
+    if (cap > MAX_LATENCIES) {
+        cap = MAX_LATENCIES;
+    }
     g_latencies.capacity = cap;
     atomic_store(&g_latencies.count, 0);
     g_latencies.data = (uint64_t *)calloc(cap, sizeof(uint64_t));
 }
 
-static void latency_record(uint64_t us) {
+static void latency_record(uint64_t us)
+{
     uint64_t idx = atomic_fetch_add(&g_latencies.count, 1);
-    if (idx < g_latencies.capacity)
+    if (idx < g_latencies.capacity) {
         g_latencies.data[idx] = us;
+    }
 }
 
-static int cmp_u64(const void *a, const void *b) {
+static int cmp_u64(const void *a, const void *b)
+{
     uint64_t va = *(const uint64_t *)a;
     uint64_t vb = *(const uint64_t *)b;
     return (va > vb) - (va < vb);
@@ -104,7 +110,8 @@ typedef struct {
 
 /* ── 시간 유틸 ── */
 
-static uint64_t now_us(void) {
+static uint64_t now_us(void)
+{
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
@@ -119,34 +126,44 @@ typedef struct {
     size_t pos;   /* 소비된 위치 */
 } conn_buf_t;
 
-static void conn_buf_init(conn_buf_t *cb, int fd) {
+static void conn_buf_init(conn_buf_t *cb, int fd)
+{
     cb->fd  = fd;
     cb->len = 0;
     cb->pos = 0;
 }
 
 /* 버퍼에 데이터를 채운다. 이미 있는 미소비 데이터는 앞으로 이동 */
-static ssize_t conn_buf_fill(conn_buf_t *cb) {
+static ssize_t conn_buf_fill(conn_buf_t *cb)
+{
     /* 미소비 데이터를 앞으로 이동 */
     if (cb->pos > 0) {
         size_t remaining = cb->len - cb->pos;
-        if (remaining > 0)
+        if (remaining > 0) {
             memmove(cb->buf, cb->buf + cb->pos, remaining);
+        }
         cb->len = remaining;
         cb->pos = 0;
     }
     /* 남은 공간에 recv */
     size_t space = sizeof(cb->buf) - cb->len;
-    if (space == 0) return 0;
+    if (space == 0) {
+        return 0;
+    }
     ssize_t n = recv(cb->fd, cb->buf + cb->len, space, 0);
-    if (n > 0) cb->len += (size_t)n;
+    if (n > 0) {
+        cb->len += (size_t)n;
+    }
     return n;
 }
 
 /* 미소비 버퍼에서 "\r\n\r\n"을 찾는다. 찾으면 buf+pos 기준 오프셋 반환, 없으면 -1 */
-static ssize_t conn_buf_find_header_end(conn_buf_t *cb) {
+static ssize_t conn_buf_find_header_end(conn_buf_t *cb)
+{
     size_t avail = cb->len - cb->pos;
-    if (avail < 4) return -1;
+    if (avail < 4) {
+        return -1;
+    }
     for (size_t i = 0; i <= avail - 4; i++) {
         if (memcmp(cb->buf + cb->pos + i, "\r\n\r\n", 4) == 0)
             return (ssize_t)(i + 4);
@@ -156,7 +173,8 @@ static ssize_t conn_buf_find_header_end(conn_buf_t *cb) {
 
 /* ── HTTP 요청 전송 (SO_LINGER(0) + 재시도) ── */
 
-static int open_connection(void) {
+static int open_connection(void)
+{
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -165,14 +183,18 @@ static int open_connection(void) {
 
     for (int attempt = 0; attempt < 3; attempt++) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) { usleep(1000); continue; }
+        if (fd < 0) {
+            usleep(1000);
+            continue;
+        }
 
         /* TIME_WAIT 방지: 닫을 때 RST 전송 */
         struct linger lg = {.l_onoff = 1, .l_linger = 0};
         setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
 
-        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0)
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
             return fd;
+        }
 
         close(fd);
         usleep(1000 * (uint32_t)(1 << attempt));
@@ -181,9 +203,12 @@ static int open_connection(void) {
 }
 
 /* Connection: close 방식 — 시드 데이터 삽입 및 stats 조회용 */
-static int send_query(const char *sql, char *resp, size_t resp_sz) {
+static int send_query(const char *sql, char *resp, size_t resp_sz)
+{
     int fd = open_connection();
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        return -1;
+    }
 
     size_t sql_len = strlen(sql);
     char header[512];
@@ -210,9 +235,12 @@ static int send_query(const char *sql, char *resp, size_t resp_sz) {
     return (total > 0 && strstr(resp, "200 OK")) ? 0 : -1;
 }
 
-static int send_get_stats(char *resp, size_t resp_sz) {
+static int send_get_stats(char *resp, size_t resp_sz)
+{
     int fd = open_connection();
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        return -1;
+    }
 
     const char *req =
         "GET /stats HTTP/1.1\r\n"
@@ -235,7 +263,8 @@ static int send_get_stats(char *resp, size_t resp_sz) {
 
 /* ── 요청 유형 선택 ── */
 
-static op_type_t pick_op(unsigned int *seed) {
+static op_type_t pick_op(unsigned int *seed)
+{
     int total = 0;
     for (int i = 0; i < OP_COUNT; i++) total += g_mix[i];
     int r = rand_r(seed) % total;
@@ -257,7 +286,8 @@ static const char *NAMES[] = {
 #define NAME_COUNT 15
 
 static void make_sql(op_type_t op, int thread_id, int seq,
-                     unsigned int *seed, char *buf, size_t sz) {
+                     unsigned int *seed, char *buf, size_t sz)
+{
     int id;
     switch (op) {
     case OP_INSERT:
@@ -300,7 +330,8 @@ static void make_sql(op_type_t op, int thread_id, int seq,
  *
  * 반환: 0=성공, -1=실패 (연결 끊김)
  */
-static int send_query_keepalive(conn_buf_t *cb, const char *sql) {
+static int send_query_keepalive(conn_buf_t *cb, const char *sql)
+{
     size_t sql_len = strlen(sql);
     char header[512];
     int hlen = snprintf(header, sizeof(header),
@@ -311,8 +342,12 @@ static int send_query_keepalive(conn_buf_t *cb, const char *sql) {
         "\r\n",
         g_host, g_port, sql_len);
 
-    if (send(cb->fd, header, (size_t)hlen, MSG_NOSIGNAL) <= 0) return -1;
-    if (send(cb->fd, sql, sql_len, MSG_NOSIGNAL) <= 0) return -1;
+    if (send(cb->fd, header, (size_t)hlen, MSG_NOSIGNAL) <= 0) {
+        return -1;
+    }
+    if (send(cb->fd, sql, sql_len, MSG_NOSIGNAL) <= 0) {
+        return -1;
+    }
 
     /* 1단계: 헤더 끝(\r\n\r\n)을 찾을 때까지 벌크 읽기 */
     ssize_t hdr_end;
@@ -358,7 +393,8 @@ typedef struct {
     int requests;
 } worker_arg_t;
 
-static void *worker_thread(void *arg) {
+static void *worker_thread(void *arg)
+{
     worker_arg_t *a = (worker_arg_t *)arg;
     unsigned int seed = (unsigned int)(time(NULL) ^ (a->thread_id * 7919));
     char sql[512];
@@ -404,7 +440,9 @@ static void *worker_thread(void *arg) {
         count++;
     }
 
-    if (cb.fd >= 0) close(cb.fd);
+    if (cb.fd >= 0) {
+        close(cb.fd);
+    }
     return NULL;
 }
 
@@ -420,33 +458,46 @@ typedef struct {
     int valid;
 } server_stats_t;
 
-static int json_int(const char *json, const char *key) {
+static int json_int(const char *json, const char *key)
+{
     char needle[128];
     snprintf(needle, sizeof(needle), "\"%s\":", key);
     const char *p = strstr(json, needle);
-    if (!p) return 0;
+    if (!p) {
+        return 0;
+    }
     p += strlen(needle);
-    while (*p == ' ') p++;
+    while (*p == ' ') {
+        p++;
+    }
     return atoi(p);
 }
 
-static long json_long(const char *json, const char *key) {
+static long json_long(const char *json, const char *key)
+{
     char needle[128];
     snprintf(needle, sizeof(needle), "\"%s\":", key);
     const char *p = strstr(json, needle);
-    if (!p) return 0;
+    if (!p) {
+        return 0;
+    }
     p += strlen(needle);
-    while (*p == ' ') p++;
+    while (*p == ' ') {
+        p++;
+    }
     return atol(p);
 }
 
-static int fetch_stats(server_stats_t *st) {
+static int fetch_stats(server_stats_t *st)
+{
     memset(st, 0, sizeof(*st));
     char buf[4096];
     if (send_get_stats(buf, sizeof(buf)) != 0) return -1;
 
     char *body = strstr(buf, "\r\n\r\n");
-    if (!body) return -1;
+    if (!body) {
+        return -1;
+    }
     body += 4;
 
     st->workers_total    = json_int(body, "workers_total");
@@ -492,7 +543,8 @@ static int fetch_stats(server_stats_t *st) {
 
 static _Atomic int g_monitor_stop;
 
-static void take_snapshot(snapshot_t *s) {
+static void take_snapshot(snapshot_t *s)
+{
     s->total = atomic_load(&g_total_done);
     for (int i = 0; i < OP_COUNT; i++) {
         s->ok[i] = atomic_load(&g_stats[i].ok);
@@ -501,13 +553,17 @@ static void take_snapshot(snapshot_t *s) {
 }
 
 /* 숫자를 3자리 콤마 형식으로 (예: 1,234,567) */
-static void fmt_num(uint64_t n, char *buf, size_t sz) {
+static void fmt_num(uint64_t n, char *buf, size_t sz)
+{
     char raw[32];
     snprintf(raw, sizeof(raw), "%lu", (unsigned long)n);
     int len = (int)strlen(raw);
     int commas = (len - 1) / 3;
     int total = len + commas;
-    if ((size_t)total >= sz) { snprintf(buf, sz, "%s", raw); return; }
+    if ((size_t)total >= sz) {
+        snprintf(buf, sz, "%s", raw);
+        return;
+    }
 
     buf[total] = '\0';
     int src = len - 1, dst = total - 1, cnt = 0;
@@ -519,10 +575,13 @@ static void fmt_num(uint64_t n, char *buf, size_t sz) {
 }
 
 /* 진행 바 생성 */
-static void make_progress_bar(double pct, char *bar, size_t sz) {
+static void make_progress_bar(double pct, char *bar, size_t sz)
+{
     int width = 40;
     int filled = (int)(pct / 100.0 * width);
-    if (filled > width) filled = width;
+    if (filled > width) {
+        filled = width;
+    }
     int i = 0;
     bar[i++] = '[';
     for (int j = 0; j < width; j++) {
@@ -534,7 +593,8 @@ static void make_progress_bar(double pct, char *bar, size_t sz) {
     (void)sz;
 }
 
-static void *monitor_thread(void *arg) {
+static void *monitor_thread(void *arg)
+{
     (void)arg;
     snapshot_t prev;
     memset(&prev, 0, sizeof(prev));
@@ -542,8 +602,9 @@ static void *monitor_thread(void *arg) {
     uint64_t start_us = now_us();
 
     /* 대시보드 영역 확보 (빈 줄 출력) */
-    for (int i = 0; i < DASHBOARD_LINES; i++)
+    for (int i = 0; i < DASHBOARD_LINES; i++) {
         fprintf(stderr, "\n");
+    }
 
     while (!atomic_load(&g_monitor_stop)) {
         usleep(1000000);
@@ -582,7 +643,9 @@ static void *monitor_thread(void *arg) {
         /* 진행률 */
         uint64_t target = atomic_load(&g_total_target);
         double progress = (target > 0) ? (double)cur.total / (double)target * 100.0 : 0;
-        if (progress > 100.0) progress = 100.0;
+        if (progress > 100.0) {
+            progress = 100.0;
+        }
 
         /* ── 대시보드 그리기 ── */
         /* 커서를 DASHBOARD_LINES만큼 위로 이동 */
@@ -682,12 +745,14 @@ static void *monitor_thread(void *arg) {
 
 /* ── 최종 리포트 ── */
 
-static void print_report(double elapsed_sec) {
+static void print_report(double elapsed_sec)
+{
     uint64_t n = atomic_load(&g_latencies.count);
     if (n > g_latencies.capacity) n = g_latencies.capacity;
 
-    if (n > 0)
+    if (n > 0) {
         qsort(g_latencies.data, (size_t)n, sizeof(uint64_t), cmp_u64);
+    }
 
     uint64_t total_ok = 0, total_fail = 0;
     for (int i = 0; i < OP_COUNT; i++) {
@@ -698,8 +763,9 @@ static void print_report(double elapsed_sec) {
 
     /* 대시보드 영역 지우기 */
     fprintf(stderr, "\033[%dA", DASHBOARD_LINES);
-    for (int i = 0; i < DASHBOARD_LINES; i++)
+    for (int i = 0; i < DASHBOARD_LINES; i++) {
         fprintf(stderr, "\033[2K\n");
+    }
     fprintf(stderr, "\033[%dA", DASHBOARD_LINES);
 
     fprintf(stderr, "\033[1;33m===========================================================\033[0m\n");
@@ -786,14 +852,19 @@ static void print_report(double elapsed_sec) {
         }
 
         uint64_t max_bucket = 0;
-        for (int b = 0; b < NBUCKETS; b++)
-            if (bucket[b] > max_bucket) max_bucket = bucket[b];
+        for (int b = 0; b < NBUCKETS; b++) {
+            if (bucket[b] > max_bucket) {
+                max_bucket = bucket[b];
+            }
+        }
 
         for (int b = 0; b < NBUCKETS; b++) {
             if (bucket[b] == 0 && b > 0 && bucket[b-1] == 0) continue;
             int bar_len = max_bucket > 0
                 ? (int)((double)bucket[b] / (double)max_bucket * 40.0) : 0;
-            if (bucket[b] > 0 && bar_len == 0) bar_len = 1;
+            if (bucket[b] > 0 && bar_len == 0) {
+                bar_len = 1;
+            }
             char bar[42];
             memset(bar, '#', (size_t)bar_len);
             bar[bar_len] = '\0';
@@ -828,14 +899,16 @@ static void print_report(double elapsed_sec) {
 
 /* ── SIGINT 핸들러 ── */
 
-static void sigint_handler(int sig) {
+static void sigint_handler(int sig)
+{
     (void)sig;
     atomic_store(&g_running, 0);
 }
 
 /* ── 메인 ── */
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     setvbuf(stderr, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -843,11 +916,11 @@ int main(int argc, char **argv) {
     uint64_t total_requests = 10000;
     int duration_sec = 0;
 
-    if (argc >= 2) g_host = argv[1];
-    if (argc >= 3) g_port = atoi(argv[2]);
-    if (argc >= 4) num_threads = atoi(argv[3]);
-    if (argc >= 5) total_requests = (uint64_t)atoll(argv[4]);
-    if (argc >= 6) duration_sec = atoi(argv[5]);
+    if (argc >= 2) { g_host = argv[1]; }
+    if (argc >= 3) { g_port = atoi(argv[2]); }
+    if (argc >= 4) { num_threads = atoi(argv[3]); }
+    if (argc >= 5) { total_requests = (uint64_t)atoll(argv[4]); }
+    if (argc >= 6) { duration_sec = atoi(argv[5]); }
 
     const char *env;
     if ((env = getenv("MIX_INSERT")) != NULL) g_mix[OP_INSERT] = atoi(env);
@@ -861,10 +934,13 @@ int main(int argc, char **argv) {
     fprintf(stderr, "\033[1;32m=== MiniDB Stress Test ===\033[0m\n");
     fprintf(stderr, "Target     : %s:%d\n", g_host, g_port);
     fprintf(stderr, "Threads    : %d\n", num_threads);
-    if (total_requests > 0)
-        fprintf(stderr, "Requests   : %lu\n", (unsigned long)total_requests);
-    if (duration_sec > 0)
+    if (total_requests > 0) {
+        fprintf(stderr, "Requests   : %lu\n",
+                (unsigned long)total_requests);
+    }
+    if (duration_sec > 0) {
         fprintf(stderr, "Duration   : %d sec\n", duration_sec);
+    }
     fprintf(stderr, "Mix        : INSERT %d%% | SELECT %d%% | UPDATE %d%% | DELETE %d%%\n",
             g_mix[OP_INSERT] * 100 / mix_total,
             g_mix[OP_SELECT] * 100 / mix_total,
@@ -916,13 +992,15 @@ int main(int argc, char **argv) {
     }
 
     if (duration_sec > 0) {
-        for (int s = 0; s < duration_sec && atomic_load(&g_running); s++)
+        for (int s = 0; s < duration_sec && atomic_load(&g_running); s++) {
             usleep(1000000);
+        }
         atomic_store(&g_running, 0);
     }
 
-    for (int i = 0; i < num_threads; i++)
+    for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
+    }
 
     uint64_t t_end = now_us();
     double elapsed = (double)(t_end - t_start) / 1000000.0;
