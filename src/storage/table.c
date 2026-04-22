@@ -43,6 +43,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <pthread.h>
 
 /*
  * slots_end - 슬롯 디렉터리의 끝 오프셋을 계산한다.
@@ -163,7 +164,20 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
     uint32_t pid = find_heap_page(pager, row_size);
 
     if (pid == 0) {
-        /* 새 힙 페이지 할당 */
+        /*
+         * 새 힙 페이지 할당 + 체인 연결.
+         *
+         * header_lock으로 직렬화: 여러 스레드가 동시에 새 페이지를
+         * 할당하면 last_heap_page_id 읽기→쓰기 사이에 레이스가
+         * 발생하여 페이지가 체인에서 누락될 수 있다.
+         * (docs/sql/13-concurrency-issues.md §5 참조)
+         *
+         * Lock 순서: header_lock → page wlatch (단방향).
+         * 일반 삽입 경로는 wlatch를 해제한 뒤 header_lock을
+         * 획득하므로 역방향이 없어 데드락이 발생하지 않는다.
+         */
+        pthread_mutex_lock(&pager->header_lock);
+
         pid = pager_alloc_page(pager);
         uint8_t *page = pager_get_page_wlatch(pager, pid);
 
@@ -179,10 +193,7 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
         pager_mark_dirty(pager, pid);
         pager_unlatch_w(pager, pid);
 
-        /*
-         * pager가 마지막 힙 페이지를 메모리에 캐시하므로
-         * 매번 체인 전체를 순회하지 않고 tail에 바로 연결한다.
-         */
+        /* tail에 새 페이지 연결 */
         uint32_t prev_pid = pager->last_heap_page_id;
         if (prev_pid != 0) {
             uint8_t *pp = pager_get_page_wlatch(pager, prev_pid);
@@ -194,25 +205,73 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
             pager_unlatch_w(pager, prev_pid);
         }
         pager->last_heap_page_id = pid;
+
+        pthread_mutex_unlock(&pager->header_lock);
     }
 
-    /* 선택된 페이지에 행 삽입 (쓰기 래치로 보호) */
+    /*
+     * 선택된 페이지에 행 삽입 (쓰기 래치로 보호).
+     *
+     * TOCTOU 방어: find_heap_page가 공간을 확인한 뒤 wlatch를
+     * 잡기 전에 다른 스레드가 페이지를 채울 수 있다. wlatch 하에서
+     * 재확인하고, 공간 부족 시 새 페이지를 할당한다.
+     */
+retry_insert:;
     uint8_t *page = pager_get_page_wlatch(pager, pid);
     heap_page_header_t hph;
     memcpy(&hph, page, sizeof(hph));
+
+    /* wlatch 하에서 공간 재확인 (free slot이 없을 때만) */
+    if (hph.free_slot_head == SLOT_NONE) {
+        uint16_t need = (uint16_t)(sizeof(slot_t) + row_size);
+        if (available_space(pager, &hph) < need) {
+            pager_unlatch_w(pager, pid);
+            /* 공간 부족 — 새 페이지 할당 후 재시도 */
+            pid = 0;
+            pthread_mutex_lock(&pager->header_lock);
+
+            pid = pager_alloc_page(pager);
+            uint8_t *np = pager_get_page_wlatch(pager, pid);
+            heap_page_header_t nhph = {
+                .page_type = PAGE_TYPE_HEAP,
+                .next_heap_page_id = 0,
+                .slot_count = 0,
+                .free_slot_head = SLOT_NONE,
+                .free_space_offset = 0,
+                .reserved = 0
+            };
+            memcpy(np, &nhph, sizeof(nhph));
+            pager_mark_dirty(pager, pid);
+            pager_unlatch_w(pager, pid);
+
+            uint32_t pp_id = pager->last_heap_page_id;
+            if (pp_id != 0) {
+                uint8_t *pp = pager_get_page_wlatch(pager, pp_id);
+                heap_page_header_t ph;
+                memcpy(&ph, pp, sizeof(ph));
+                ph.next_heap_page_id = pid;
+                memcpy(pp, &ph, sizeof(ph));
+                pager_mark_dirty(pager, pp_id);
+                pager_unlatch_w(pager, pp_id);
+            }
+            pager->last_heap_page_id = pid;
+
+            pthread_mutex_unlock(&pager->header_lock);
+            goto retry_insert;
+        }
+    }
 
     uint16_t slot_id;
     slot_t   slot;
 
     if (hph.free_slot_head != SLOT_NONE) {
         /*
-         * 빈 슬롯 재활용
-         *
-         * free_slot_head에서 슬롯을 꺼내고, 해당 위치에 행 데이터를 덮어쓴다.
-         * slot.offset은 이전 삭제된 행의 위치이므로 그대로 사용한다.
+         * 빈 슬롯 재활용: free_slot_head에서 슬롯을 꺼내고,
+         * 해당 위치에 행 데이터를 덮어쓴다.
          */
         slot_id = hph.free_slot_head;
-        size_t slot_off = sizeof(heap_page_header_t) + slot_id * sizeof(slot_t);
+        size_t slot_off = sizeof(heap_page_header_t)
+                        + slot_id * sizeof(slot_t);
         memcpy(&slot, page + slot_off, sizeof(slot));
         hph.free_slot_head = slot.next_free;
 
@@ -222,23 +281,20 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
         memcpy(page + slot_off, &slot, sizeof(slot));
     } else {
         /*
-         * 새 슬롯 생성
-         *
-         * 슬롯 디렉터리 끝에 새 슬롯을 추가하고,
+         * 새 슬롯 생성: 디렉터리 끝에 슬롯을 추가하고,
          * 행 데이터는 페이지 뒤쪽에서 앞으로 자라도록 기록한다.
-         *
-         * row_offset = page_size - free_space_offset - row_size
-         * 예: 4096 - 132 - 44 = 3920
          */
         slot_id = hph.slot_count;
-        uint16_t row_offset = (uint16_t)(pager->page_size - hph.free_space_offset - row_size);
+        uint16_t row_offset = (uint16_t)(
+            pager->page_size - hph.free_space_offset - row_size);
 
         slot.offset = row_offset;
         slot.status = SLOT_ALIVE;
         slot.next_free = SLOT_NONE;
         slot.reserved = 0;
 
-        size_t slot_off = sizeof(heap_page_header_t) + slot_id * sizeof(slot_t);
+        size_t slot_off = sizeof(heap_page_header_t)
+                        + slot_id * sizeof(slot_t);
         memcpy(page + slot_off, &slot, sizeof(slot));
         memcpy(page + row_offset, row_data, row_size);
 
