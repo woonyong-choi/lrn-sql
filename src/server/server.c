@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#include <sys/time.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -31,6 +32,7 @@
 
 /* ── 설정 ── */
 #define MAX_CONNECTIONS 128  /* 동시 연결 상한 (MySQL max_connections 역할) */
+#define IDLE_TIMEOUT_SEC 30  /* keep-alive idle timeout */
 
 /* ── 전역 상태 ── */
 static volatile sig_atomic_t g_running = 1;
@@ -320,6 +322,16 @@ int server_run(pager_t *pager, int port)
         if (client_fd < 0) {
             if (errno == EINTR) continue;  /* SIGINT */
             perror("accept");
+            continue;
+        }
+
+        struct timeval tv = {
+            .tv_sec = IDLE_TIMEOUT_SEC,
+            .tv_usec = 0
+        };
+        if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+            perror("setsockopt(SO_RCVTIMEO)");
+            close(client_fd);
             continue;
         }
 
