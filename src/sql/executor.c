@@ -254,22 +254,17 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
     pthread_mutex_unlock(&pager->header_lock);
 
     /*
-     * Gap Check (Next-Key Lock): 새 id가 다른 스레드의 range lock 범위 안이면 대기.
-     * 예: 스레드 A가 UPDATE WHERE id>5 로 range X lock [6, MAX]을 잡고 있으면,
-     *     이 INSERT의 id=7은 그 범위 안이므로 A가 끝날 때까지 대기한다.
-     * → Phantom Insert 방지.
-     *
-     * range lock이 존재할 때만 gap check 수행한다.
-     * range lock이 없으면 point lock도 불필요하므로 건너뛴다.
+     * Gap Check (Next-Key Lock): 새 id에 대한 point X lock을 항상 잡는다.
+     * 내부에서 point-vs-range 충돌도 함께 검사하므로, range lock이 존재하면
+     * 해당 INSERT는 range lock 해제까지 대기한다.
+     * → Phantom Insert 방지 + lock table에 대한 락 없는 읽기 제거.
      */
     lock_table_t *lt = db_get_lock_table();
-    if (lt->range_locks != NULL) {
-        if (lock_acquire(lt, my_id, LOCK_X) != 0) {
-            res.status = -1;
-            snprintf(res.message, sizeof(res.message),
-                     "오류: INSERT gap check timeout (id=%" PRIu64 ", range lock 충돌)", my_id);
-            return res;
-        }
+    if (lock_acquire(lt, my_id, LOCK_X) != 0) {
+        res.status = -1;
+        snprintf(res.message, sizeof(res.message),
+                 "오류: INSERT gap check timeout (id=%" PRIu64 ", range lock 충돌)", my_id);
+        return res;
     }
 
     values[0].bigint_val = (int64_t)my_id;
