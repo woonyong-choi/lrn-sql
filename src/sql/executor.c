@@ -456,7 +456,9 @@ static exec_result_t exec_index_lookup(pager_t *pager, statement_t *stmt)
     /* B+ tree에서 id로 검색 → 힙 위치(row_ref_t) 획득 */
     row_ref_t ref;
     if (bptree_search(pager, stmt->pred_id, &ref) == false) {
-        snprintf(res.message, sizeof(res.message), "오류: id=%" PRIu64 "인 행을 찾을 수 없습니다", stmt->pred_id);
+        snprintf(res.message, sizeof(res.message),
+                 "오류: id=%" PRIu64 "인 행을 찾을 수 없습니다",
+                 stmt->pred_id);
         return res;
     }
 
@@ -724,7 +726,9 @@ static exec_result_t exec_index_delete(pager_t *pager, statement_t *stmt)
 
     row_ref_t ref;
     if (bptree_search(pager, stmt->pred_id, &ref) == false) {
-        snprintf(res.message, sizeof(res.message), "오류: id=%" PRIu64 "인 행을 찾을 수 없습니다", stmt->pred_id);
+        snprintf(res.message, sizeof(res.message),
+                 "오류: id=%" PRIu64 "인 행을 찾을 수 없습니다",
+                 stmt->pred_id);
         return res;
     }
 
@@ -737,7 +741,8 @@ static exec_result_t exec_index_delete(pager_t *pager, statement_t *stmt)
     pager->header_dirty = true;
     pthread_mutex_unlock(&pager->header_lock);
 
-    snprintf(res.message, sizeof(res.message), "1행 삭제 완료 (id=%" PRIu64 ")", stmt->pred_id);
+    snprintf(res.message, sizeof(res.message),
+             "1행 삭제 완료 (id=%" PRIu64 ")", stmt->pred_id);
     return res;
 }
 
@@ -868,7 +873,9 @@ static bool update_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
     const db_header_t *hdr = &uc->pager->header;
     row_value_t values[MAX_COLUMNS];
     row_deserialize(hdr, row_data, values);
-    if (!match_predicate(hdr, values, uc->stmt)) return true;
+    if (!match_predicate(hdr, values, uc->stmt)) {
+        return true;
+    }
     if (uc->ids_len >= uc->ids_cap) {
         uc->ids_cap = uc->ids_cap ? uc->ids_cap * 2 : 64;
         uc->ids = realloc(uc->ids, uc->ids_cap * sizeof(uint64_t));
@@ -889,7 +896,9 @@ static exec_result_t exec_update_scan(pager_t *pager, statement_t *stmt)
 
     for (uint32_t i = 0; i < uc.ids_len; i++) {
         row_ref_t ref;
-        if (!bptree_search(pager, uc.ids[i], &ref)) continue;
+        if (!bptree_search(pager, uc.ids[i], &ref)) {
+            continue;
+        }
 
         const uint8_t *row_data = heap_fetch(pager, ref, hdr->row_size);
         if (!row_data) continue;
@@ -1070,10 +1079,12 @@ exec_result_t execute(pager_t *pager, statement_t *stmt)
         case ACCESS_PATH_INDEX_LOOKUP:
             return exec_index_lookup(pager, stmt);
         case ACCESS_PATH_TABLE_SCAN:
-            if (stmt->type == STMT_DELETE)
+            if (stmt->type == STMT_DELETE) {
                 return exec_delete_scan(pager, stmt);
-            if (stmt->type == STMT_UPDATE)
+            }
+            if (stmt->type == STMT_UPDATE) {
                 return exec_update_scan(pager, stmt);
+            }
             return exec_table_scan(pager, stmt);
         case ACCESS_PATH_INDEX_DELETE:
             return exec_index_delete(pager, stmt);

@@ -66,8 +66,9 @@ static int point_vs_point(lock_table_t *lt, uint64_t row_id,
     lock_entry_t *e = lt->buckets[bucket];
     while (e) {
         if (e->row_id == row_id && !pthread_equal(e->owner, self)) {
-            if (e->mode == LOCK_X || mode == LOCK_X)
+            if (e->mode == LOCK_X || mode == LOCK_X) {
                 return 1;
+            }
         }
         e = e->next;
     }
@@ -82,8 +83,9 @@ static int point_vs_range(lock_table_t *lt, uint64_t key,
     while (e) {
         if (!pthread_equal(e->owner, self)
             && key >= e->row_id && key <= e->range_high) {
-            if (e->mode == LOCK_X || mode == LOCK_X)
+            if (e->mode == LOCK_X || mode == LOCK_X) {
                 return 1;
+            }
         }
         e = e->next;
     }
@@ -98,8 +100,9 @@ static int range_vs_range(lock_table_t *lt, uint64_t low, uint64_t high,
     while (e) {
         if (!pthread_equal(e->owner, self)
             && low <= e->range_high && e->row_id <= high) {
-            if (e->mode == LOCK_X || mode == LOCK_X)
+            if (e->mode == LOCK_X || mode == LOCK_X) {
                 return 1;
+            }
         }
         e = e->next;
     }
@@ -115,8 +118,9 @@ static int range_vs_point(lock_table_t *lt, uint64_t low, uint64_t high,
         while (e) {
             if (!pthread_equal(e->owner, self)
                 && e->row_id >= low && e->row_id <= high) {
-                if (e->mode == LOCK_X || mode == LOCK_X)
+                if (e->mode == LOCK_X || mode == LOCK_X) {
                     return 1;
+                }
             }
             e = e->next;
         }
@@ -128,21 +132,26 @@ static int range_vs_point(lock_table_t *lt, uint64_t low, uint64_t high,
 static int conflict_exists(lock_table_t *lt, uint64_t row_id,
                            lock_mode_t mode, pthread_t self)
 {
-    if (point_vs_point(lt, row_id, mode, self))
+    if (point_vs_point(lt, row_id, mode, self)) {
         return 1;
-    if (point_vs_range(lt, row_id, mode, self))
+    }
+    if (point_vs_range(lt, row_id, mode, self)) {
         return 1;
+    }
     return 0;
 }
 
 /* range lock의 전체 충돌 검사 (range-vs-range + range-vs-point) */
-static int range_conflict_exists(lock_table_t *lt, uint64_t low, uint64_t high,
-                                 lock_mode_t mode, pthread_t self)
+static int range_conflict_exists(lock_table_t *lt, uint64_t low,
+                                 uint64_t high, lock_mode_t mode,
+                                 pthread_t self)
 {
-    if (range_vs_range(lt, low, high, mode, self))
+    if (range_vs_range(lt, low, high, mode, self)) {
         return 1;
-    if (range_vs_point(lt, low, high, mode, self))
+    }
+    if (range_vs_point(lt, low, high, mode, self)) {
         return 1;
+    }
     return 0;
 }
 
@@ -285,8 +294,9 @@ void lock_release_all(lock_table_t *lt)
         }
     }
 
-    if (released > 0)
+    if (released > 0) {
         pthread_cond_broadcast(&lt->cond);
+    }
     pthread_mutex_unlock(&lt->mutex);
 }
 
