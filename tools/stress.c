@@ -449,8 +449,7 @@ static void *worker_thread(void *arg)
 /* ── 서버 상태 구조체 ── */
 
 typedef struct {
-    int workers_total, workers_active, workers_idle;
-    int queue_pending, queue_capacity;
+    int max_connections, active_connections;
     long total_processed, total_connections;
     int locks_total, locks_shared, locks_exclusive;
     int frames_used, frames_dirty, frames_pinned;
@@ -500,11 +499,8 @@ static int fetch_stats(server_stats_t *st)
     }
     body += 4;
 
-    st->workers_total    = json_int(body, "workers_total");
-    st->workers_active   = json_int(body, "workers_active");
-    st->workers_idle     = json_int(body, "workers_idle");
-    st->queue_pending    = json_int(body, "queue_pending");
-    st->queue_capacity   = json_int(body, "queue_capacity");
+    st->max_connections  = json_int(body, "max_connections");
+    st->active_connections = json_int(body, "active_connections");
     st->total_processed  = json_long(body, "total_processed");
     st->total_connections = json_long(body, "total_connections");
     st->locks_total      = json_int(body, "total");
@@ -700,10 +696,10 @@ static void *monitor_thread(void *arg)
         fprintf(stderr, "\033[2K\033[1;33m  +-- Server Internals ----------------------------------------+\033[0m\r\n");
         if (has_ss) {
             /* [11] */
-            fprintf(stderr, "\033[2K\033[0;33m  |\033[0m Workers: \033[1m%d\033[0m active / \033[1m%d\033[0m idle / %d total"
-                    "    Queue: \033[1m%d\033[0m / %d\r\n",
-                    ss.workers_active, ss.workers_idle, ss.workers_total,
-                    ss.queue_pending, ss.queue_capacity);
+            fprintf(stderr, "\033[2K\033[0;33m  |\033[0m Connections: \033[1m%d\033[0m active / %d max"
+                    "    Accepted: \033[1m%ld\033[0m\r\n",
+                    ss.active_connections, ss.max_connections,
+                    ss.total_connections);
             /* [12] */
             fprintf(stderr, "\033[2K\033[0;33m  |\033[0m Row Lock: \033[1m%d\033[0m (S:%d X:%d)"
                     "    Page Cache: \033[1m%d\033[0m/256 (dirty:%d pin:%d)\r\n",
@@ -711,8 +707,8 @@ static void *monitor_thread(void *arg)
                     ss.frames_used, ss.frames_dirty, ss.frames_pinned);
             /* [13] */
             fprintf(stderr, "\033[2K\033[0;33m  |\033[0m DB rows: \033[1m%ld\033[0m"
-                    "    Server processed: %ld    Connections: %ld\r\n",
-                    ss.row_count, ss.total_processed, ss.total_connections);
+                    "    Server processed: %ld\r\n",
+                    ss.row_count, ss.total_processed);
         } else {
             fprintf(stderr, "\033[2K\033[0;33m  |\033[0m (server not responding)\r\n");
             fprintf(stderr, "\033[2K\033[0;33m  |\033[0m\r\n");
@@ -881,12 +877,10 @@ static void print_report(double elapsed_sec)
     server_stats_t final_ss;
     if (fetch_stats(&final_ss) == 0) {
         fprintf(stderr, "\033[1m[Server Final State]\033[0m\n");
-        fprintf(stderr, "  Workers       : %d (active: %d, idle: %d)\n",
-                final_ss.workers_total, final_ss.workers_active, final_ss.workers_idle);
-        fprintf(stderr, "  Queue         : %d / %d\n",
-                final_ss.queue_pending, final_ss.queue_capacity);
+        fprintf(stderr, "  Connections   : %d active / %d max\n",
+                final_ss.active_connections, final_ss.max_connections);
+        fprintf(stderr, "  Accepted      : %ld\n", final_ss.total_connections);
         fprintf(stderr, "  Processed     : %ld\n", final_ss.total_processed);
-        fprintf(stderr, "  Connections   : %ld\n", final_ss.total_connections);
         fprintf(stderr, "  Row Lock      : %d (S:%d, X:%d)\n",
                 final_ss.locks_total, final_ss.locks_shared, final_ss.locks_exclusive);
         fprintf(stderr, "  Page Cache    : %d/256 (dirty: %d, pinned: %d)\n",
