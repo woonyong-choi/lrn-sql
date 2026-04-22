@@ -42,6 +42,14 @@ int http_read_request(int client_fd, http_request_t *req)
     }
     if (total <= 0) return -1;
 
+    /* Connection: keep-alive 감지 */
+    req->keep_alive = 0;
+    char *conn_hdr = strcasestr(buf, "Connection:");
+    if (conn_hdr) {
+        if (strcasestr(conn_hdr, "keep-alive"))
+            req->keep_alive = 1;
+    }
+
     /* 메서드 + 경로 확인 */
     if (strncmp(buf, "GET /stats", 10) == 0) {
         req->valid = 1;
@@ -105,6 +113,22 @@ static void send_response(int client_fd, int status, const char *status_text,
 void http_send_ok(int client_fd, const char *body, size_t body_len)
 {
     send_response(client_fd, 200, "OK", body, body_len);
+}
+
+void http_send_ok_keepalive(int client_fd, const char *body, size_t body_len)
+{
+    char header[512];
+    int hlen = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n",
+        body_len);
+
+    send(client_fd, header, (size_t)hlen, MSG_NOSIGNAL);
+    if (body_len > 0)
+        send(client_fd, body, body_len, MSG_NOSIGNAL);
 }
 
 void http_send_error(int client_fd, const char *body, size_t body_len)
