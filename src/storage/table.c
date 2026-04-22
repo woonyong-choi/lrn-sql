@@ -72,8 +72,7 @@ static uint16_t available_space(pager_t *pager, heap_page_header_t *hph)
 {
     uint16_t front = slots_end(hph->slot_count);
     uint16_t back  = (uint16_t)(pager->page_size - hph->free_space_offset);
-    if (back <= front)
-    {
+    if (back <= front) {
         return 0;
     }
     return back - front;
@@ -120,8 +119,7 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
         pager_unlatch_r(pager, pid);
 
         /* 재활용 가능한 빈 슬롯이 있는지 확인 */
-        if (hph.free_slot_head != SLOT_NONE)
-        {
+        if (hph.free_slot_head != SLOT_NONE) {
             return pid;
         }
 
@@ -283,8 +281,7 @@ const uint8_t *heap_fetch(pager_t *pager, row_ref_t ref, uint16_t row_size)
 {
     (void)row_size;
     uint8_t *page = pager_get_page_rlatch(pager, ref.page_id);
-    if (page == NULL)
-    {
+    if (page == NULL) {
         return NULL;
     }
 
@@ -324,8 +321,7 @@ const uint8_t *heap_fetch(pager_t *pager, row_ref_t ref, uint16_t row_size)
 int heap_delete(pager_t *pager, row_ref_t ref)
 {
     uint8_t *page = pager_get_page_wlatch(pager, ref.page_id);
-    if (page == NULL)
-    {
+    if (page == NULL) {
         return -1;
     }
 

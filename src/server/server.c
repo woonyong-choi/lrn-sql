@@ -120,8 +120,9 @@ static void handle_stats(pager_t *pager, int client_fd)
 static int handle_one_request(pager_t *pager, int client_fd)
 {
     http_request_t req;
-    if (http_read_request(client_fd, &req) != 0)
+    if (http_read_request(client_fd, &req) != 0) {
         return -1;  /* 연결 끊김 */
+    }
 
     if (!req.valid) {
         const char *msg = "오류: 잘못된 요청입니다";
@@ -158,15 +159,18 @@ static int handle_one_request(pager_t *pager, int client_fd)
     }
 
     if (res.status == 0) {
-        if (ka)
+        if (ka) {
             http_send_ok_keepalive(client_fd, resp, off);
-        else
+        } else {
             http_send_ok(client_fd, resp, off);
+        }
     } else {
         http_send_error(client_fd, resp, off);
     }
 
-    if (res.out_buf) free(res.out_buf);
+    if (res.out_buf) {
+        free(res.out_buf);
+    }
     return ka ? 1 : 0;
 }
 
