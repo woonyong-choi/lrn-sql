@@ -9,11 +9,19 @@
 
 #include <stddef.h>
 
+/* 요청 라우트 */
+typedef enum {
+    ROUTE_UNKNOWN = 0,
+    ROUTE_QUERY,     /* POST /query — SQL 실행 */
+    ROUTE_STATS      /* GET  /stats — 서버 내부 상태 조회 */
+} http_route_t;
+
 /* 요청 파싱 결과 */
 typedef struct {
-    int   valid;          /* 1 = 유효한 POST /query */
-    char  body[4096];     /* SQL 본문 */
-    size_t body_len;
+    int          valid;          /* 1 = 유효한 요청 */
+    http_route_t route;          /* 요청 라우트 */
+    char         body[4096];     /* SQL 본문 (POST /query 전용) */
+    size_t       body_len;
 } http_request_t;
 
 /* client_fd에서 HTTP 요청을 읽어 파싱한다 */

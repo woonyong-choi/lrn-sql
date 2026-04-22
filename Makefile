@@ -65,8 +65,21 @@ bench: $(BUILD_DIR)/bench
 	@echo "서버를 먼저 실행하세요: make run-server"
 	./$(BUILD_DIR)/bench 127.0.0.1 8080 4 100
 
+# ── stress test (혼합 부하 + 실시간 모니터링) ──
+$(BUILD_DIR)/stress: tools/stress.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(WARNFLAGS) -g $(INCLUDES) -o $@ $< -lpthread -lm
+
+STRESS_THREADS  ?= 8
+STRESS_REQUESTS ?= 10000
+STRESS_DURATION ?= 0
+
+stress: $(BUILD_DIR)/stress
+	@echo "서버를 먼저 실행하세요: make run-server"
+	./$(BUILD_DIR)/stress 127.0.0.1 8080 $(STRESS_THREADS) $(STRESS_REQUESTS) $(STRESS_DURATION)
+
 run-server: $(BUILD_DIR)/minidb
-	./$(BUILD_DIR)/minidb --server 8080 bench.db
+	./$(BUILD_DIR)/minidb --server 8080 stress.db
 
 # ── step tests ──
 $(BUILD_DIR)/test_step0: tests/test_step0_db_execute.c $(OBJS)
@@ -95,4 +108,4 @@ test-all: test test-step0 test-step1 test-step2
 clean:
 	rm -rf $(BUILD_DIR) *.db __test__*.db
 
-.PHONY: all test test-step0 test-step1 test-step2 test-all run run-server gen bench clean
+.PHONY: all test test-step0 test-step1 test-step2 test-all run run-server gen bench stress clean

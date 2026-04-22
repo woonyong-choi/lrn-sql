@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -89,6 +90,7 @@ int server_run(pager_t *pager, int port)
             continue;
         }
 
+        atomic_fetch_add(&pool.total_connections, 1);
         if (thread_pool_submit(&pool, client_fd) != 0) {
             close(client_fd);
         }

@@ -39,6 +39,11 @@ void db_destroy(void)
     lock_table_destroy(&g_lock_table);
 }
 
+lock_stats_t db_lock_stats(void)
+{
+    return lock_table_stats(&g_lock_table);
+}
+
 static int is_read_only(statement_type_t type)
 {
     return type == STMT_SELECT || type == STMT_EXPLAIN;

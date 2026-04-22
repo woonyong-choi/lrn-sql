@@ -43,10 +43,16 @@ int http_read_request(int client_fd, http_request_t *req)
     if (total <= 0) return -1;
 
     /* 메서드 + 경로 확인 */
+    if (strncmp(buf, "GET /stats", 10) == 0) {
+        req->valid = 1;
+        req->route = ROUTE_STATS;
+        return 0;
+    }
     if (strncmp(buf, "POST /query", 11) != 0) {
         req->valid = 0;
         return 0;
     }
+    req->route = ROUTE_QUERY;
 
     /* 헤더 끝 찾기 */
     char *hdr_end = strstr(buf, "\r\n\r\n");
