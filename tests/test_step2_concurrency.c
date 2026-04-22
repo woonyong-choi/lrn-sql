@@ -18,6 +18,8 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 
 /* ── 테스트 프레임워크 ── */
 static int g_pass = 0, g_fail = 0;
@@ -44,14 +46,25 @@ typedef struct {
     lock_mode_t mode;
     int result;       /* 0=성공, -1=timeout */
     int delay_ms;     /* lock 획득 후 유지 시간 */
+    int64_t acquired_ms;
 } lock_thread_arg_t;
+
+static int64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 static void *lock_thread_fn(void *arg)
 {
     lock_thread_arg_t *a = (lock_thread_arg_t *)arg;
     a->result = lock_acquire(&g_lt, a->row_id, a->mode);
     if (a->result == 0 && a->delay_ms > 0) {
+        a->acquired_ms = mono_ms();
         usleep((unsigned)(a->delay_ms * 1000));
+    } else if (a->result == 0) {
+        a->acquired_ms = mono_ms();
     }
     /* Strict 2PL: 종료 시 해제 */
     lock_release_all(&g_lt);
@@ -167,6 +180,45 @@ static void test_lock_release_all_many(void)
     ASSERT(after.total == 0, "release_all 후 lock 0개");
     ASSERT(after.shared == 0, "release_all 후 shared 0개");
     ASSERT(after.exclusive == 0, "release_all 후 exclusive 0개");
+
+    lock_table_destroy(&g_lt);
+}
+
+static void test_lock_writer_priority(void)
+{
+    lock_table_init(&g_lt);
+
+    lock_thread_arg_t reader1 = {
+        .row_id = 550, .mode = LOCK_S, .delay_ms = 700, .acquired_ms = -1
+    };
+    lock_thread_arg_t writer = {
+        .row_id = 550, .mode = LOCK_X, .delay_ms = 400, .acquired_ms = -1
+    };
+    lock_thread_arg_t reader2 = {
+        .row_id = 550, .mode = LOCK_S, .delay_ms = 0, .acquired_ms = -1
+    };
+
+    int64_t start_ms = mono_ms();
+
+    pthread_t t1, t2, t3;
+    pthread_create(&t1, NULL, lock_thread_fn, &reader1);
+    usleep(50000);
+    pthread_create(&t2, NULL, lock_thread_fn, &writer);
+    usleep(50000);
+    pthread_create(&t3, NULL, lock_thread_fn, &reader2);
+
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+    pthread_join(t3, NULL);
+
+    ASSERT(reader1.result == 0, "선행 reader lock 성공");
+    ASSERT(writer.result == 0, "writer lock 성공");
+    ASSERT(reader2.result == 0, "후행 reader lock 성공");
+
+    ASSERT(writer.acquired_ms - start_ms >= 500,
+           "writer는 선행 reader 해제 후에야 획득");
+    ASSERT(reader2.acquired_ms - writer.acquired_ms >= 250,
+           "writer 대기 시작 뒤 들어온 reader는 writer 뒤로 밀림");
 
     lock_table_destroy(&g_lt);
 }
@@ -464,6 +516,26 @@ static void test_http_keepalive_error_header(void)
     close(fds[1]);
 }
 
+static void test_http_read_request_timeout(void)
+{
+    int fds[2];
+    ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair 생성");
+
+    struct timeval tv = {
+        .tv_sec = 0,
+        .tv_usec = 200000
+    };
+    ASSERT(setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0,
+           "수신 timeout 설정");
+
+    http_request_t req;
+    ASSERT(http_read_request(fds[0], &req) == -1,
+           "유휴 소켓은 recv timeout 후 읽기 실패로 종료");
+
+    close(fds[0]);
+    close(fds[1]);
+}
+
 /* ══════════════════════════════════════
  *  main
  * ══════════════════════════════════════ */
@@ -477,6 +549,7 @@ int main(void)
     TEST(test_lock_xx_timeout);
     TEST(test_lock_different_rows);
     TEST(test_lock_release_all_many);
+    TEST(test_lock_writer_priority);
 
     /* 멀티스레드 db_execute 테스트 */
     TEST(test_concurrent_insert);
@@ -484,6 +557,7 @@ int main(void)
     TEST(test_insert_gap_conflict);
     TEST(test_delete_scan_lock_conflict);
     TEST(test_http_keepalive_error_header);
+    TEST(test_http_read_request_timeout);
 
     fprintf(stderr, "\n========================================\n");
     if (g_fail == 0) {

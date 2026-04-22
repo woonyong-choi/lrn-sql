@@ -27,6 +27,30 @@ static uint32_t hash_row_id(uint64_t row_id)
     return (uint32_t)(row_id % LOCK_TABLE_BUCKETS);
 }
 
+static int reader_should_wait(lock_table_t *lt, lock_mode_t mode)
+{
+    return mode == LOCK_S && lt->waiting_writers > 0;
+}
+
+static void waiting_writer_register(lock_table_t *lt, int *registered)
+{
+    if (!*registered) {
+        lt->waiting_writers++;
+        *registered = 1;
+    }
+}
+
+static void waiting_writer_unregister(lock_table_t *lt, int *registered)
+{
+    if (*registered) {
+        if (lt->waiting_writers > 0) {
+            lt->waiting_writers--;
+        }
+        *registered = 0;
+        pthread_cond_broadcast(&lt->cond);
+    }
+}
+
 static void owner_list_push(lock_table_t *lt, lock_entry_t *e)
 {
     e->owner_prev = NULL;
@@ -80,6 +104,7 @@ void lock_table_init(lock_table_t *lt)
 {
     memset(lt->buckets, 0, sizeof(lt->buckets));
     lt->range_locks = NULL;
+    lt->waiting_writers = 0;
     pthread_mutex_init(&lt->mutex, NULL);
     pthread_cond_init(&lt->cond, NULL);
 }
@@ -219,6 +244,7 @@ int lock_acquire(lock_table_t *lt, uint64_t row_id, lock_mode_t mode)
     deadline.tv_sec += 3;
 
     pthread_t self = pthread_self();
+    int waiting_writer = 0;
 
     pthread_mutex_lock(&lt->mutex);
 
@@ -238,9 +264,13 @@ int lock_acquire(lock_table_t *lt, uint64_t row_id, lock_mode_t mode)
     }
 
     /* 충돌 대기 (point-vs-point + point-vs-range) */
-    while (conflict_exists(lt, row_id, mode, self)) {
+    while (conflict_exists(lt, row_id, mode, self) || reader_should_wait(lt, mode)) {
+        if (mode == LOCK_X) {
+            waiting_writer_register(lt, &waiting_writer);
+        }
         int rc = pthread_cond_timedwait(&lt->cond, &lt->mutex, &deadline);
         if (rc == ETIMEDOUT) {
+            waiting_writer_unregister(lt, &waiting_writer);
             pthread_mutex_unlock(&lt->mutex);
             return -1;
         }
@@ -249,6 +279,7 @@ int lock_acquire(lock_table_t *lt, uint64_t row_id, lock_mode_t mode)
     /* S→X 업그레이드 */
     if (e && e->row_id == row_id && pthread_equal(e->owner, self)) {
         e->mode = mode;
+        waiting_writer_unregister(lt, &waiting_writer);
         pthread_mutex_unlock(&lt->mutex);
         return 0;
     }
@@ -266,6 +297,7 @@ int lock_acquire(lock_table_t *lt, uint64_t row_id, lock_mode_t mode)
     global_list_insert_point(lt, bucket, ne);
     owner_list_push(lt, ne);
 
+    waiting_writer_unregister(lt, &waiting_writer);
     pthread_mutex_unlock(&lt->mutex);
     return 0;
 }
@@ -279,6 +311,7 @@ int lock_acquire_range(lock_table_t *lt, uint64_t low, uint64_t high,
     deadline.tv_sec += 3;
 
     pthread_t self = pthread_self();
+    int waiting_writer = 0;
 
     pthread_mutex_lock(&lt->mutex);
 
@@ -297,9 +330,14 @@ int lock_acquire_range(lock_table_t *lt, uint64_t low, uint64_t high,
     }
 
     /* 충돌 대기 (range-vs-range + range-vs-point) */
-    while (range_conflict_exists(lt, low, high, mode, self)) {
+    while (range_conflict_exists(lt, low, high, mode, self)
+           || reader_should_wait(lt, mode)) {
+        if (mode == LOCK_X) {
+            waiting_writer_register(lt, &waiting_writer);
+        }
         int rc = pthread_cond_timedwait(&lt->cond, &lt->mutex, &deadline);
         if (rc == ETIMEDOUT) {
+            waiting_writer_unregister(lt, &waiting_writer);
             pthread_mutex_unlock(&lt->mutex);
             return -1;
         }
@@ -318,6 +356,7 @@ int lock_acquire_range(lock_table_t *lt, uint64_t low, uint64_t high,
     global_list_insert_range(lt, ne);
     owner_list_push(lt, ne);
 
+    waiting_writer_unregister(lt, &waiting_writer);
     pthread_mutex_unlock(&lt->mutex);
     return 0;
 }
