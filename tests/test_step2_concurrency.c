@@ -8,6 +8,7 @@
  */
 
 #include "server/lock_table.h"
+#include "server/http.h"
 #include "storage/pager.h"
 #include "db.h"
 #include <stdio.h>
@@ -16,6 +17,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <sys/socket.h>
 
 /* ── 테스트 프레임워크 ── */
 static int g_pass = 0, g_fail = 0;
@@ -294,6 +296,79 @@ static void test_concurrent_read_write(void)
     remove("__test__rw.db");
 }
 
+/* INSERT는 활성 range lock과 충돌해야 한다 */
+typedef struct {
+    uint64_t low;
+    uint64_t high;
+    lock_mode_t mode;
+    int delay_ms;
+    int result;
+} range_lock_thread_arg_t;
+
+static void *range_lock_thread_fn(void *arg)
+{
+    range_lock_thread_arg_t *a = (range_lock_thread_arg_t *)arg;
+    a->result = lock_acquire_range(db_get_lock_table(), a->low, a->high, a->mode);
+    if (a->result == 0 && a->delay_ms > 0) {
+        usleep((unsigned)(a->delay_ms * 1000));
+    }
+    lock_release_all(db_get_lock_table());
+    return NULL;
+}
+
+static void test_insert_gap_conflict(void)
+{
+    remove("__test__gap.db");
+    ASSERT(pager_open(&g_pager, "__test__gap.db", true) == 0, "DB 생성");
+    db_init();
+
+    exec_result_t r = db_execute(&g_pager, "CREATE TABLE users (name VARCHAR(32), score INT)");
+    ASSERT(r.status == 0, "CREATE TABLE 성공");
+    free(r.out_buf);
+
+    range_lock_thread_arg_t a = {
+        .low = 1, .high = UINT64_MAX, .mode = LOCK_X, .delay_ms = 3500
+    };
+    pthread_t holder;
+    pthread_create(&holder, NULL, range_lock_thread_fn, &a);
+    usleep(50000);
+
+    r = db_execute(&g_pager, "INSERT INTO users VALUES ('blocked', 1)");
+    ASSERT(r.status == -1, "range lock 충돌 시 INSERT timeout");
+    if (r.message[0] != '\0') {
+        ASSERT(strstr(r.message, "gap check timeout") != NULL,
+               "INSERT timeout 메시지 확인");
+    }
+    free(r.out_buf);
+
+    pthread_join(holder, NULL);
+    ASSERT(a.result == 0, "range lock 획득 성공");
+
+    db_destroy();
+    pager_close(&g_pager);
+    remove("__test__gap.db");
+}
+
+static void test_http_keepalive_error_header(void)
+{
+    int fds[2];
+    ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair 생성");
+
+    http_send_error_keepalive(fds[0], "oops", 4);
+
+    char buf[512];
+    ssize_t n = recv(fds[1], buf, sizeof(buf) - 1, 0);
+    ASSERT(n > 0, "keep-alive error 응답 수신");
+    if (n > 0) {
+        buf[n] = '\0';
+        ASSERT(strstr(buf, "Connection: keep-alive") != NULL,
+               "에러 응답이 keep-alive 헤더를 보냄");
+    }
+
+    close(fds[0]);
+    close(fds[1]);
+}
+
 /* ══════════════════════════════════════
  *  main
  * ══════════════════════════════════════ */
@@ -310,6 +385,8 @@ int main(void)
     /* 멀티스레드 db_execute 테스트 */
     TEST(test_concurrent_insert);
     TEST(test_concurrent_read_write);
+    TEST(test_insert_gap_conflict);
+    TEST(test_http_keepalive_error_header);
 
     fprintf(stderr, "\n========================================\n");
     if (g_fail == 0) {

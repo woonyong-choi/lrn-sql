@@ -39,6 +39,9 @@ static volatile sig_atomic_t g_running = 1;
 static _Atomic int     g_active_connections = 0;
 static _Atomic uint64_t g_total_connections  = 0;
 static _Atomic uint64_t g_total_processed    = 0;
+static pthread_mutex_t  g_conn_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t   g_conn_cv   = PTHREAD_COND_INITIALIZER;
+static int              g_conn_fds[MAX_CONNECTIONS];
 
 static void sigint_handler(int sig)
 {
@@ -47,7 +50,7 @@ static void sigint_handler(int sig)
 }
 
 /* ── /stats JSON 응답 생성 ── */
-static void handle_stats(pager_t *pager, int client_fd)
+static void handle_stats(pager_t *pager, int client_fd, int keep_alive)
 {
     int active  = atomic_load(&g_active_connections);
     uint64_t total_conn = atomic_load(&g_total_connections);
@@ -58,6 +61,10 @@ static void handle_stats(pager_t *pager, int client_fd)
 
     /* Pager 캐시 통계 */
     uint32_t frames_valid = 0, frames_dirty = 0, frames_pinned = 0;
+    uint32_t total_pages = 0, free_pages = 0;
+    uint64_t row_count = 0, next_id = 0;
+
+    pthread_mutex_lock(&pager->pager_mutex);
     for (int i = 0; i < MAX_FRAMES; i++) {
         if (pager->frames[i].is_valid) {
             frames_valid++;
@@ -65,6 +72,14 @@ static void handle_stats(pager_t *pager, int client_fd)
             if (pager->frames[i].pin_count > 0) frames_pinned++;
         }
     }
+    total_pages = pager->header.next_page_id;
+    free_pages = pager->header.free_page_head;
+    pthread_mutex_unlock(&pager->pager_mutex);
+
+    pthread_mutex_lock(&pager->header_lock);
+    row_count = pager->header.row_count;
+    next_id = pager->header.next_id;
+    pthread_mutex_unlock(&pager->header_lock);
 
     char body[2048];
     int len = snprintf(body, sizeof(body),
@@ -101,12 +116,16 @@ static void handle_stats(pager_t *pager, int client_fd)
         ls.total, ls.shared, ls.exclusive,
         pager->page_size, MAX_FRAMES,
         frames_valid, frames_dirty, frames_pinned,
-        pager->header.next_page_id,
-        pager->header.free_page_head,
-        (unsigned long)pager->header.row_count,
-        (unsigned long)pager->header.next_id);
+        total_pages,
+        free_pages,
+        (unsigned long)row_count,
+        (unsigned long)next_id);
 
-    http_send_ok(client_fd, body, (size_t)len);
+    if (keep_alive) {
+        http_send_ok_keepalive(client_fd, body, (size_t)len);
+    } else {
+        http_send_ok(client_fd, body, (size_t)len);
+    }
 }
 
 /*
@@ -134,7 +153,7 @@ static int handle_one_request(pager_t *pager, int client_fd)
 
     /* GET /stats 라우트 */
     if (req.route == ROUTE_STATS) {
-        handle_stats(pager, client_fd);
+        handle_stats(pager, client_fd, ka);
         return ka ? 1 : 0;
     }
 
@@ -165,7 +184,11 @@ static int handle_one_request(pager_t *pager, int client_fd)
             http_send_ok(client_fd, resp, off);
         }
     } else {
-        http_send_error(client_fd, resp, off);
+        if (ka) {
+            http_send_error_keepalive(client_fd, resp, off);
+        } else {
+            http_send_error(client_fd, resp, off);
+        }
     }
 
     if (res.out_buf) {
@@ -193,7 +216,41 @@ static void handle_client(pager_t *pager, int client_fd)
 typedef struct {
     pager_t *pager;
     int      client_fd;
+    int      slot_idx;
 } conn_arg_t;
+
+static int register_connection_fd(int client_fd)
+{
+    pthread_mutex_lock(&g_conn_lock);
+    if (atomic_load(&g_active_connections) >= MAX_CONNECTIONS) {
+        pthread_mutex_unlock(&g_conn_lock);
+        return -1;
+    }
+
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        if (g_conn_fds[i] == -1) {
+            g_conn_fds[i] = client_fd;
+            atomic_fetch_add(&g_active_connections, 1);
+            pthread_mutex_unlock(&g_conn_lock);
+            return i;
+        }
+    }
+
+    pthread_mutex_unlock(&g_conn_lock);
+    return -1;
+}
+
+static void unregister_connection_slot(int slot_idx)
+{
+    pthread_mutex_lock(&g_conn_lock);
+    if (slot_idx >= 0 && slot_idx < MAX_CONNECTIONS) {
+        g_conn_fds[slot_idx] = -1;
+    }
+    if (atomic_fetch_sub(&g_active_connections, 1) == 1) {
+        pthread_cond_broadcast(&g_conn_cv);
+    }
+    pthread_mutex_unlock(&g_conn_lock);
+}
 
 static void *connection_handler(void *arg)
 {
@@ -202,7 +259,7 @@ static void *connection_handler(void *arg)
     handle_client(ca->pager, ca->client_fd);
 
     close(ca->client_fd);
-    atomic_fetch_sub(&g_active_connections, 1);
+    unregister_connection_slot(ca->slot_idx);
     free(ca);
     return NULL;
 }
@@ -210,6 +267,10 @@ static void *connection_handler(void *arg)
 /* ── 공개 API ── */
 int server_run(pager_t *pager, int port)
 {
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        g_conn_fds[i] = -1;
+    }
+
     /* SIGINT 핸들러 등록 */
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -264,8 +325,8 @@ int server_run(pager_t *pager, int port)
 
         atomic_fetch_add(&g_total_connections, 1);
 
-        /* 동시 연결 수 제한 */
-        if (atomic_load(&g_active_connections) >= MAX_CONNECTIONS) {
+        int slot_idx = register_connection_fd(client_fd);
+        if (slot_idx < 0) {
             const char *msg = "오류: 최대 연결 수 초과";
             http_send_error(client_fd, msg, strlen(msg));
             close(client_fd);
@@ -275,14 +336,13 @@ int server_run(pager_t *pager, int port)
         conn_arg_t *ca = (conn_arg_t *)malloc(sizeof(conn_arg_t));
         ca->pager     = pager;
         ca->client_fd = client_fd;
-
-        atomic_fetch_add(&g_active_connections, 1);
+        ca->slot_idx  = slot_idx;
 
         pthread_t tid;
         if (pthread_create(&tid, NULL, connection_handler, ca) != 0) {
             perror("pthread_create");
             close(client_fd);
-            atomic_fetch_sub(&g_active_connections, 1);
+            unregister_connection_slot(slot_idx);
             free(ca);
             continue;
         }
@@ -293,6 +353,16 @@ int server_run(pager_t *pager, int port)
 
     /* graceful shutdown: 열린 연결이 자연히 끊기기를 잠시 대기 */
     close(server_fd);
+    pthread_mutex_lock(&g_conn_lock);
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        if (g_conn_fds[i] >= 0) {
+            shutdown(g_conn_fds[i], SHUT_RDWR);
+        }
+    }
+    while (atomic_load(&g_active_connections) > 0) {
+        pthread_cond_wait(&g_conn_cv, &g_conn_lock);
+    }
+    pthread_mutex_unlock(&g_conn_lock);
 
     /* Row Lock 테이블 정리 */
     db_destroy();
