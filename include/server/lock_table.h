@@ -33,6 +33,7 @@ typedef struct lock_entry {
 typedef struct {
     lock_entry_t *buckets[LOCK_TABLE_BUCKETS];  /* point locks (hash) */
     lock_entry_t *range_locks;                   /* range/gap locks (별도 리스트) */
+    int waiting_writers;                         /* 대기 중인 writer 수 (writer 우선 정책용) */
     pthread_mutex_t mutex;
     pthread_cond_t  cond;   /* lock 해제 시 broadcast */
 } lock_table_t;
