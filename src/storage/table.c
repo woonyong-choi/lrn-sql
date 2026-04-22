@@ -97,10 +97,10 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
      * 마지막 페이지가 가득 찼을 때만 free slot 탐색을 위해 전체 체인을 본다.
      */
     if (pager->last_heap_page_id != 0) {
-        uint8_t *tail_page = pager_get_page(pager, pager->last_heap_page_id);
+        uint8_t *tail_page = pager_get_page_rlatch(pager, pager->last_heap_page_id);
         heap_page_header_t tail_hph;
         memcpy(&tail_hph, tail_page, sizeof(tail_hph));
-        pager_unpin(pager, pager->last_heap_page_id);
+        pager_unlatch_r(pager, pager->last_heap_page_id);
 
         if (tail_hph.free_slot_head != SLOT_NONE) {
             return pager->last_heap_page_id;
@@ -114,10 +114,10 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
 
     uint32_t pid = pager->header.first_heap_page_id;
     while (pid != 0) {
-        uint8_t *page = pager_get_page(pager, pid);
+        uint8_t *page = pager_get_page_rlatch(pager, pid);
         heap_page_header_t hph;
         memcpy(&hph, page, sizeof(hph));
-        pager_unpin(pager, pid);
+        pager_unlatch_r(pager, pid);
 
         /* 재활용 가능한 빈 슬롯이 있는지 확인 */
         if (hph.free_slot_head != SLOT_NONE)
@@ -167,7 +167,7 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
     if (pid == 0) {
         /* 새 힙 페이지 할당 */
         pid = pager_alloc_page(pager);
-        uint8_t *page = pager_get_page(pager, pid);
+        uint8_t *page = pager_get_page_wlatch(pager, pid);
 
         heap_page_header_t hph = {
             .page_type = PAGE_TYPE_HEAP,
@@ -179,7 +179,7 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
         };
         memcpy(page, &hph, sizeof(hph));
         pager_mark_dirty(pager, pid);
-        pager_unpin(pager, pid);
+        pager_unlatch_w(pager, pid);
 
         /*
          * pager가 마지막 힙 페이지를 메모리에 캐시하므로
@@ -187,19 +187,19 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
          */
         uint32_t prev_pid = pager->last_heap_page_id;
         if (prev_pid != 0) {
-            uint8_t *pp = pager_get_page(pager, prev_pid);
+            uint8_t *pp = pager_get_page_wlatch(pager, prev_pid);
             heap_page_header_t ph;
             memcpy(&ph, pp, sizeof(ph));
             ph.next_heap_page_id = pid;
             memcpy(pp, &ph, sizeof(ph));
             pager_mark_dirty(pager, prev_pid);
-            pager_unpin(pager, prev_pid);
+            pager_unlatch_w(pager, prev_pid);
         }
         pager->last_heap_page_id = pid;
     }
 
-    /* 선택된 페이지에 행 삽입 */
-    uint8_t *page = pager_get_page(pager, pid);
+    /* 선택된 페이지에 행 삽입 (쓰기 래치로 보호) */
+    uint8_t *page = pager_get_page_wlatch(pager, pid);
     heap_page_header_t hph;
     memcpy(&hph, page, sizeof(hph));
 
@@ -250,7 +250,7 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
 
     memcpy(page, &hph, sizeof(hph));
     pager_mark_dirty(pager, pid);
-    pager_unpin(pager, pid);
+    pager_unlatch_w(pager, pid);
 
     ref.page_id = pid;
     ref.slot_id = slot_id;
@@ -270,9 +270,9 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
  *   3. slot.status가 ALIVE가 아니면 NULL 반환 (삭제된 행).
  *   4. ALIVE이면 page + slot.offset 위치의 포인터를 반환한다.
  *
- * 주의: 반환된 포인터는 캐시 페이지 내부를 가리킨다.
- *       사용 후 반드시 pager_unpin(pager, ref.page_id)을 호출해야 한다.
- *       unpin 전에 페이지가 교체되면 포인터가 무효화된다.
+ * 주의: 반환�� 포인터는 캐시 페이지 내부를 가리키며, 읽기 래치가 걸려 있다.
+ *       사��� 후 반드시 pager_unlatch_r(pager, ref.page_id)을 호출해야 한다.
+ *       래치 해제 전에 데이터를 복사하거나 사용을 완료해야 한다.
  *
  * 예시: ref = {page_id=1, slot_id=2}
  *   slot_off = 16 + 2×8 = 32
@@ -282,7 +282,7 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
 const uint8_t *heap_fetch(pager_t *pager, row_ref_t ref, uint16_t row_size)
 {
     (void)row_size;
-    uint8_t *page = pager_get_page(pager, ref.page_id);
+    uint8_t *page = pager_get_page_rlatch(pager, ref.page_id);
     if (page == NULL)
     {
         return NULL;
@@ -293,11 +293,11 @@ const uint8_t *heap_fetch(pager_t *pager, row_ref_t ref, uint16_t row_size)
     memcpy(&slot, page + slot_off, sizeof(slot));
 
     if (slot.status != SLOT_ALIVE) {
-        pager_unpin(pager, ref.page_id);
+        pager_unlatch_r(pager, ref.page_id);
         return NULL;
     }
 
-    /* 주의: 호출자가 사용 후 pager_unpin(pager, ref.page_id)을 호출해야 한다 */
+    /* 주의: 호출자가 사용 후 pager_unlatch_r(pager, ref.page_id)�� 호출해야 한다 */
     return page + slot.offset;
 }
 
@@ -323,7 +323,7 @@ const uint8_t *heap_fetch(pager_t *pager, row_ref_t ref, uint16_t row_size)
  */
 int heap_delete(pager_t *pager, row_ref_t ref)
 {
-    uint8_t *page = pager_get_page(pager, ref.page_id);
+    uint8_t *page = pager_get_page_wlatch(pager, ref.page_id);
     if (page == NULL)
     {
         return -1;
@@ -337,7 +337,7 @@ int heap_delete(pager_t *pager, row_ref_t ref)
     memcpy(&slot, page + slot_off, sizeof(slot));
 
     if (slot.status != SLOT_ALIVE) {
-        pager_unpin(pager, ref.page_id);
+        pager_unlatch_w(pager, ref.page_id);
         return -1;
     }
 
@@ -349,7 +349,7 @@ int heap_delete(pager_t *pager, row_ref_t ref)
     memcpy(page + slot_off, &slot, sizeof(slot));
     memcpy(page, &hph, sizeof(hph));
     pager_mark_dirty(pager, ref.page_id);
-    pager_unpin(pager, ref.page_id);
+    pager_unlatch_w(pager, ref.page_id);
     return 0;
 }
 
@@ -377,7 +377,7 @@ void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
     (void)row_size;
     uint32_t pid = pager->header.first_heap_page_id;
     while (pid != 0) {
-        uint8_t *page = pager_get_page(pager, pid);
+        uint8_t *page = pager_get_page_rlatch(pager, pid);
         heap_page_header_t hph;
         memcpy(&hph, page, sizeof(hph));
 
@@ -388,14 +388,14 @@ void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
             if (slot.status == SLOT_ALIVE) {
                 row_ref_t ref = { .page_id = pid, .slot_id = i };
                 if (!cb(page + slot.offset, ref, ctx)) {
-                    pager_unpin(pager, pid);
+                    pager_unlatch_r(pager, pid);
                     return;
                 }
             }
         }
 
         uint32_t next = hph.next_heap_page_id;
-        pager_unpin(pager, pid);
+        pager_unlatch_r(pager, pid);
         pid = next;
     }
 }

@@ -283,7 +283,9 @@ int pager_open(pager_t* pager, const char* path, bool create) {
      */
     uint32_t initial_ps = ps;
     uint8_t tmp[4096];
-    pread(fd, tmp, sizeof(tmp), 0);
+    if (pread(fd, tmp, sizeof(tmp), 0) < 0) {
+        perror("pread header probe");
+    }
     db_header_t* th = (db_header_t*)tmp;
     pager->page_size = th->page_size;
     ps = pager->page_size;
@@ -298,7 +300,9 @@ int pager_open(pager_t* pager, const char* path, bool create) {
 
     /* 전체 헤더 페이지 읽기 */
     uint8_t* hbuf = (uint8_t*)calloc(1, ps);
-    pread(fd, hbuf, ps, 0);
+    if (pread(fd, hbuf, ps, 0) < 0) {
+        perror("pread header full");
+    }
     memcpy(&pager->header, hbuf, sizeof(db_header_t));
     free(hbuf);
 
@@ -332,6 +336,14 @@ int pager_open(pager_t* pager, const char* path, bool create) {
   pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
   pthread_mutex_init(&pager->pager_mutex, &attr);
   pthread_mutexattr_destroy(&attr);
+
+  /* 헤더 카운터 보호용 뮤텍스 */
+  pthread_mutex_init(&pager->header_lock, NULL);
+
+  /* 프레임별 래치 초기화 (래치 커플링용) */
+  for (int i = 0; i < MAX_FRAMES; i++)
+    pthread_rwlock_init(&pager->frames[i].latch, NULL);
+
   return 0;
 }
 
@@ -346,6 +358,7 @@ int pager_open(pager_t* pager, const char* path, bool create) {
 void pager_close(pager_t* pager) {
   pager_flush_all(pager);
   for (int i = 0; i < MAX_FRAMES; i++) {
+    pthread_rwlock_destroy(&pager->frames[i].latch);
     free(pager->frames[i].data);
     pager->frames[i].data = NULL;
   }
@@ -353,6 +366,7 @@ void pager_close(pager_t* pager) {
     close(pager->fd);
     pager->fd = -1;
   }
+  pthread_mutex_destroy(&pager->header_lock);
   pthread_mutex_destroy(&pager->pager_mutex);
 }
 
@@ -513,6 +527,61 @@ void pager_unpin(pager_t* pager, uint32_t page_id) {
     pager->frames[idx].pin_count--;
   }
   pthread_mutex_unlock(&pager->pager_mutex);
+}
+
+/* ======================================================================
+ *  래치 기반 페이지 접근 (Latch Coupling / Crab Protocol)
+ *
+ *  pin + latch를 원자적으로 획득/해제한다.
+ *  페이지가 pinned 상태이므로 프레임은 안정적이며,
+ *  래치는 페이지 내용에 대한 동시 접근을 제어한다.
+ *
+ *  래치 순서: pager_mutex -> 해제 -> latch 획득 (데드락 방지)
+ * ====================================================================== */
+
+uint8_t *pager_get_page_rlatch(pager_t *pager, uint32_t page_id) {
+    uint8_t *data = pager_get_page(pager, page_id);
+    if (!data) return NULL;
+    /* 페이지가 pinned 상태이므로 프레임이 evict되지 않는다 */
+    pthread_mutex_lock(&pager->pager_mutex);
+    int idx = find_frame(pager, page_id);
+    pthread_mutex_unlock(&pager->pager_mutex);
+    if (idx >= 0)
+        pthread_rwlock_rdlock(&pager->frames[idx].latch);
+    return data;
+}
+
+uint8_t *pager_get_page_wlatch(pager_t *pager, uint32_t page_id) {
+    uint8_t *data = pager_get_page(pager, page_id);
+    if (!data) return NULL;
+    pthread_mutex_lock(&pager->pager_mutex);
+    int idx = find_frame(pager, page_id);
+    pthread_mutex_unlock(&pager->pager_mutex);
+    if (idx >= 0)
+        pthread_rwlock_wrlock(&pager->frames[idx].latch);
+    return data;
+}
+
+void pager_unlatch_r(pager_t *pager, uint32_t page_id) {
+    pthread_mutex_lock(&pager->pager_mutex);
+    int idx = find_frame(pager, page_id);
+    if (idx >= 0) {
+        pthread_rwlock_unlock(&pager->frames[idx].latch);
+        if (pager->frames[idx].pin_count > 0)
+            pager->frames[idx].pin_count--;
+    }
+    pthread_mutex_unlock(&pager->pager_mutex);
+}
+
+void pager_unlatch_w(pager_t *pager, uint32_t page_id) {
+    pthread_mutex_lock(&pager->pager_mutex);
+    int idx = find_frame(pager, page_id);
+    if (idx >= 0) {
+        pthread_rwlock_unlock(&pager->frames[idx].latch);
+        if (pager->frames[idx].pin_count > 0)
+            pager->frames[idx].pin_count--;
+    }
+    pthread_mutex_unlock(&pager->pager_mutex);
 }
 
 /* ══════════════════════════════════════════════════════════════════════

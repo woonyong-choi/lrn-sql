@@ -15,7 +15,6 @@ SRCS = $(SRC_DIR)/storage/pager.c \
        $(SRC_DIR)/sql/planner.c \
        $(SRC_DIR)/sql/executor.c \
        $(SRC_DIR)/server/http.c \
-       $(SRC_DIR)/server/thread_pool.c \
        $(SRC_DIR)/server/server.c \
        $(SRC_DIR)/server/lock_table.c \
        $(SRC_DIR)/db.c

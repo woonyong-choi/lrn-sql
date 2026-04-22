@@ -29,7 +29,7 @@ typedef enum {
     PREDICATE_FIELD_CMP   /* >, <, >=, <=, != */
 } predicate_kind_t;
 
-/* 비교 연��자 */
+/* 비교 연산자 */
 typedef enum {
     OP_EQ,    /* = */
     OP_NE,    /* != */
