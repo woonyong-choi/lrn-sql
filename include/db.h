@@ -19,6 +19,9 @@ void db_destroy(void);
 /* 현재 Row Lock 통계 조회 */
 lock_stats_t db_lock_stats(void);
 
+/* Lock 테이블 접근 (executor의 INSERT gap check용) */
+lock_table_t *db_get_lock_table(void);
+
 /*
  * db_execute - SQL 문자열을 파싱하고 실행한다.
  *

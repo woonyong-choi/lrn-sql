@@ -31,11 +31,13 @@
 #include "storage/schema.h"
 #include "storage/table.h"
 #include "storage/bptree.h"
+#include "db.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <inttypes.h>
+#include <pthread.h>
 
 /* ══════════════════════════════════════════════════════════════════════
  *  동적 출력 버퍼 (printf 대체)
@@ -43,7 +45,7 @@
  *  SELECT/EXPLAIN 결과를 메모리 버퍼에 축적한다.
  *  서버 모드에서는 이 버퍼를 클라이언트에 send()하고,
  *  REPL 모드에서는 printf("%s", buf)로 출력한다.
- * ═════════════════════════════════════════════════════════════════��════ */
+ * ====================================================================== */
 typedef struct {
     char  *data;
     size_t len;
@@ -242,16 +244,39 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
     row_value_t values[MAX_COLUMNS];
     memset(values, 0, sizeof(values));
 
-    /* id는 자동 증가 값으로 설정 */
-    values[0].bigint_val = (int64_t)hdr->next_id;
+    /*
+     * id 할당: header_lock으로 next_id를 원자적으로 읽고 증가시킨다.
+     * DML이 rdlock으로 동시 실행되므로 여러 INSERT가 같은 next_id를 쓰지 않도록 보호.
+     */
+    pthread_mutex_lock(&pager->header_lock);
+    uint64_t my_id = hdr->next_id++;
+    pager->header_dirty = true;
+    pthread_mutex_unlock(&pager->header_lock);
+
+    /*
+     * Gap Check (Next-Key Lock): 새 id가 다른 스레드의 range lock 범위 안이면 대기.
+     * 예: 스레드 A가 UPDATE WHERE id>5 로 range X lock [6, MAX]을 잡고 있으면,
+     *     이 INSERT의 id=7은 그 범위 안이므로 A가 끝날 때까지 대기한다.
+     * → Phantom Insert 방지.
+     *
+     * range lock이 존재할 때만 gap check 수행한다.
+     * range lock이 없으면 point lock도 불필요하므로 건너뛴다.
+     */
+    lock_table_t *lt = db_get_lock_table();
+    if (lt->range_locks != NULL) {
+        if (lock_acquire(lt, my_id, LOCK_X) != 0) {
+            res.status = -1;
+            snprintf(res.message, sizeof(res.message),
+                     "오류: INSERT gap check timeout (id=%" PRIu64 ", range lock 충돌)", my_id);
+            return res;
+        }
+    }
+
+    values[0].bigint_val = (int64_t)my_id;
 
     /*
      * 사용자 입력 값을 비시스템 컬럼에 매핑한다.
      * 컬럼 0(id)은 건너뛰고, 컬럼 1부터 사용자 값을 순서대로 넣는다.
-     *
-     * 예시: columns = [id, name, age], values_input = ["Alice", "25"]
-     *   values[1].str_val = "Alice"  (VARCHAR → strncpy)
-     *   values[2].int_val = 25       (INT → atoi)
      */
     uint16_t val_idx = 0;
     for (uint16_t i = 1; i < hdr->column_count && val_idx < stmt->insert_value_count; i++) {
@@ -275,7 +300,7 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
     row_serialize(hdr, values, row_buf);
 
     row_ref_t ref = heap_insert(pager, row_buf, hdr->row_size);
-    int rc = bptree_insert(pager, hdr->next_id, ref);
+    int rc = bptree_insert(pager, my_id, ref);
     free(row_buf);
 
     if (rc != 0) {
@@ -284,12 +309,13 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
         return res;
     }
 
-    hdr->next_id++;
+    pthread_mutex_lock(&pager->header_lock);
     hdr->row_count++;
     pager->header_dirty = true;
+    pthread_mutex_unlock(&pager->header_lock);
 
     snprintf(res.message, sizeof(res.message),
-             "1행 삽입 완료 (id=%" PRIu64 ")", hdr->next_id - 1);
+             "1행 삽입 완료 (id=%" PRIu64 ")", my_id);
     return res;
 }
 
@@ -444,7 +470,7 @@ static exec_result_t exec_index_lookup(pager_t *pager, statement_t *stmt)
 
     row_value_t values[MAX_COLUMNS];
     row_deserialize(hdr, row_data, values);
-    pager_unpin(pager, ref.page_id);
+    pager_unlatch_r(pager, ref.page_id);
 
     out_buf_t buf;
     buf_init(&buf);
@@ -705,8 +731,11 @@ static exec_result_t exec_index_delete(pager_t *pager, statement_t *stmt)
     /* 힙 삭제 (톰스톤) + B+ tree 삭제 */
     heap_delete(pager, ref);
     bptree_delete(pager, stmt->pred_id);
+
+    pthread_mutex_lock(&pager->header_lock);
     pager->header.row_count--;
     pager->header_dirty = true;
+    pthread_mutex_unlock(&pager->header_lock);
 
     snprintf(res.message, sizeof(res.message), "1행 삭제 완료 (id=%" PRIu64 ")", stmt->pred_id);
     return res;
@@ -744,12 +773,14 @@ static exec_result_t exec_delete_scan(pager_t *pager, statement_t *stmt)
         if (bptree_search(pager, dc.ids_to_delete[i], &ref)) {
             heap_delete(pager, ref);
             bptree_delete(pager, dc.ids_to_delete[i]);
+            pthread_mutex_lock(&pager->header_lock);
             pager->header.row_count--;
+            pager->header_dirty = true;
+            pthread_mutex_unlock(&pager->header_lock);
             dc.count++;
         }
     }
     free(dc.ids_to_delete);
-    pager->header_dirty = true;
 
     snprintf(res.message, sizeof(res.message), "%u행 삭제 완료 (TABLE_SCAN)", dc.count);
     return res;
@@ -798,22 +829,21 @@ static exec_result_t exec_index_update(pager_t *pager, statement_t *stmt)
 
     row_value_t values[MAX_COLUMNS];
     row_deserialize(hdr, row_data, values);
-    pager_unpin(pager, ref.page_id);
+    pager_unlatch_r(pager, ref.page_id);
 
     apply_update_to_row(hdr, values, stmt);
 
-    /* 수정된 행을 다시 직렬화하여 힙에 덮어쓰기 */
+    /* 수정된 행을 다시 직렬화하여 힙에 덮어쓰기 (쓰기 래치) */
     uint8_t *new_buf = (uint8_t *)calloc(1, hdr->row_size);
     row_serialize(hdr, values, new_buf);
 
-    /* heap 페이지에 직접 덮어쓰기 */
-    uint8_t *page = pager_get_page(pager, ref.page_id);
+    uint8_t *page = pager_get_page_wlatch(pager, ref.page_id);
     slot_t slot;
     size_t slot_off = sizeof(heap_page_header_t) + ref.slot_id * sizeof(slot_t);
     memcpy(&slot, page + slot_off, sizeof(slot));
     memcpy(page + slot.offset, new_buf, hdr->row_size);
     pager_mark_dirty(pager, ref.page_id);
-    pager_unpin(pager, ref.page_id);
+    pager_unlatch_w(pager, ref.page_id);
     free(new_buf);
 
     snprintf(res.message, sizeof(res.message),
@@ -866,20 +896,20 @@ static exec_result_t exec_update_scan(pager_t *pager, statement_t *stmt)
 
         row_value_t values[MAX_COLUMNS];
         row_deserialize(hdr, row_data, values);
-        pager_unpin(pager, ref.page_id);
+        pager_unlatch_r(pager, ref.page_id);
 
         apply_update_to_row(hdr, values, stmt);
 
         uint8_t *new_buf = (uint8_t *)calloc(1, hdr->row_size);
         row_serialize(hdr, values, new_buf);
 
-        uint8_t *page = pager_get_page(pager, ref.page_id);
+        uint8_t *page = pager_get_page_wlatch(pager, ref.page_id);
         size_t slot_off = sizeof(heap_page_header_t) + ref.slot_id * sizeof(slot_t);
         slot_t slot;
         memcpy(&slot, page + slot_off, sizeof(slot));
         memcpy(page + slot.offset, new_buf, hdr->row_size);
         pager_mark_dirty(pager, ref.page_id);
-        pager_unpin(pager, ref.page_id);
+        pager_unlatch_w(pager, ref.page_id);
         free(new_buf);
         uc.count++;
     }
@@ -905,7 +935,8 @@ static exec_result_t exec_drop_table(pager_t *pager, statement_t *stmt)
         return res;
     }
 
-    /* 모든 heap/leaf/internal 페이지를 free list로 반환 */
+    /* 모든 heap/leaf/internal 페이지를 free list로 반환
+     * DDL(wrlock)이므로 다른 DML이 없어 래치 불필요 */
     for (uint32_t i = 1; i < hdr->next_page_id; i++) {
         uint8_t *page = pager_get_page(pager, i);
         uint32_t ptype;
@@ -916,7 +947,8 @@ static exec_result_t exec_drop_table(pager_t *pager, statement_t *stmt)
         }
     }
 
-    /* 새 빈 힙 페이지 + B+ tree 루트 리프 할당 (free list에서 재활용) */
+    /* 새 빈 힙 페이지 + B+ tree 루트 리프 할당 (free list에서 재활용)
+     * DDL wrlock 아래이므로 래치 불필요 */
     uint32_t new_heap = pager_alloc_page(pager);
     {
         uint8_t *page = pager_get_page(pager, new_heap);
