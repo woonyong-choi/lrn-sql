@@ -21,7 +21,11 @@ typedef struct lock_entry {
     uint64_t            range_high;  /* 0 = point lock, >0 = range lock [row_id, range_high] */
     lock_mode_t         mode;
     pthread_t           owner;
-    struct lock_entry  *next;     /* 같은 버킷(또는 range 리스트)의 다음 엔트리 */
+    uint8_t             is_range;    /* 0 = point, 1 = range */
+    struct lock_entry  *next;        /* 같은 버킷(또는 range 리스트)의 다음 엔트리 */
+    struct lock_entry  *prev;        /* 같은 버킷(또는 range 리스트)의 이전 엔트리 */
+    struct lock_entry  *owner_next;  /* 현재 스레드 보유 lock 리스트의 다음 엔트리 */
+    struct lock_entry  *owner_prev;  /* 현재 스레드 보유 lock 리스트의 이전 엔트리 */
 } lock_entry_t;
 
 #define LOCK_TABLE_BUCKETS 256

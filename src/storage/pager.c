@@ -76,6 +76,41 @@ static ssize_t pager_raw_write(pager_t* p, uint32_t page_id,
   return pwrite(p->fd, buf, p->page_size, off);
 }
 
+static uint32_t frame_bucket(uint32_t page_id) {
+  return page_id % FRAME_HASH_BUCKETS;
+}
+
+static void frame_index_init(pager_t* p) {
+  for (int i = 0; i < FRAME_HASH_BUCKETS; i++) {
+    p->frame_buckets[i] = -1;
+  }
+  for (int i = 0; i < MAX_FRAMES; i++) {
+    p->frames[i].hash_next = -1;
+  }
+}
+
+static void frame_index_insert(pager_t* p, int idx) {
+  uint32_t bucket = frame_bucket(p->frames[idx].page_id);
+  p->frames[idx].hash_next = p->frame_buckets[bucket];
+  p->frame_buckets[bucket] = idx;
+}
+
+static void frame_index_remove(pager_t* p, int idx) {
+  uint32_t bucket = frame_bucket(p->frames[idx].page_id);
+  int *link = &p->frame_buckets[bucket];
+
+  while (*link >= 0) {
+    if (*link == idx) {
+      *link = p->frames[idx].hash_next;
+      p->frames[idx].hash_next = -1;
+      return;
+    }
+    link = &p->frames[*link].hash_next;
+  }
+
+  p->frames[idx].hash_next = -1;
+}
+
 /* ── 프레임 탐색 / 교체 ──
  *
  * 프레임 배열(frames[0..255])에서 원하는 페이지를 찾거나,
@@ -91,13 +126,15 @@ static ssize_t pager_raw_write(pager_t* p, uint32_t page_id,
  * find_frame - 프레임 배열에서 page_id에 해당하는 프레임 인덱스를 찾는다.
  *
  * 캐시 히트 시 인덱스를 반환하고, 캐시 미스 시 -1을 반환한다.
- * 선형 탐색 O(256) — 프레임 수가 고정이므로 충분히 빠르다.
+ * page_id -> frame_idx 해시 인덱스를 사용하므로 평균 O(1)이다.
  */
 static int find_frame(pager_t* p, uint32_t page_id) {
-  for (int i = 0; i < MAX_FRAMES; i++) {
-    if (p->frames[i].is_valid && p->frames[i].page_id == page_id) {
-      return i;
+  int idx = p->frame_buckets[frame_bucket(page_id)];
+  while (idx >= 0) {
+    if (p->frames[idx].is_valid && p->frames[idx].page_id == page_id) {
+      return idx;
     }
+    idx = p->frames[idx].hash_next;
   }
   return -1;
 }
@@ -150,6 +187,7 @@ static int evict_frame(pager_t* p) {
     }
     p->frames[best].is_dirty = false;
   }
+  frame_index_remove(p, best);
   p->frames[best].is_valid = false;
   return best;
 }
@@ -217,6 +255,17 @@ int pager_open(pager_t* pager, const char* path, bool create) {
       return -1;
     }
   }
+
+  frame_index_init(pager);
+
+  /* pager_get_page()가 reopen 경로에서 바로 쓰이므로 먼저 초기화한다 */
+  pthread_mutexattr_t attr;
+  pthread_mutexattr_init(&attr);
+  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&pager->pager_mutex, &attr);
+  pthread_mutexattr_destroy(&attr);
+
+  pthread_mutex_init(&pager->header_lock, NULL);
 
   /* DB 파일 최초 생성 */
   if (create) {
@@ -309,6 +358,12 @@ int pager_open(pager_t* pager, const char* path, bool create) {
     /* 매직 넘버 검증 ("MINIDB\0" 7바이트 비교) */
     if (memcmp(pager->header.magic, DB_MAGIC, 7) != 0) {
       fprintf(stderr, "pager: 유효하지 않은 매직 넘버입니다\n");
+      pthread_mutex_destroy(&pager->header_lock);
+      pthread_mutex_destroy(&pager->pager_mutex);
+      for (int i = 0; i < MAX_FRAMES; i++) {
+        free(pager->frames[i].data);
+        pager->frames[i].data = NULL;
+      }
       close(fd);
       return -1;
     }
@@ -330,15 +385,6 @@ int pager_open(pager_t* pager, const char* path, bool create) {
       }
     }
   }
-  /* Recursive mutex: pager_alloc_page 등 내부에서 pager_get_page를 재호출하므로 */
-  pthread_mutexattr_t attr;
-  pthread_mutexattr_init(&attr);
-  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-  pthread_mutex_init(&pager->pager_mutex, &attr);
-  pthread_mutexattr_destroy(&attr);
-
-  /* 헤더 카운터 보호용 뮤텍스 */
-  pthread_mutex_init(&pager->header_lock, NULL);
 
   /* 프레임별 래치 초기화 (래치 커플링용) */
   for (int i = 0; i < MAX_FRAMES; i++)
@@ -424,6 +470,7 @@ uint8_t* pager_get_page(pager_t* pager, uint32_t page_id) {
   f->used_tick = ++pager->tick;
   memset(f->data, 0, pager->page_size);
   pager_raw_read(pager, page_id, f->data);
+  frame_index_insert(pager, idx);
   pthread_mutex_unlock(&pager->pager_mutex);
   return f->data;
 }

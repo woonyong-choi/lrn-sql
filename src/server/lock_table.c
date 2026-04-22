@@ -19,9 +19,61 @@
 #include <time.h>
 #include <errno.h>
 
+static _Thread_local lock_entry_t *tls_held_locks = NULL;
+static _Thread_local lock_table_t *tls_held_lock_table = NULL;
+
 static uint32_t hash_row_id(uint64_t row_id)
 {
     return (uint32_t)(row_id % LOCK_TABLE_BUCKETS);
+}
+
+static void owner_list_push(lock_table_t *lt, lock_entry_t *e)
+{
+    e->owner_prev = NULL;
+    e->owner_next = tls_held_locks;
+    if (tls_held_locks) {
+        tls_held_locks->owner_prev = e;
+    }
+    tls_held_locks = e;
+    tls_held_lock_table = lt;
+}
+
+static void global_list_insert_point(lock_table_t *lt, uint32_t bucket,
+                                     lock_entry_t *e)
+{
+    e->is_range = 0;
+    e->prev = NULL;
+    e->next = lt->buckets[bucket];
+    if (e->next) {
+        e->next->prev = e;
+    }
+    lt->buckets[bucket] = e;
+}
+
+static void global_list_insert_range(lock_table_t *lt, lock_entry_t *e)
+{
+    e->is_range = 1;
+    e->prev = NULL;
+    e->next = lt->range_locks;
+    if (e->next) {
+        e->next->prev = e;
+    }
+    lt->range_locks = e;
+}
+
+static void global_list_remove(lock_table_t *lt, lock_entry_t *e)
+{
+    if (e->prev) {
+        e->prev->next = e->next;
+    } else if (e->is_range) {
+        lt->range_locks = e->next;
+    } else {
+        lt->buckets[hash_row_id(e->row_id)] = e->next;
+    }
+
+    if (e->next) {
+        e->next->prev = e->prev;
+    }
 }
 
 void lock_table_init(lock_table_t *lt)
@@ -52,6 +104,10 @@ void lock_table_destroy(lock_table_t *lt)
         r = next;
     }
     lt->range_locks = NULL;
+    if (tls_held_lock_table == lt) {
+        tls_held_locks = NULL;
+        tls_held_lock_table = NULL;
+    }
     pthread_mutex_destroy(&lt->mutex);
     pthread_cond_destroy(&lt->cond);
 }
@@ -198,13 +254,17 @@ int lock_acquire(lock_table_t *lt, uint64_t row_id, lock_mode_t mode)
     }
 
     /* 새 point lock 엔트리 추가 */
-    lock_entry_t *ne = (lock_entry_t *)malloc(sizeof(lock_entry_t));
+    lock_entry_t *ne = (lock_entry_t *)calloc(1, sizeof(lock_entry_t));
+    if (ne == NULL) {
+        pthread_mutex_unlock(&lt->mutex);
+        return -1;
+    }
     ne->row_id = row_id;
     ne->range_high = 0;  /* point lock */
     ne->mode = mode;
     ne->owner = self;
-    ne->next = lt->buckets[bucket];
-    lt->buckets[bucket] = ne;
+    global_list_insert_point(lt, bucket, ne);
+    owner_list_push(lt, ne);
 
     pthread_mutex_unlock(&lt->mutex);
     return 0;
@@ -246,13 +306,17 @@ int lock_acquire_range(lock_table_t *lt, uint64_t low, uint64_t high,
     }
 
     /* 새 range lock 엔트리 추가 */
-    lock_entry_t *ne = (lock_entry_t *)malloc(sizeof(lock_entry_t));
+    lock_entry_t *ne = (lock_entry_t *)calloc(1, sizeof(lock_entry_t));
+    if (ne == NULL) {
+        pthread_mutex_unlock(&lt->mutex);
+        return -1;
+    }
     ne->row_id = low;
     ne->range_high = high;
     ne->mode = mode;
     ne->owner = self;
-    ne->next = lt->range_locks;
-    lt->range_locks = ne;
+    global_list_insert_range(lt, ne);
+    owner_list_push(lt, ne);
 
     pthread_mutex_unlock(&lt->mutex);
     return 0;
@@ -261,36 +325,21 @@ int lock_acquire_range(lock_table_t *lt, uint64_t low, uint64_t high,
 /* ── 현재 스레드의 모든 lock 해제 (point + range) ── */
 void lock_release_all(lock_table_t *lt)
 {
-    pthread_t self = pthread_self();
     int released = 0;
 
     pthread_mutex_lock(&lt->mutex);
 
-    /* point locks 해제 */
-    for (int i = 0; i < LOCK_TABLE_BUCKETS; i++) {
-        lock_entry_t **pp = &lt->buckets[i];
-        while (*pp) {
-            if (pthread_equal((*pp)->owner, self)) {
-                lock_entry_t *del = *pp;
-                *pp = del->next;
-                free(del);
-                released++;
-            } else {
-                pp = &(*pp)->next;
-            }
-        }
-    }
+    if (tls_held_lock_table == lt) {
+        lock_entry_t *e = tls_held_locks;
+        tls_held_locks = NULL;
+        tls_held_lock_table = NULL;
 
-    /* range locks 해제 */
-    lock_entry_t **pp = &lt->range_locks;
-    while (*pp) {
-        if (pthread_equal((*pp)->owner, self)) {
-            lock_entry_t *del = *pp;
-            *pp = del->next;
-            free(del);
+        while (e) {
+            lock_entry_t *next = e->owner_next;
+            global_list_remove(lt, e);
+            free(e);
             released++;
-        } else {
-            pp = &(*pp)->next;
+            e = next;
         }
     }
 

@@ -148,6 +148,29 @@ static void test_lock_different_rows(void)
     lock_table_destroy(&g_lt);
 }
 
+static void test_lock_release_all_many(void)
+{
+    lock_table_init(&g_lt);
+
+    ASSERT(lock_acquire(&g_lt, 500, LOCK_S) == 0, "point S lock 획득");
+    ASSERT(lock_acquire(&g_lt, 501, LOCK_X) == 0, "point X lock 획득");
+    ASSERT(lock_acquire_range(&g_lt, 600, 650, LOCK_S) == 0, "range S lock 획득");
+
+    lock_stats_t before = lock_table_stats(&g_lt);
+    ASSERT(before.total == 3, "보유 lock 3개 집계");
+    ASSERT(before.shared == 2, "shared lock 2개 집계");
+    ASSERT(before.exclusive == 1, "exclusive lock 1개 집계");
+
+    lock_release_all(&g_lt);
+
+    lock_stats_t after = lock_table_stats(&g_lt);
+    ASSERT(after.total == 0, "release_all 후 lock 0개");
+    ASSERT(after.shared == 0, "release_all 후 shared 0개");
+    ASSERT(after.exclusive == 0, "release_all 후 exclusive 0개");
+
+    lock_table_destroy(&g_lt);
+}
+
 /* ══════════════════════════════════════
  *  2. db_execute 멀티스레드 INSERT
  * ══════════════════════════════════════ */
@@ -453,6 +476,7 @@ int main(void)
     TEST(test_lock_sx_conflict);
     TEST(test_lock_xx_timeout);
     TEST(test_lock_different_rows);
+    TEST(test_lock_release_all_many);
 
     /* 멀티스레드 db_execute 테스트 */
     TEST(test_concurrent_insert);
