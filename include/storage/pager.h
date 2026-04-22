@@ -38,6 +38,7 @@ typedef struct {
     uint32_t pin_count;  /* 현재 사용 중인 참조 수 (0이면 교체 가능) */
     uint64_t used_tick;  /* 마지막 접근 시점의 틱 (LRU 판별용) */
     uint8_t *data;       /* 페이지 데이터 버퍼 (page_size 바이트) */
+    pthread_rwlock_t latch;  /* 페이지 래치: B+ tree 래치 커플링용 */
 } frame_t;
 
 /*
@@ -57,7 +58,8 @@ typedef struct {
     uint32_t    dirty_low_watermark; /* write-back 후 유지할 dirty frame 목표치 */
     uint32_t    dirty_high_watermark;/* 이 개수 이상 dirty면 선제 flush 수행 */
     query_stats_t stats;             /* 현재 쿼리의 실행 통계 */
-    pthread_mutex_t pager_mutex;     /* Level 2: 프레임 메타데이터 보호 */
+    pthread_mutex_t pager_mutex;     /* Level 1: 프레임 메타데이터 보호 */
+    pthread_mutex_t header_lock;     /* next_id, row_count 보호 (DML 동시성용) */
 } pager_t;
 
 /* 생명주기 */
@@ -68,6 +70,12 @@ void pager_close(pager_t *pager);  /* DB 닫기 (flush 후 리소스 해제) */
 uint8_t *pager_get_page(pager_t *pager, uint32_t page_id);     /* 페이지 로드 (pin++) */
 void     pager_mark_dirty(pager_t *pager, uint32_t page_id);   /* dirty 표시 */
 void     pager_unpin(pager_t *pager, uint32_t page_id);        /* pin 해제 (pin--) */
+
+/* 래치 기반 페이지 접근 (Latch Coupling / Crab Protocol 용) */
+uint8_t *pager_get_page_rlatch(pager_t *pager, uint32_t page_id); /* pin + 읽기 래치 */
+uint8_t *pager_get_page_wlatch(pager_t *pager, uint32_t page_id); /* pin + 쓰기 래치 */
+void     pager_unlatch_r(pager_t *pager, uint32_t page_id);       /* 읽기 래치 해제 + unpin */
+void     pager_unlatch_w(pager_t *pager, uint32_t page_id);       /* 쓰기 래치 해제 + unpin */
 
 /* 페이지 할당/해제 */
 uint32_t pager_alloc_page(pager_t *pager);                     /* 새 페이지 할당 */

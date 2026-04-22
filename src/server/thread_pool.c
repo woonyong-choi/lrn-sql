@@ -140,7 +140,11 @@ static int handle_one_request(pager_t *pager, int client_fd)
     if (res.message[0] != '\0' && off < sizeof(resp) - 2) {
         int n = snprintf(resp + off, sizeof(resp) - off, "%s%s\n",
                          off > 0 ? "" : "", res.message);
-        if (n > 0) off += (size_t)n;
+        if (n > 0) {
+            /* snprintf는 "쓰려고 했던" 길이를 반환 — 실제 기록 길이로 제한 */
+            size_t avail = sizeof(resp) - off - 1;
+            off += ((size_t)n < avail) ? (size_t)n : avail;
+        }
     }
 
     if (res.status == 0) {
@@ -166,7 +170,7 @@ static void handle_client(pager_t *pager, int client_fd)
     while (1) {
         int rc = handle_one_request(pager, client_fd);
         if (rc <= 0) break;  /* close 또는 연결 끊김 */
-        /* rc == 1: keep-alive ��� 루프 계속 */
+        /* rc == 1: keep-alive -> 루프 계속 */
     }
 }
 

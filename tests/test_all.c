@@ -168,7 +168,7 @@ static void test_heap(void) {
     ASSERT(data != NULL, "fetch returns data");
     row_value_t out[MAX_COLUMNS];
     row_deserialize(hdr, data, out);
-    pager_unpin(&pager, ref.page_id);
+    pager_unlatch_r(&pager, ref.page_id);
     ASSERT(out[0].bigint_val == 1, "fetched id");
     ASSERT(strcmp(out[1].str_val, "Bob") == 0, "fetched name");
 
@@ -405,7 +405,7 @@ static void test_persistence(void) {
             if (data) {
                 row_value_t vals[MAX_COLUMNS];
                 row_deserialize(&pager.header, data, vals);
-                pager_unpin(&pager, ref.page_id);
+                pager_unlatch_r(&pager, ref.page_id);
                 ASSERT(vals[0].bigint_val == 50, "row 50 id correct");
                 ASSERT(strcmp(vals[1].str_val, "user49") == 0, "row 50 name correct");
             }
