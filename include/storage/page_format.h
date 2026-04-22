@@ -193,7 +193,6 @@ typedef struct {
 
 /* 슬롯 상태 코드 */
 #define SLOT_ALIVE 0x01   /* 유효한 행이 존재 */
-#define SLOT_DEAD  0x02   /* 삭제 예정 (미사용, 향후 확장용) */
 #define SLOT_FREE  0x03   /* 빈 슬롯 (재활용 가능, free_slot_head 체인) */
 #define SLOT_NONE  0xFFFF /* 빈 슬롯 없음 표시 (free_slot_head 초기값) */
 
