@@ -41,4 +41,13 @@ int  lock_acquire(lock_table_t *lt, uint64_t row_id, lock_mode_t mode);
 /* 현재 스레드가 보유한 모든 lock 해제 */
 void lock_release_all(lock_table_t *lt);
 
+/* 현재 보유 중인 lock 수 (S/X 각각) */
+typedef struct {
+    int total;
+    int shared;
+    int exclusive;
+} lock_stats_t;
+
+lock_stats_t lock_table_stats(lock_table_t *lt);
+
 #endif /* LOCK_TABLE_H */

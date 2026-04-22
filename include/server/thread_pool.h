@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include "storage/pager.h"
 
 typedef struct {
@@ -30,6 +31,11 @@ typedef struct {
     pthread_cond_t  not_full;
     bool       shutdown;
     pager_t   *pager;         /* 공유 DB */
+
+    /* ── 실시간 통계 (원자적) ── */
+    _Atomic uint64_t active_workers;      /* 현재 요청 처리 중인 worker 수 */
+    _Atomic uint64_t total_processed;     /* 누적 처리 완료 요청 수 */
+    _Atomic uint64_t total_connections;   /* 누적 accept된 연결 수 */
 } thread_pool_t;
 
 /* 스레드 풀 생성 (thread_count=0이면 코어 수 사용, queue_cap=0이면 64) */

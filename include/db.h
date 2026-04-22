@@ -10,10 +10,14 @@
 
 #include "sql/executor.h"
 #include "storage/pager.h"
+#include "server/lock_table.h"
 
 /* Row Lock 테이블 초기화/정리 (서버·REPL 시작/종료 시 호출) */
 void db_init(void);
 void db_destroy(void);
+
+/* 현재 Row Lock 통계 조회 */
+lock_stats_t db_lock_stats(void);
 
 /*
  * db_execute - SQL 문자열을 파싱하고 실행한다.

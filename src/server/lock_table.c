@@ -134,3 +134,20 @@ void lock_release_all(lock_table_t *lt)
         pthread_cond_broadcast(&lt->cond);
     pthread_mutex_unlock(&lt->mutex);
 }
+
+lock_stats_t lock_table_stats(lock_table_t *lt)
+{
+    lock_stats_t s = {0, 0, 0};
+    pthread_mutex_lock(&lt->mutex);
+    for (int i = 0; i < LOCK_TABLE_BUCKETS; i++) {
+        lock_entry_t *e = lt->buckets[i];
+        while (e) {
+            s.total++;
+            if (e->mode == LOCK_S) s.shared++;
+            else                   s.exclusive++;
+            e = e->next;
+        }
+    }
+    pthread_mutex_unlock(&lt->mutex);
+    return s;
+}

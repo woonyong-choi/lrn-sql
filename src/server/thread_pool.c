@@ -14,6 +14,90 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdatomic.h>
+
+/* 현재 worker가 소속된 pool (stats 응답용) — worker_func에서 설정 */
+static __thread thread_pool_t *tl_pool;
+
+/* ── /stats JSON 응답 생성 ── */
+static void handle_stats(pager_t *pager, int client_fd)
+{
+    thread_pool_t *pool = tl_pool;
+
+    /* 스레드 풀 통계 */
+    uint64_t active = 0, processed = 0, connections = 0;
+    int queue_size = 0, queue_cap = 0, thread_count = 0;
+    if (pool) {
+        active      = atomic_load(&pool->active_workers);
+        processed   = atomic_load(&pool->total_processed);
+        connections = atomic_load(&pool->total_connections);
+        pthread_mutex_lock(&pool->mutex);
+        queue_size  = pool->queue_size;
+        queue_cap   = pool->queue_cap;
+        thread_count = pool->thread_count;
+        pthread_mutex_unlock(&pool->mutex);
+    }
+
+    /* Row Lock 통계 */
+    lock_stats_t ls = db_lock_stats();
+
+    /* Pager 캐시 통계 */
+    uint32_t frames_valid = 0, frames_dirty = 0, frames_pinned = 0;
+    for (int i = 0; i < MAX_FRAMES; i++) {
+        if (pager->frames[i].is_valid) {
+            frames_valid++;
+            if (pager->frames[i].is_dirty) frames_dirty++;
+            if (pager->frames[i].pin_count > 0) frames_pinned++;
+        }
+    }
+
+    char body[2048];
+    int len = snprintf(body, sizeof(body),
+        "{\n"
+        "  \"thread_pool\": {\n"
+        "    \"workers_total\": %d,\n"
+        "    \"workers_active\": %lu,\n"
+        "    \"workers_idle\": %lu,\n"
+        "    \"queue_pending\": %d,\n"
+        "    \"queue_capacity\": %d,\n"
+        "    \"total_processed\": %lu,\n"
+        "    \"total_connections\": %lu\n"
+        "  },\n"
+        "  \"locks\": {\n"
+        "    \"total\": %d,\n"
+        "    \"shared\": %d,\n"
+        "    \"exclusive\": %d\n"
+        "  },\n"
+        "  \"pager\": {\n"
+        "    \"page_size\": %u,\n"
+        "    \"max_frames\": %d,\n"
+        "    \"frames_used\": %u,\n"
+        "    \"frames_dirty\": %u,\n"
+        "    \"frames_pinned\": %u,\n"
+        "    \"total_pages\": %u,\n"
+        "    \"free_pages\": %u\n"
+        "  },\n"
+        "  \"db\": {\n"
+        "    \"row_count\": %lu,\n"
+        "    \"next_id\": %lu\n"
+        "  }\n"
+        "}\n",
+        thread_count,
+        (unsigned long)active,
+        (unsigned long)(thread_count > 0 ? (uint64_t)thread_count - active : 0),
+        queue_size, queue_cap,
+        (unsigned long)processed,
+        (unsigned long)connections,
+        ls.total, ls.shared, ls.exclusive,
+        pager->page_size, MAX_FRAMES,
+        frames_valid, frames_dirty, frames_pinned,
+        pager->header.next_page_id,
+        pager->header.free_page_head,
+        (unsigned long)pager->header.row_count,
+        (unsigned long)pager->header.next_id);
+
+    http_send_ok(client_fd, body, (size_t)len);
+}
 
 /* ── 클라이언트 1건 처리 ── */
 static void handle_client(pager_t *pager, int client_fd)
@@ -22,6 +106,12 @@ static void handle_client(pager_t *pager, int client_fd)
     if (http_read_request(client_fd, &req) != 0 || !req.valid) {
         const char *msg = "오류: 잘못된 요청입니다";
         http_send_error(client_fd, msg, strlen(msg));
+        return;
+    }
+
+    /* GET /stats 라우트 */
+    if (req.route == ROUTE_STATS) {
+        handle_stats(pager, client_fd);
         return;
     }
 
@@ -55,6 +145,7 @@ static void handle_client(pager_t *pager, int client_fd)
 static void *worker_func(void *arg)
 {
     thread_pool_t *pool = (thread_pool_t *)arg;
+    tl_pool = pool;  /* thread-local에 pool 포인터 저장 */
 
     while (1) {
         pthread_mutex_lock(&pool->mutex);
@@ -73,8 +164,11 @@ static void *worker_func(void *arg)
         pthread_cond_signal(&pool->not_full);
         pthread_mutex_unlock(&pool->mutex);
 
+        atomic_fetch_add(&pool->active_workers, 1);
         handle_client(pool->pager, job.client_fd);
         close(job.client_fd);
+        atomic_fetch_sub(&pool->active_workers, 1);
+        atomic_fetch_add(&pool->total_processed, 1);
     }
     return NULL;
 }
