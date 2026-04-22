@@ -1,0 +1,23 @@
+{
+    "name": "MiniDB SQL Server Development Container",
+    "dockerFile": "Dockerfile",
+    "remoteUser": "jungle",
+    "forwardPorts": [8080, 9090],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools-extension-pack",
+                "ms-vscode.cpptools"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "C_Cpp.default.includePath": [
+                    "${workspaceFolder}/include",
+                    "/usr/include",
+                    "/usr/local/include"
+                ],
+                "C_Cpp.default.compilerPath": "/usr/bin/gcc"
+            }
+        }
+    }
+}

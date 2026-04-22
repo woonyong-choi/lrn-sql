@@ -56,6 +56,18 @@ N ?= 1000000
 gen: $(BUILD_DIR)/gen_data
 	./$(BUILD_DIR)/gen_data sql.db $(N)
 
+# ── benchmark ──
+$(BUILD_DIR)/bench: tools/bench.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(WARNFLAGS) -g $(INCLUDES) -o $@ $< -lpthread
+
+bench: $(BUILD_DIR)/bench
+	@echo "서버를 먼저 실행하세요: make run-server"
+	./$(BUILD_DIR)/bench 127.0.0.1 8080 4 100
+
+run-server: $(BUILD_DIR)/minidb
+	./$(BUILD_DIR)/minidb --server 8080 bench.db
+
 # ── step tests ──
 $(BUILD_DIR)/test_step0: tests/test_step0_db_execute.c $(OBJS)
 	@mkdir -p $(BUILD_DIR)
@@ -83,4 +95,4 @@ test-all: test test-step0 test-step1 test-step2
 clean:
 	rm -rf $(BUILD_DIR) *.db __test__*.db
 
-.PHONY: all test test-step0 test-step1 test-step2 test-all run gen clean
+.PHONY: all test test-step0 test-step1 test-step2 test-all run run-server gen bench clean
