@@ -1,2 +1,5 @@
 .DS_Store
 Thumbs.db
+build/
+build_nosan/
+*.db
