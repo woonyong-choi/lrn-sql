@@ -8,6 +8,7 @@
 
 #include "server/server.h"
 #include "server/thread_pool.h"
+#include "db.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +65,9 @@ int server_run(pager_t *pager, int port)
         return -1;
     }
 
+    /* Row Lock 테이블 초기화 */
+    db_init();
+
     /* 스레드 풀 초기화 (코어 수 기반) */
     thread_pool_t pool;
     if (thread_pool_init(&pool, pager, 0, 0) != 0) {
@@ -95,6 +99,9 @@ int server_run(pager_t *pager, int port)
     /* graceful shutdown */
     thread_pool_destroy(&pool);
     close(server_fd);
+
+    /* Row Lock 테이블 정리 */
+    db_destroy();
 
     /* DB flush */
     pager_flush_all(pager);
