@@ -1049,8 +1049,8 @@ static bool delete_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
         }
         dc->ids_to_delete = tmp;
     }
-    /* id는 항상 columns[0] (BIGINT) */
-    dc->ids_to_delete[dc->ids_len++] = values[0].bigint_val;
+    /* id는 시스템이 생성한 non-negative BIGINT다 */
+    dc->ids_to_delete[dc->ids_len++] = (uint64_t)values[0].bigint_val;
     return true;
 }
 
@@ -1256,7 +1256,7 @@ static bool update_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
         }
         uc->ids = tmp;
     }
-    uc->ids[uc->ids_len++] = values[0].bigint_val;
+    uc->ids[uc->ids_len++] = (uint64_t)values[0].bigint_val;
     return true;
 }
 
