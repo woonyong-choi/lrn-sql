@@ -71,11 +71,16 @@ $(BUILD_DIR)/test_step1: tests/test_step1_sql_ext.c $(OBJS)
 test-step1: $(BUILD_DIR)/test_step1
 	./$(BUILD_DIR)/test_step1
 
-# test-step2: ...
-# test-step3: ...
-# test-all: test test-step0 test-step1 test-step2 test-step3
+$(BUILD_DIR)/test_step2: tests/test_step2_concurrency.c $(OBJS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+test-step2: $(BUILD_DIR)/test_step2
+	./$(BUILD_DIR)/test_step2
+
+test-all: test test-step0 test-step1 test-step2
 
 clean:
 	rm -rf $(BUILD_DIR) *.db __test__*.db
 
-.PHONY: all test run gen clean
+.PHONY: all test test-step0 test-step1 test-step2 test-all run gen clean
