@@ -39,8 +39,8 @@ PintOS 1주차 Threads 학습에서 스케줄링, 인터럽트, 동기화, 컨�
 
 ## 흐름 추적
 
-- [[context-switch-trace]]
 - [[thread-scheduler-trace]]
+- [[context-switch-trace]]
 
 ## 실험
 

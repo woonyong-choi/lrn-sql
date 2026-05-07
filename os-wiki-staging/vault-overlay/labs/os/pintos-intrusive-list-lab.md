@@ -1,176 +1,204 @@
 ---
 type: Lab
-status: Active
+status: Draft
+week:
+  - threads
 systems:
   - Linux
   - Windows
   - PintOS
+  - QEMU
 tags:
   - domain:os
   - domain:pintos
-  - layer:kernel
+  - week:threads
   - layer:memory
-  - topic:intrusive-list
-  - topic:list_entry
-  - topic:offsetof
+  - layer:kernel
+  - topic:casting
+  - topic:byte-buffer
+  - topic:scheduler
 related_to:
+  - "[[concept-to-code-map]]"
   - "[[week-1-threads-map]]"
   - "[[thread-scheduler-trace]]"
-  - "[[context-switch-trace]]"
+  - "[[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]"
 ---
 
-# PintOS intrusive list 실험 (`list_entry`를 바이트로 이해하기)
-
+# PintOS intrusive list 실험: `list_elem` 주소에서 `struct thread` 복원하기
+ 
 ## 작은 질문
-
-- `ready_list`는 왜 `struct thread *` 리스트가 아니라 `struct list_elem *` 리스트인가?
-- `list_entry(e, struct thread, elem)`은 어떻게 “바깥 구조체”로 되돌아갈 수 있을까?
-- `struct thread`의 `elem`을 동시에 두 개 리스트에 넣으면 왜 바로 망가질까?
-
+ 
+PintOS의 `ready_list`를 보면, 리스트가 들고 있는 건 `struct thread *`가 아니라 `struct list_elem *`다.
+ 
+그러면 이런 질문이 생긴다.
+ 
+- `ready_list`의 원소 하나를 보려면 왜 `list_entry(e, struct thread, elem)` 같은 매크로가 필요할까?
+- 리스트가 “thread를 담는다”는 말은 정확히 **어떤 주소(바이트)를 담는다**는 뜻일까?
+ 
 ## 왜 필요한가
+ 
+Threads 과제를 하다 보면 다음 문제가 자주 생긴다.
+ 
+- `ready_list`가 망가져서 스케줄러가 엉뚱한 스레드를 고른다.
+- “우선순위 정렬”은 맞게 했다고 생각했는데, 실제로는 다른 `list_elem`을 넣어버렸다.
+- 한 스레드가 “두 리스트에 동시에 들어가면서” 링크가 깨진다. (intrusive list에서 특히 흔한 실수)
+ 
+이때 디버깅의 핵심은 **리스트가 들고 있는 포인터가 정확히 무엇을 가리키는지**를 눈으로 확인하는 것이다.
+ 
+## 핵심 모델 (머릿속에 넣을 최소 모델)
+ 
+PintOS의 리스트는 **intrusive list**다.
+ 
+- non-intrusive list: “노드 객체(node)가 따로 있고”, 노드가 `void *data` 같은 걸 가리킨다.
+- intrusive list: “노드 객체가 따로 없다.” 대신 **바깥 구조체 안에 노드(`struct list_elem`)를 포함**한다.
+ 
+즉 PintOS에서:
+ 
+- 리스트가 들고 있는 건 “바깥 구조체 포인터”가 아니라
+- “바깥 구조체 안에 박혀 있는 `struct list_elem`의 주소”다.
+ 
+그래서 `list_entry()`는 “`list_elem` 주소 → 바깥 구조체 주소”를 되돌리는 변환기다.
 
-운영체제는 커널 내부에서 “많은 객체(thread, page, file, lock waiter, ...)를 리스트로 묶어 관리”한다.
+## Linux / Windows에서는 (현실 연결: 같은 아이디어가 이미 있다)
 
-이때 흔히 두 가지 선택지가 있다.
+PintOS의 intrusive list는 “교육용 특이한 기법”이 아니라, 실제 OS에서도 매우 흔한 패턴이다.
 
-1) **비-intrusive(list node를 따로 할당)**: 노드(링크)를 heap에서 따로 만들고, 노드가 객체 포인터를 가진다.
-2) **intrusive(객체 안에 링크 필드를 포함)**: 객체 자체가 `prev/next` 같은 링크를 “필드로 내장”한다.
+- Linux 커널: `list_head` + `container_of()` 패턴으로 같은 일을 한다.
+  - 리스트가 들고 있는 건 `struct task_struct *`가 아니라, 그 안에 박힌 `struct list_head`의 주소다.
+  - 그래서 “노드 주소에서 컨테이너 주소로 돌아가기”가 필수다.
+- Windows 커널: `LIST_ENTRY`라는 이름으로 같은 구조를 쓴다.
 
-PintOS의 리스트는 2) intrusive 방식이다.
+결론은 하나다.
 
-- 장점: 동적 할당이 없어도 된다(커널에서 “할당 실패”를 피하기 쉽다), 캐시 친화적일 수 있다
-- 단점: 타입 안전성이 약하고, **한 `list_elem`은 한 순간에 한 리스트에만** 들어갈 수 있다
+> “리스트가 스레드를 담는다”는 말은 보통 “스레드 구조체 *안의 어떤 필드 주소*를 연결한다”는 뜻이다.
+ 
+## PintOS에서는 (코드 증거)
+ 
+### 1) `list_entry()`가 실제로 하는 일
+ 
+- PintOS: `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/lib/kernel/list.h`
+  - 파일 상단 주석이 intrusive list 모델을 정확히 설명한다.
+  - `list_entry(LIST_ELEM, STRUCT, MEMBER)` 매크로는 `offsetof()`로 “바깥 구조체에서 MEMBER가 몇 바이트 떨어져 있는지”를 이용해 되돌아간다.
+ 
+매크로(핵심만):
+ 
+```c
+#define list_entry(LIST_ELEM, STRUCT, MEMBER) \
+  ((STRUCT *) ((uint8_t *) &(LIST_ELEM)->next \
+    - offsetof (STRUCT, MEMBER.next)))
+```
+ 
+포인트:
+ 
+- `LIST_ELEM`은 `struct list_elem *`다.
+- `offsetof(STRUCT, MEMBER.next)`는 “STRUCT 시작 주소에서 MEMBER.next 필드까지의 바이트 거리”다.
+- 따라서 “`&(LIST_ELEM)->next`에서 그 거리만큼 빼면” STRUCT 시작 주소로 돌아간다.
+ 
+### 2) `struct thread` 안에 `list_elem`이 여러 개 있을 수 있다
+ 
+`struct thread`는 보통 ready_list에 들어갈 때 쓰는 `elem` 말고도,
+다른 목적으로 쓰는 `list_elem`을 추가로 들 수 있다. (예: donation 리스트)
+ 
+이게 의미하는 바:
+ 
+- **한 스레드는 동시에 여러 리스트에 들어갈 수 있지만**
+- 각 리스트는 반드시 “서로 다른 `list_elem` 필드”를 써야 한다.
+ 
+같은 `elem`을 두 리스트에 넣으면 링크가 바로 깨진다.
 
-## 핵심 모델
+### 3) head/tail 센티널(sentinel)을 먼저 의식하자
 
-### 1) intrusive list는 “리스트 원소 포인터”만 본다
+- PintOS: `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/lib/kernel/list.h`
+  - `struct list`는 `head`와 `tail`을 “항상 존재하는 센티널 원소”로 가진다.
+  - `list_begin()`은 “비어 있지 않으면 첫 원소, 비어 있으면 tail”을 반환한다.
 
-PintOS 리스트는 `struct list_elem`만을 원소로 다룬다.
+그래서 디버깅할 때의 안전 규칙은 이거 하나로 줄어든다.
 
-- 리스트는 `struct list_elem prev/next`만 알면 된다.
-- 하지만 우리는 결국 `struct thread *`가 필요하다.
-
-그래서 “되돌아가기”가 필요하고, 그 역할이 `list_entry`다.
-
-### 2) `list_entry`는 결국 `offsetof` 기반의 포인터 산술이다
-
-PintOS 구현(요약):
-
-- `pintos/include/lib/kernel/list.h`: `list_entry(LIST_ELEM, STRUCT, MEMBER)`
-- 핵심 아이디어: `LIST_ELEM`의 주소에서 “`STRUCT` 안에서 `MEMBER`가 놓인 오프셋”을 빼면 `STRUCT *`가 된다.
-
-이 말은 즉, `list_entry`는 “바이트 레벨 주소 계산”이다.
-
-## 예시 상황: `struct thread`의 `elem`은 어디 바이트에 있나?
-
-PintOS의 `struct thread`에는 리스트에 연결될 수 있는 필드가 들어 있다.
-
-- `pintos/include/threads/thread.h`: `struct list_elem elem;` (ready_list, waiters, 과제에 따라 sleep_list 등에서 사용)
-
-이때 다음이 성립해야 한다.
-
-- `&t->elem`은 `t`가 가리키는 메모리 블록 “중간 어딘가”다.
-- `list_entry(&t->elem, struct thread, elem) == t`가 되어야 한다.
-
-## Linux / Windows에서는
-
-현실 OS도 intrusive list 패턴을 많이 쓴다.
-
-- Linux는 유명한 `struct list_head` 패턴을 통해 같은 문제를 푼다(개념적으로 PintOS와 동일).
-- Windows도 커널 내부에 연결 리스트 기반 자료구조가 많다(구현은 다르지만 같은 방향의 문제를 푼다).
-
-핵심은 “성능/안정성/할당 실패”를 이유로 커널에서 이런 선택이 자주 나온다는 점이다.
-
-## PintOS에서는 (코드 증거로 연결)
-
-### 1) 리스트 설계 자체가 intrusive임을 문서로 밝힌다
-
-- `pintos/include/lib/kernel/list.h` 상단 주석:
-  - “동적 메모리 할당을 요구하지 않는다”
-  - “원소가 될 구조체가 `struct list_elem`을 직접 포함해야 한다”
-
-### 2) 스케줄러 ready list는 `thread->elem`을 꽂아 넣는다
-
-- `pintos/threads/thread.c`: `static struct list ready_list;`
-- `pintos/threads/thread.c`: `thread_unblock()` 등에서 `&t->elem`을 `ready_list`에 삽입한다.
-- `pintos/threads/thread.c`: `next_thread_to_run()`에서 `list_pop_front(&ready_list)`의 결과를 `list_entry(..., struct thread, elem)`로 되돌린다.
-
-### 3) “한 elem은 한 리스트만” 규칙을 실수로 깨기 쉽다
-
-PintOS 기본 주석은 보통 다음 논리를 말한다.
-
-- ready 상태일 때만 run queue(ready_list)에 있다
-- blocked 상태일 때만 semaphore waiters 등에 있다
-- 그래서 같은 `elem`을 재사용할 수 있다
-
-하지만 과제를 진행하며 `sleep_list` 같은 자료구조를 추가하면 상황이 달라진다.
-
-- `pintos/threads/thread.c`: `sleep_list`에 `&cur->elem`을 넣는 구현이 흔하다
-- 이때도 “동시에 두 리스트에 들어가지 않게” 상태 설계를 유지해야 한다
-
-## 숫자와 메모리: `list_entry`를 손으로 계산해 보기
-
-가정을 하나 두자.
-
-- `struct thread *t = (struct thread *)0x8048000`
-- `offsetof(struct thread, elem) = 0x50` (예시 값: 실제 값은 구현/컴파일러 옵션에 따라 달라질 수 있다)
-
-그럼:
-
+> `list_empty()`로 비었는지 먼저 확인하고, 비어있지 않을 때만 `list_entry()`로 캐스팅한다.
+ 
+## 숫자와 메모리: `list_elem` 주소에서 “컨테이너” 주소로 돌아가기
+ 
+가정을 두고 계산해 보자.
+ 
 ```text
-&t->elem = 0x8048000 + 0x50 = 0x8048050
+struct thread *t = 0x80000000
+offsetof(struct thread, elem) = 0x120   (예시)
 ```
-
-반대로, `e = &t->elem`만 가지고 있을 때:
-
+ 
+그러면:
+ 
 ```text
-t = (struct thread *)((uint8_t *)e - offsetof(struct thread, elem))
-  = (struct thread *)(0x8048050 - 0x50)
-  = 0x8048000
+&t->elem = 0x80000000 + 0x120 = 0x80000120
+&(t->elem.next) = 0x80000120 + 8 = 0x80000128   (x86-64 포인터 8바이트 가정)
 ```
+ 
+`list_entry(e, struct thread, elem)`가 하는 계산은 결국:
+ 
+```text
+t = (uint8_t *)&e->next - offsetof(struct thread, elem.next)
+```
+ 
+즉 `e`(list_elem 포인터)가 주어지면, 바이트 오프셋을 빼서 `struct thread` 시작으로 되돌아간다.
 
-이 계산이 바로 intrusive list의 “되돌아가기”다.
+## QEMU에서는 (역할 분리)
 
-## 직접 확인 (GDB)
+이 실험은 전부 PintOS(guest OS) 내부 자료구조 이야기다.
 
-목표: “정말로 `list_entry(&t->elem, struct thread, elem) == t`인가?”를 눈으로 확인한다.
+- QEMU는 `ready_list`를 만들지도, `struct thread`를 관리하지도 않는다.
+- QEMU는 “타이머 인터럽트 같은 하드웨어 사건을 guest에 전달”할 뿐이다.
 
-1) `thread_unblock()` 또는 `next_thread_to_run()`에 브레이크를 건다.
+즉 list가 꼬이면 그건 PintOS 코드/자료구조 버그이고, QEMU는 “그 버그가 실행되는 환경”일 뿐이다.
+ 
+## 직접 확인 (GDB 체크리스트)
+ 
+아래는 “ready_list 첫 원소가 누구인지”를 주소 계산으로 확인하는 최소 루프다.
+ 
+1) breakpoint를 건다
+   - `b thread_yield`
+   - 또는 `b schedule`
+ 
+2) ready_list의 첫 원소(`list_elem *`)를 잡는다
+ 
+```gdb
+p list_begin(&ready_list)
+```
+ 
+3) 그 `list_elem *`에서 `struct thread *`로 복원한다
+ 
+```gdb
+p list_entry(list_begin(&ready_list), struct thread, elem)
+p list_entry(list_begin(&ready_list), struct thread, elem)->name
+```
+ 
+4) 오프셋을 직접 확인해 “정말 빼기 계산”인지 확인한다 (선택)
+ 
+```gdb
+p/x (size_t) &((struct thread *)0)->elem
+p/x (size_t) &((struct thread *)0)->elem.next
+```
+ 
+주의:
+ 
+- `list_begin()`이 반환하는 게 head/tail 같은 “센티널(sentinel)”이면 `list_entry()`를 쓰면 안 된다.
+- 보통 `list_empty(&ready_list)`를 먼저 확인하고, 비어있지 않을 때만 interior element에 `list_entry()`를 적용한다.
+
+팁:
+
+- `ready_list`는 `thread.c`의 `static` 전역이라, 심볼이 안 보이면 `thread_yield()`/`schedule()` 같은 함수 안에서 멈춘 상태에서 보는 편이 쉽다.
+- “정말로 tail을 반환하는지”는 아래처럼 확인할 수 있다.
 
 ```gdb
-b thread_unblock
-b next_thread_to_run
-c
+p list_empty(&ready_list)
+p list_begin(&ready_list) == list_end(&ready_list)
 ```
-
-2) `t`와 `&t->elem`을 확인한다.
-
-```gdb
-p t
-p &t->elem
-```
-
-3) `list_entry`를 적용한 값이 원래 포인터와 같은지 확인한다.
-
-```gdb
-p (struct thread *)((uint8_t *)&t->elem - offsetof(struct thread, elem))
-```
-
-4) 리스트에서 나온 `struct list_elem *e`를 `struct thread *`로 되돌려 본다.
-
-```gdb
-p e
-p (struct thread *)((uint8_t *)e - offsetof(struct thread, elem))
-```
-
+ 
 ## 정리
-
-- intrusive list는 “객체 안에 링크를 내장”해서 동적 할당 없이 리스트를 구성한다.
-- `list_entry`는 `offsetof` 기반 포인터 산술이며, 결국 바이트 주소 계산이다.
-- 한 `list_elem`은 한 순간에 한 리스트에만 들어갈 수 있다. 과제에서 리스트를 늘릴수록 이 규칙이 더 중요해진다.
-
+ 
+- PintOS의 리스트는 “데이터 포인터를 담는 리스트”가 아니라 “구조체 안에 박힌 `list_elem` 주소를 연결하는 리스트”다.
+- 그래서 디버깅할 때는 `list_elem *`가 어떤 struct의 어떤 필드인지(예: `thread.elem` vs `thread.donation_elem`)를 항상 의식해야 한다.
+ 
 ## 다음 링크
-
-- [[바이트 버퍼와 캐스팅 실험]]: “주소/타입/해석” 감각을 더 단단히 만들기
-- [[thread-scheduler-trace]]: ready_list가 실제로 어떻게 굴러가는지 흐름으로 보기
-- [[context-switch-trace]]: 스케줄링 결정 이후 레지스터/스택이 어떻게 바뀌는지 보기
+ 
+- [[thread-scheduler-trace]]: ready_list가 언제 바뀌는지 전체 흐름 추적
+- [[context-switch-trace]]: 선택된 스레드로 레지스터/스택이 어떻게 바뀌는지
+- [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]: “같은 바이트를 타입으로 해석한다” 감각을 더 넓게 잡기
