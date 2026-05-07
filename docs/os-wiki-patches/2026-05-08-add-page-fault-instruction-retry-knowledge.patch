@@ -1,0 +1,346 @@
+--- /dev/null
++++ b/notes/os/page-fault-instruction-retry-knowledge.md
+@@ -0,0 +1,343 @@
++---
++type: Knowledge
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - layer:cpu
++  - layer:memory
++  - layer:kernel
++  - topic:page-fault
++  - topic:page-table
++  - topic:gdb
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[page-fault-trace]]"
++  - "[[page-fault-error-code-knowledge]]"
++  - "[[address-translation-memory]]"
++---
++
++# 페이지 폴트 후 같은 명령어를 다시 실행하는 이유
++
++## 작은 질문
++
++page fault handler가 페이지를 준비하고 `return`하면 왜 프로그램은 다음 명령어로 넘어가지 않고, fault를 낸 **같은 명령어**를 다시 실행할까?
++
++이 질문은 [[page-fault-trace]]를 읽을 때 꼭 한 번 멈춰야 하는 지점이다. page fault는 함수 호출처럼 "실패한 줄 다음부터 계속"이 아니다. CPU 입장에서는 방금 메모리 접근 명령어가 아직 완료되지 않았다.
++
++## 꼬리에 꼬리를 무는 질문
++
++- 왜 fault가 난 명령어는 아직 완료된 명령어가 아닐까?
++- CPU는 fault를 낸 가상 주소와 명령어 주소를 어디에 남길까?
++- 실제 OS는 어떤 fault를 고친 뒤 같은 명령어를 재시도할까?
++- PintOS에서는 `CR2`, `f->rip`, `vm_try_handle_fault()`가 어떻게 이어질까?
++- QEMU는 guest의 `RIP`와 `CR2`를 어떤 상태로 보여줄까?
++- 숫자를 넣으면 retry 전후에 VA -> PA 변환이 어떻게 달라질까?
++- GDB에서는 어디를 보면 "같은 명령어 재실행"을 확인할 수 있을까?
++
++## 왜 필요한가
++
++demand paging, stack growth, file-backed page, swap-in은 모두 "첫 접근에서 일부러 실패하고, 그 실패를 보고 커널이 뒤늦게 준비하는" 구조다.
++
++이 구조가 가능하려면 page fault handler가 성공한 뒤 원래 메모리 접근을 다시 시도해야 한다.
++
++만약 CPU가 다음 명령어로 그냥 넘어가면 이런 문제가 생긴다.
++
++- `mov (%rax), %rbx`가 데이터를 읽지 못했는데 다음 코드가 `rbx`를 사용한다.
++- `movb $1, (%rax)`가 메모리에 쓰지 못했는데 프로그램은 쓴 줄 알고 진행한다.
++- lazy loading은 "페이지를 올렸지만 실제 접근은 빠진" 이상한 상태가 된다.
++
++이 말은 즉, page fault handler의 성공은 "명령어를 완료했다"가 아니라 "이제 그 명령어를 다시 해도 된다"라는 허가에 가깝다.
++
++## 핵심 모델
++
++메모리 접근 명령어 하나를 두 주소로 나누어 본다.
++
++| 주소 | 의미 | PintOS에서 보는 곳 | QEMU에서 보는 곳 |
++|---|---|---|---|
++| `RIP` | 실행 중이던 명령어 주소 | `struct intr_frame.f->rip` | `CPUX86State.env->eip` |
++| `CR2` | fault가 난 접근 대상 가상 주소 | `rcr2()` 결과인 `fault_addr` | `env->cr[2]` 또는 exception payload |
++
++예를 들어 `RIP = 0x401050`에 있는 명령어가 `0x8048123`을 읽다가 page fault를 냈다면:
++
++```text
++RIP = 0x401050   # 다시 실행할 명령어의 주소
++CR2 = 0x8048123  # 그 명령어가 접근하려던 가상 주소
++```
++
++둘은 보통 다르다. PintOS `page_fault()` 주석도 fault address가 `f->rip`와 같지 않다고 짚는다.
++
++## 예시 상황
++
++유저 프로그램이 다음 명령어를 실행한다고 해 보자.
++
++```asm
++movb $0x41, (%rax)
++```
++
++그리고 레지스터 값은 이렇다.
++
++```text
++RIP = 0x401050
++RAX = 0x8048123
++```
++
++CPU는 `RAX`가 가리키는 가상 주소 `0x8048123`에 1바이트를 쓰려고 한다. 그런데 page table에 해당 page가 아직 present가 아니면 x86 MMU는 명령어를 완료하지 못하고 #PF를 발생시킨다.
++
++```text
++fault 발생 전:
++  RIP = 0x401050
++  접근 대상 VA = 0x8048123
++  PTE.P = 0
++
++#PF 진입:
++  CR2 = 0x8048123
++  saved RIP = 0x401050
++```
++
++handler가 새 frame을 붙이고 PTE를 present로 바꾸면, CPU는 저장해 둔 `RIP = 0x401050`으로 돌아가 같은 `movb`를 다시 실행한다. 이번에는 주소 변환이 성공하고 실제 write가 일어난다.
++
++## Linux / Windows에서는
++
++Linux와 Windows 같은 실제 OS도 page fault를 "항상 죽는 오류"로만 보지 않는다.
++
++- 실행 파일 text/data를 처음 접근할 때 필요한 page를 올린다.
++- `mmap()`으로 만든 file-backed range를 첫 접근 때 page cache와 연결한다.
++- anonymous memory를 처음 쓸 때 zero-filled page를 붙인다.
++- copy-on-write page에 첫 write가 오면 새 frame을 복사하고 PTE를 고친다.
++
++이런 경우 커널은 fault를 처리한 뒤 faulting instruction을 재시도하게 한다. 반대로 VMA/권한/주소가 맞지 않으면 Linux는 보통 `SIGSEGV`, Windows는 access violation 계열 예외로 처리한다.
++
++현실 OS는 NUMA, huge page, copy-on-write, page cache, 보안 정책, 동시 실행 CPU까지 고려한다. PintOS는 이 중 VM 과제에 필요한 핵심 흐름만 교육용으로 축소한다.
++
++## PintOS에서는
++
++PintOS의 핵심 흐름은 다음과 같다.
++
++```text
++메모리 접근 명령어 실행
++  -> x86 #PF
++  -> intr-stubs.S가 register snapshot을 struct intr_frame 모양으로 쌓음
++  -> page_fault(struct intr_frame *f)
++     - rcr2()로 CR2를 읽어 fault_addr 저장
++     - f->error_code로 fault 종류 분류
++     - vm_try_handle_fault(f, fault_addr, ...) 호출
++  -> 처리 성공이면 return
++  -> intr_entry 복귀 경로가 register를 복원하고 iretq
++  -> saved RIP의 같은 명령어 재실행
++```
++
++중요한 점은 `vm_try_handle_fault()`가 성공해도 `f->rip`를 다음 명령어로 바꾸지 않는다는 것이다. `f->rip`는 fault가 난 명령어 주소 그대로 남아 있고, interrupt 복귀가 그 주소로 돌아간다.
++
++PintOS에서 새 mapping을 설치하는 대표 함수는 `pml4_set_page()`다. 이 함수는 PTE에 frame 주소와 `PTE_P`, `PTE_W`, `PTE_U` 같은 bit를 넣는다. 첫 실행에서는 `PTE_P = 0`이라 fault가 났지만, retry 때는 `PTE_P = 1`이므로 주소 변환이 진행된다.
++
++## QEMU에서는
++
++QEMU는 PintOS의 VM 정책을 알지 못한다. QEMU는 guest CPU가 보는 x86 하드웨어 동작을 재현한다.
++
++QEMU 쪽에서 중요한 관찰점은 세 가지다.
++
++- `target/i386/emulate/x86_mmu.c`
++  - guest virtual address를 guest physical address로 바꾸는 데 실패하면 `EXCP0E_PAGE`를 raise한다.
++  - read 경로는 `env->cr[2] = gva`로 fault address를 남긴다.
++  - write 경로는 pending exception payload에 `gva`를 넣을 수 있다.
++- `target/i386/machine.c`
++  - pending page fault payload를 injected exception으로 바꾸는 과정에서 `env->cr[2]`로 옮긴다.
++- `target/i386/gdbstub.c`
++  - GDB가 보는 guest instruction pointer는 `env->eip`에서 온다.
++  - GDB가 보는 guest `cr2`는 `env->cr[2]`에서 온다.
++
++따라서 GDB에서 `rip`와 `cr2`를 볼 때, 우리는 host macOS/Linux CPU register를 보는 것이 아니라 QEMU가 관리하는 guest CPU state를 보고 있다. 이 구분은 [[qemu-gdb-stub-guest-state-knowledge]]에서 더 자세히 다룬다.
++
++## 차이점
++
++| 구분 | 하는 일 | 하지 않는 일 |
++|---|---|---|
++| Linux / Windows | fault 주소가 합법이면 page를 준비하고 같은 명령어를 재시도 | PintOS의 `vm_try_handle_fault()`를 실행하지 않음 |
++| PintOS | `CR2`, `error_code`, SPT/page table을 보고 fault를 살릴지 결정 | QEMU 내부 guest CPU state를 직접 관리하지 않음 |
++| QEMU | guest MMU, #PF, guest `RIP/CR2` 노출을 재현 | PintOS page가 합법인지 정책 판단하지 않음 |
++
++## 코드 증거
++
++### 1. PintOS는 CR2와 RIP를 구분한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/exception.c`
++
++근거:
++
++- `page_fault()`는 `fault_addr = (void *) rcr2();`로 CR2를 읽는다.
++- 주석은 이 주소가 fault를 일으킨 명령어 주소인 `f->rip`와 같지 않다고 설명한다.
++- `vm_try_handle_fault(f, fault_addr, user, write, not_present)`가 성공하면 곧바로 `return`한다.
++
++### 2. PintOS의 `intr_frame`에는 복귀할 RIP가 들어 있다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/interrupt.h`
++
++`struct intr_frame`에는 다음 정보가 함께 있다.
++
++```c
++uint64_t error_code;
++uintptr_t rip;
++uint64_t eflags;
++uintptr_t rsp;
++```
++
++이 말은 즉, page fault handler는 "어떤 VA 때문에 실패했는가"와 "어느 명령어로 돌아갈 것인가"를 동시에 볼 수 있다.
++
++### 3. PintOS interrupt 복귀 경로는 `iretq`다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/intr-stubs.S`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/thread.c`
++
++`intr-stubs.S`의 `intr_entry`는 `intr_handler` 호출 뒤 register를 복원하고 `iretq`로 돌아간다. `thread.c`의 `do_iret()`도 `struct intr_frame`에서 register를 복원한 뒤 `iretq`를 실행한다.
++
++여기서 `iretq`는 interrupt/exception 진입 때 저장된 `RIP`, `CS`, `RFLAGS`, `RSP`, `SS`를 사용해 이전 실행 흐름으로 돌아가는 x86 명령어다.
++
++### 4. PintOS는 retry가 성공하도록 PTE를 고친다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++
++`pml4_set_page()`는 PTE에 다음 의미를 넣는다.
++
++```c
++frame physical address | PTE_P | optional PTE_W | PTE_U
++```
++
++따라서 retry 전에는 not-present fault였던 같은 VA가, retry 후에는 present user page로 번역될 수 있다.
++
++### 5. QEMU는 guest `RIP/CR2`를 GDB에 노출한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/emulate/x86_mmu.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/machine.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/gdbstub.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/tcg/translate.c`
++
++근거:
++
++- `x86_mmu.c`는 주소 변환 실패를 `EXCP0E_PAGE`로 올리고 `gva`를 CR2/payload로 남긴다.
++- `machine.c`는 page fault payload를 `env->cr[2]`로 옮기는 경로를 갖는다.
++- `gdbstub.c`는 instruction pointer를 `env->eip`, control register 2를 `env->cr[2]`에서 읽어 GDB에 준다.
++- `translate.c`에는 page fault가 났을 때 instruction이 restartable해야 한다는 주석이 있다.
++
++## 숫자와 메모리
++
++예시 값을 넣어 보자.
++
++```text
++RIP          = 0x401050
++instruction  = movb $0x41, (%rax)
++RAX          = 0x8048123
++page size    = 0x1000
++fault VA     = 0x8048123
++page base    = 0x8048000
++offset       = 0x123
++new frame PA = 0x00123000
++```
++
++첫 시도:
++
++```text
++VA 0x8048123
++  -> page base 0x8048000
++  -> PTE.P = 0
++  -> #PF
++
++saved RIP = 0x401050
++CR2       = 0x8048123
++```
++
++handler 성공 후:
++
++```text
++PTE for 0x8048000 = 0x00123000 | PTE_P | PTE_W | PTE_U
++                  = 0x00123000 | 0x1 | 0x2 | 0x4
++                  = 0x00123007
++```
++
++재실행:
++
++```text
++RIP 0x401050의 같은 movb 재실행
++VA  0x8048123
++  -> page base 0x8048000
++  -> frame base 0x00123000
++  -> PA = 0x00123000 + 0x123
++        = 0x00123123
++  -> byte 0x41 write 성공
++```
++
++중요한 것은 `RIP`가 `0x401050` 그대로라는 점이다. 바뀐 것은 명령어 주소가 아니라 page table state다.
++
++## 직접 확인
++
++PintOS를 QEMU GDB stub으로 붙여 디버깅한다면 다음 순서로 확인할 수 있다.
++
++```gdb
++b page_fault
++run
++```
++
++page fault에서 멈추면:
++
++```gdb
++p/x fault_addr
++p/x f->rip
++p/x f->error_code
++x/i f->rip
++```
++
++여기서 확인할 것:
++
++- `fault_addr`는 접근 대상 VA다.
++- `f->rip`는 fault를 낸 명령어 주소다.
++- `x/i f->rip`는 retry될 instruction을 보여준다.
++
++VM 처리 성공 경로를 확인하려면:
++
++```gdb
++b vm_try_handle_fault
++b pml4_set_page
++continue
++```
++
++`pml4_set_page()` 이후에는 해당 VA의 page base가 present mapping을 갖는지 본다. 그 다음 `finish` 또는 `continue`로 handler 복귀를 진행하면, 같은 `f->rip`의 명령어가 다시 실행되어 이번에는 memory access가 성공해야 한다.
++
++QEMU 관점까지 확인하려면 GDB에서 `info registers rip cr2`를 같이 본다. 이 값은 QEMU `gdbstub.c`가 `env->eip`, `env->cr[2]`에서 노출하는 guest state다.
++
++## 정리
++
++- page fault가 난 명령어는 아직 완료되지 않았다.
++- `CR2`는 실패한 접근 대상 VA이고, `RIP`는 다시 실행할 명령어 주소다.
++- PintOS는 `vm_try_handle_fault()`가 성공하면 `f->rip`를 다음 명령어로 넘기지 않고 handler에서 복귀한다.
++- 복귀 경로의 `iretq`가 저장된 `RIP`로 돌아가 같은 명령어를 재실행한다.
++- retry가 성공하는 이유는 명령어가 바뀌어서가 아니라 PTE/SPT/frame 상태가 바뀌었기 때문이다.
++- QEMU는 이 과정을 guest CPU state와 #PF로 재현하지만, fault를 살릴지 판단하는 정책은 PintOS가 맡는다.
++
++## 다음 링크
++
++- [[page-fault-trace]]: #PF가 PintOS handler로 들어가 정책 판단으로 이어지는 전체 흐름
++- [[page-fault-error-code-knowledge]]: `CR2`와 `PF_P/PF_W/PF_U`를 해석하는 방법
++- [[x86-64-page-table-walk-knowledge]]: retry 때 VA가 PTE와 frame으로 번역되는 계산
++- [[page-table-entry-bits-knowledge]]: `PTE_P`, `PTE_W`, `PTE_U` bit의 의미
++- [[supplemental-page-table-knowledge]]: not-present page가 원래 합법인지 기억하는 커널 장부
++- [[qemu-gdb-stub-guest-state-knowledge]]: GDB가 보여주는 guest register와 QEMU 내부 상태의 관계
