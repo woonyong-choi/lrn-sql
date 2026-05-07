@@ -1,0 +1,626 @@
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index ca5b56d..f18e5ca 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -78,6 +78,7 @@ related_to:
+ - 3.5단계: 파일이 메모리처럼 보이는 법
+   - [[mmap-file-backed-page-knowledge]]
+   - [[mmap-syscall-handler-trace]]
++  - [[mmap-munmap-range-trace]]
+   - [[mmap-dirty-writeback-qemu-trace]]
+ - 3.6단계: disk sector가 QEMU block backend offset으로 내려가는 법
+   - [[disk-sector-qemu-block-backend-knowledge]]
+@@ -252,6 +253,7 @@ related_to:
+     - [[supplemental-page-table-knowledge]]
+     - [[stack-growth-page-fault-knowledge]]
+     - [[file-backed-page-metadata-knowledge]]
++    - [[mmap-munmap-range-trace]]
+     - [[week-3-4-virtual-memory-map]]
+   - 핵심 키워드
+     - VA
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index 0f6d3c2..37bddea 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -60,6 +60,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[page-fault-trace]]: #PF가 OS 정책으로 이어지는 관문
+ - [[frame-eviction-trace]]: 빈 frame이 없을 때 victim page를 내보내고 frame을 재사용하는 흐름
+ - [[mmap-syscall-handler-trace]]: user `mmap()` register 인자가 `syscall_handler()`에서 `do_mmap()`으로 이어지는 흐름
++- [[mmap-munmap-range-trace]]: `do_munmap(addr)`가 mapping 범위를 찾아 dirty page와 PTE/SPT를 정리하는 흐름
+ - [[mmap-dirty-writeback-qemu-trace]]: mmap으로 수정한 dirty file-backed page가 PintOS file write와 QEMU block I/O로 내려가는 흐름
+ - [[swap-disk-ide-qemu-trace]]: swap slot의 sector write가 QEMU IDE/block backend offset으로 내려가는 흐름
+ 
+diff --git a/notes/os/file-backed-page-metadata-knowledge.md b/notes/os/file-backed-page-metadata-knowledge.md
+index 892dffd..7ebd50b 100644
+--- a/notes/os/file-backed-page-metadata-knowledge.md
++++ b/notes/os/file-backed-page-metadata-knowledge.md
+@@ -553,6 +553,7 @@ make -C build check TESTS=tests/vm/mmap-clean
+ 
+ - [[mmap-file-backed-page-knowledge]]: `mmap` 전체 흐름에서 file-backed page가 어디에 들어가는지
+ - [[mmap-syscall-handler-trace]]: `fd`, `addr`, `length`, `offset`이 `do_mmap()` 인자로 들어오기 전 검증 흐름
++- [[mmap-munmap-range-trace]]: `do_munmap()`이 page별 metadata와 mapping 범위를 함께 쓰는 이유
+ - [[mmap-dirty-writeback-qemu-trace]]: dirty file-backed page가 `file_write_at()`과 QEMU block write로 내려가는 흐름
+ - [[supplemental-page-table-knowledge]]: page fault 때 backing metadata를 다시 찾는 의미 장부
+ - [[page-fault-trace]]: not-present fault가 lazy load로 살아나는 입구
+diff --git a/notes/os/mmap-file-backed-page-knowledge.md b/notes/os/mmap-file-backed-page-knowledge.md
+index f86d3d1..0a73670 100644
+--- a/notes/os/mmap-file-backed-page-knowledge.md
++++ b/notes/os/mmap-file-backed-page-knowledge.md
+@@ -512,6 +512,7 @@ make -C build check TESTS=tests/vm/lazy-file
+ 
+ - [[supplemental-page-table-knowledge]]: `mmap` 약속을 page fault 때 다시 찾는 의미 장부
+ - [[mmap-syscall-handler-trace]]: user `mmap()` 호출이 `SYS_MMAP` case와 `do_mmap()`으로 이어지는 입구
++- [[mmap-munmap-range-trace]]: `munmap()`이 길이 없이 mapping 범위를 찾아 정리하는 방식
+ - [[file-backed-page-metadata-knowledge]]: `struct file_page`에 file, offset, read/zero bytes가 필요한 이유
+ - [[page-fault-trace]]: file-backed page가 실제 frame으로 바뀌는 관문
+ - [[mmap-dirty-writeback-qemu-trace]]: dirty bit가 `file_write_at()`과 QEMU IDE sector write로 내려가는 흐름
+diff --git a/traces/os/mmap-dirty-writeback-qemu-trace.md b/traces/os/mmap-dirty-writeback-qemu-trace.md
+index 48366cd..09de186 100644
+--- a/traces/os/mmap-dirty-writeback-qemu-trace.md
++++ b/traces/os/mmap-dirty-writeback-qemu-trace.md
+@@ -516,6 +516,7 @@ make -C build check TESTS=tests/vm/swap-file
+ 
+ - [[mmap-file-backed-page-knowledge]]: file-backed mapping의 전체 개념과 lazy loading 모델
+ - [[mmap-syscall-handler-trace]]: dirty write-back 이전에 `SYS_MMAP`이 `do_mmap()`까지 연결되는 입구
++- [[mmap-munmap-range-trace]]: `munmap()`이 어떤 page들을 dirty 검사하고 제거해야 하는지
+ - [[file-backed-page-metadata-knowledge]]: `struct file_page`가 기억해야 할 file offset과 read/zero bytes
+ - [[page-table-entry-bits-knowledge]]: `PTE_D = 0x40`이 page table에서 어떤 의미인지
+ - [[frame-eviction-trace]]: dirty page가 victim이 될 때 보존되어야 하는 이유
+diff --git a/traces/os/mmap-munmap-range-trace.md b/traces/os/mmap-munmap-range-trace.md
+new file mode 100644
+index 0000000..7a9eb91
+--- /dev/null
++++ b/traces/os/mmap-munmap-range-trace.md
+@@ -0,0 +1,552 @@
++---
++type: Trace
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - topic:mmap
++  - topic:page-table
++  - topic:fd
++  - topic:gdb
++  - layer:memory
++  - layer:kernel
++  - layer:device
++  - layer:emulator
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[mmap-file-backed-page-knowledge]]"
++  - "[[file-backed-page-metadata-knowledge]]"
++  - "[[mmap-syscall-handler-trace]]"
++  - "[[mmap-dirty-writeback-qemu-trace]]"
++  - "[[supplemental-page-table-knowledge]]"
++  - "[[file-descriptor-knowledge]]"
++---
++# munmap은 mmap 범위를 어떻게 찾아 정리해야 하나
++
++## 작은 질문
++
++PintOS의 유저 프로그램은 mapping을 만들 때 길이를 넘긴다.
++
++```c
++void *map = mmap ((void *) 0x10000000, 0x2000, 0, fd, 0);
++```
++
++그런데 해제할 때는 시작 주소만 넘긴다.
++
++```c
++munmap (map);
++```
++
++그러면 질문은 이것이다.
++
++> `do_munmap(addr)`은 길이를 받지 않는데, 어떤 page들을 write-back하고 어떤 page table entry를 지워야 하는지 어떻게 알까?
++
++## 목차
++
++- 꼬리 질문
++- 왜 필요한가
++- 핵심 모델
++- 예시 상황
++- Linux / Windows에서는
++- PintOS에서는
++- QEMU에서는
++- 차이점
++- 코드 증거
++- 숫자와 메모리
++- 직접 확인
++- 정리
++- 다음 링크
++
++## 꼬리 질문
++
++이번 Trace는 다음 질문을 순서대로 따라간다.
++
++- 왜 `munmap()`은 mapping 시작 주소만으로는 부족해 보일까?
++- 실제 OS는 mapping 범위를 어디에 기억할까?
++- PintOS는 `do_mmap()`에서 어떤 범위 metadata를 남겨야 할까?
++- `do_munmap()`은 SPT, page table, frame, file reference를 어떤 순서로 정리해야 할까?
++- process exit에서는 왜 명시적 `munmap()` 없이도 같은 정리가 필요할까?
++- QEMU는 unmap 범위를 알고 있을까?
++- 숫자를 넣으면 `addr=0x10000000`, `length=0x3000`에서 어떤 page들을 지워야 할까?
++- GDB로 어디를 보면 dirty write-back과 unmapped fault를 확인할 수 있을까?
++
++## 왜 필요한가
++
++`mmap()`은 주소 범위를 만든다.
++
++```text
++base = 0x10000000
++length = 0x2000
++
++page 0: 0x10000000
++page 1: 0x10001000
++```
++
++하지만 PintOS의 `munmap()` wrapper는 길이를 다시 넘기지 않는다.
++
++```c
++void
++munmap (void *addr) {
++    syscall1 (SYS_MUNMAP, addr);
++}
++```
++
++이 말은 즉, 길이 정보는 `mmap()` 호출 때 커널 안 어딘가에 저장되어야 한다. 그렇지 않으면 `do_munmap(addr)`은 첫 page만 지워야 하는지, 두 page를 지워야 하는지, 파일 객체를 언제 닫아야 하는지 알 수 없다.
++
++여기서 단순히 "SPT에서 `addr`부터 page가 없어질 때까지 지우자"라고 생각하면 위험하다. 바로 뒤에 다른 정상 mapping이나 stack page가 붙어 있으면 다른 영역까지 지울 수 있다.
++
++따라서 `munmap` 구현의 핵심은 **mapping 범위 metadata**다.
++
++## 핵심 모델
++
++처음에는 mapping을 "여러 file-backed page를 묶는 봉투"로 보면 된다.
++
++```text
++mmap region
++  base      = 0x10000000
++  page_cnt  = 2
++  file      = reopened file reference
++
++  page 0
++    va      = 0x10000000
++    ofs     = 0
++    bytes   = 4096
++
++  page 1
++    va      = 0x10001000
++    ofs     = 4096
++    bytes   = 1904
++```
++
++`do_munmap(base)`가 해야 할 일은 이 봉투를 찾아서 안의 page를 순회하는 것이다.
++
++```text
++do_munmap(base)
++  -> base로 mmap region 찾기
++  -> i = 0..page_cnt-1
++       va = base + i * PGSIZE
++       page = spt_find_page(spt, va)
++       dirty이면 file_write_at(...)
++       pml4_clear_page(pml4, va)
++       spt_remove_page(spt, page)
++  -> reopened file close
++  -> region metadata 제거
++```
++
++여기서 중요한 순서는 "의미를 먼저 저장하고, 마지막에 번역을 지운다"다.
++
++page table entry를 먼저 지워 버리면 dirty bit나 frame 주소를 읽기 어려워질 수 있다. 보통은 page가 아직 SPT와 frame을 통해 살아 있을 때 dirty 여부를 보고 write-back한 뒤, page table mapping과 SPT entry를 제거한다.
++
++## 예시 상황
++
++파일 길이가 `6000`바이트이고, 사용자가 다음처럼 매핑한다고 하자.
++
++```c
++char *p = mmap ((void *) 0x10000000, 6000, 1, fd, 0);
++p[5000] = 'X';
++munmap (p);
++```
++
++page size는 `4096 = 0x1000`이므로 mapping은 두 page다.
++
++| VA page | file offset | read bytes | zero bytes |
++|---|---:|---:|---:|
++| `0x10000000` | `0` | `4096` | `0` |
++| `0x10001000` | `4096` | `1904` | `2192` |
++
++`p[5000]`은 두 번째 page 안 offset `904 = 0x388`이다.
++
++```text
++access VA      = 0x10000000 + 5000 = 0x10001388
++page base      = 0x10001000
++offset in page = 0x388
++file offset    = 4096 + 0x388 = 5000
++```
++
++`munmap(p)`는 두 번째 page가 dirty이면 frame 앞 `1904`바이트만 파일 offset `4096`에 써야 한다.
++
++```text
++file_write_at(file, frame->kva, 1904, 4096)
++```
++
++그 다음 `0x10000000`과 `0x10001000`의 page table entry와 SPT entry를 모두 제거해야 한다. 그래야 `mmap-unmap` 테스트처럼 unmap 뒤 같은 주소를 읽었을 때 page fault가 나고 프로세스가 종료된다.
++
++## Linux / Windows에서는
++
++Linux의 `munmap()`은 `addr`와 `length`를 둘 다 받는다. 커널은 프로세스 주소 공간의 VMA tree에서 해당 범위를 찾고, 필요한 경우 VMA를 쪼개거나 합친다. file-backed dirty page는 page cache와 write-back 정책을 통해 정리된다.
++
++Windows의 user API는 POSIX `munmap()` 대신 `UnmapViewOfFile(base)`에 가깝다. 매핑된 view object가 base address와 범위를 들고 있으므로 base만으로 view를 찾을 수 있다.
++
++현실 OS는 PintOS보다 더 복잡하다.
++
++- 한 파일 page를 여러 프로세스가 공유할 수 있다.
++- partial unmap 때문에 VMA가 분할될 수 있다.
++- shared/private, copy-on-write, page cache, write-back error, lock ordering을 함께 다룬다.
++- multithreaded process에서 동시에 mapping을 건드리는 경우를 제어해야 한다.
++
++PintOS에서는 이 복잡도를 줄여서 "한 프로세스의 SPT와 mapping metadata를 직접 순회한다"로 이해하면 된다.
++
++## PintOS에서는
++
++현재 저장소 기준으로 `munmap`의 입구는 준비되어 있지만, 커널 구현은 비어 있다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/lib/user/syscall.c`
++  - `munmap()`은 `syscall1(SYS_MUNMAP, addr)`를 호출한다.
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/lib/syscall-nr.h`
++  - `SYS_MUNMAP` 번호가 있다.
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/syscall.c`
++  - 현재 `syscall_handler()`에는 `SYS_MUNMAP` case가 없다.
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/file.c`
++  - `do_munmap(void *addr)`는 빈 skeleton이다.
++
++구현 설계는 크게 두 가지가 가능하다.
++
++| 설계 | 장점 | 조심할 점 |
++|---|---|---|
++| thread에 `mmap_region` list를 둔다 | base -> page count -> file reference를 한 곳에서 관리하기 쉽다 | `struct thread`와 region 생명주기 코드를 추가해야 한다 |
++| 각 `struct file_page`에 range 정보를 중복 저장한다 | 새 region 구조체가 적다 | file close를 page마다 할지, 한 번만 할지 소유권이 헷갈리기 쉽다 |
++
++초보 구현에는 별도 region list가 더 설명하기 쉽다.
++
++```c
++struct mmap_region {
++    void *base;
++    size_t page_cnt;
++    struct file *file;
++    struct list_elem elem;
++};
++```
++
++그리고 각 page는 자기 write-back에 필요한 page별 metadata를 가진다.
++
++```c
++struct file_page {
++    struct mmap_region *region;
++    off_t ofs;
++    size_t read_bytes;
++    size_t zero_bytes;
++    bool writable;
++};
++```
++
++핵심은 `do_mmap()`이 성공하는 순간 다음 두 정보를 모두 남긴다는 점이다.
++
++```text
++range metadata:
++  base, page_cnt, reopened file
++
++page metadata:
++  va, ofs, read_bytes, zero_bytes, writable
++```
++
++`do_munmap()`은 range metadata로 순회 범위를 찾고, page metadata로 file write-back 위치를 계산한다.
++
++또 하나 중요한 증거가 process exit 순서다.
++
++`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/process.c`의 `process_exit()`은 열린 fd를 닫은 뒤 `process_cleanup()`으로 들어간다. `process_cleanup()`은 VM이 켜져 있으면 `supplemental_page_table_kill(&curr->spt)`를 호출한다.
++
++```text
++process_exit()
++  -> close_open_files(curr)
++  -> process_cleanup()
++       -> supplemental_page_table_kill(&curr->spt)
++```
++
++이 말은 즉, mapping이 fd table의 원래 `struct file *`에 기대고 있으면 process exit write-back 시점에는 이미 닫힌 파일을 가리킬 수 있다. 그래서 `mmap-close`, `mmap-remove`, `mmap-exit`을 통과하려면 `file_reopen()` 또는 별도 mapping 소유 file reference가 필요하다.
++
++## QEMU에서는
++
++QEMU는 `do_munmap()` 범위를 모른다.
++
++QEMU가 보는 것은 다음뿐이다.
++
++- PintOS가 page table entry를 not-present로 바꾼다.
++- 이후 guest user code가 그 VA를 다시 읽으면 x86 page fault가 발생한다.
++- PintOS가 dirty page를 `file_write_at()`으로 되돌리면 파일 시스템이 IDE sector write를 낸다.
++- QEMU IDE 모델은 sector 번호를 block backend byte offset으로 바꿔 쓴다.
++
++QEMU 코드에서 확인할 수 있는 하드웨어 효과는 두 가지다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/tcg/system/excp_helper.c`
++  - store access에서 `PG_DIRTY_MASK`를 set 후보에 넣는다.
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/hw/ide/core.c`
++  - `ide_sector_write()`가 `blk_aio_pwritev(..., sector_num << BDRV_SECTOR_BITS, ...)`를 호출한다.
++
++따라서 "이 주소부터 몇 page를 munmap해야 한다"는 의미는 QEMU가 아니라 PintOS 커널 metadata가 만든다.
++
++## 차이점
++
++| 항목 | Linux / Windows | PintOS | QEMU |
++|---|---|---|---|
++| unmap 입력 | Linux는 `addr, length`, Windows view unmap은 base 중심 | user wrapper는 `addr`만 전달 | guest API 의미를 모름 |
++| 범위 저장 | VMA tree, section/view object 등 | 구현자가 region list나 page metadata로 설계 | 없음 |
++| dirty write-back | page cache/modified page 정책 | `pml4_is_dirty()`와 `file_write_at()` 중심 | guest PTE dirty bit와 IDE write 효과 |
++| page 제거 | VMA/PTE/page cache coordination | SPT entry, PTE, frame, reopened file 정리 | PTE가 없으면 다음 접근 때 #PF 전달 |
++| process exit | 주소 공간 전체 teardown | `supplemental_page_table_kill()`에서 같은 정리 필요 | teardown 의미를 모름 |
++
++## 코드 증거
++
++### 1. 유저 `munmap()`은 주소 하나만 넘긴다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/lib/user/syscall.c`
++
++핵심:
++
++```c
++void
++munmap (void *addr) {
++    syscall1 (SYS_MUNMAP, addr);
++}
++```
++
++따라서 length는 syscall 인자로 다시 오지 않는다.
++
++### 2. 커널 `do_munmap()` skeleton도 주소 하나만 받는다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/file.h`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/file.c`
++
++핵심:
++
++```c
++void do_munmap (void *va);
++```
++
++```c
++void
++do_munmap (void *addr) {
++}
++```
++
++이 함수가 범위를 알려면 `do_mmap()` 때 저장한 region metadata를 찾아야 한다.
++
++### 3. page table mapping을 지우는 함수는 있다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++
++핵심:
++
++```c
++void
++pml4_clear_page (uint64_t *pml4, void *upage) {
++    ...
++    *pte &= ~PTE_P;
++    ...
++}
++```
++
++이 함수는 PTE를 not-present로 만들어 다음 접근이 fault가 되게 한다.
++
++### 4. dirty 여부를 읽는 함수도 있다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/pte.h`
++
++핵심:
++
++```c
++bool
++pml4_is_dirty (uint64_t *pml4, const void *vpage) {
++    uint64_t *pte = pml4e_walk (pml4, (uint64_t) vpage, false);
++    return pte != NULL && (*pte & PTE_D) != 0;
++}
++```
++
++`PTE_D`는 `0x40`이다.
++
++### 5. SPT 제거는 page destroy로 이어진다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++
++핵심:
++
++```c
++void
++spt_remove_page (struct supplemental_page_table *spt, struct page *page) {
++    vm_dealloc_page (page);
++    return true;
++}
++```
++
++현재 skeleton에는 TODO가 많지만, 의도는 SPT에서 page를 제거하며 `destroy(page)` 경로로 자원을 정리하는 것이다.
++
++### 6. process exit도 mapping 정리를 요구한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/process.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++
++핵심 흐름:
++
++```text
++process_exit()
++  -> close_open_files(curr)
++  -> process_cleanup()
++       -> supplemental_page_table_kill(&curr->spt)
++```
++
++`mmap-exit` 테스트의 child는 `munmap()`을 직접 호출하지 않고 종료한다. 그래서 `supplemental_page_table_kill()`은 남은 file-backed mapping에 대해 `do_munmap()`과 같은 write-back/정리 의미를 수행해야 한다.
++
++### 7. 테스트가 범위 정리를 직접 확인한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-unmap.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-exit.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/child-mm-wrt.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-clean.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-close.c`
++
++테스트 요구사항을 구현 기준으로 바꾸면 다음과 같다.
++
++| 테스트 | 확인하는 기준 |
++|---|---|
++| `mmap-unmap` | unmap 뒤 같은 VA를 읽으면 fault가 나야 함 |
++| `mmap-exit` | 명시적 `munmap()` 없이 exit해도 dirty mapping이 파일에 남아야 함 |
++| `mmap-clean` | clean mapping은 파일을 덮어쓰면 안 됨 |
++| `mmap-close` | fd close 뒤에도 mapping으로 파일을 읽을 수 있어야 함 |
++| `mmap-remove` | remove 뒤에도 mapping의 file reference가 살아 있어야 함 |
++
++## 숫자와 메모리
++
++### 1. unmap 범위 계산
++
++입력:
++
++```text
++base   = 0x10000000
++length = 0x3000
++PGSIZE = 0x1000
++```
++
++page count:
++
++```text
++page_cnt = pg_round_up(length) / PGSIZE
++         = 0x3000 / 0x1000
++         = 3
++```
++
++지워야 할 VA page:
++
++```text
++i = 0 -> 0x10000000
++i = 1 -> 0x10001000
++i = 2 -> 0x10002000
++```
++
++`do_munmap(0x10000000)`은 이 세 page를 모두 정리해야 한다.
++
++### 2. dirty PTE 판단
++
++어떤 page의 PTE flag가 `0x067`이라고 하자.
++
++```text
++0x001 PTE_P present
++0x002 PTE_W writable
++0x004 PTE_U user
++0x020 PTE_A accessed
++0x040 PTE_D dirty
++```
++
++`0x067 & 0x040 != 0`이므로 dirty page다. file-backed page라면 `read_bytes`만큼 `file_write_at()` 대상이 된다.
++
++### 3. 마지막 page write-back 크기
++
++파일 길이가 `6000`바이트이고 mapping base가 `0x10000000`이면 두 번째 page는 다음처럼 계산된다.
++
++```text
++page va     = 0x10001000
++file offset = 4096
++read bytes  = 6000 - 4096 = 1904
++zero bytes  = 4096 - 1904 = 2192
++```
++
++dirty이면 write-back은 다음 범위만 해야 한다.
++
++```text
++file_write_at(file, frame->kva, 1904, 4096)
++```
++
++page 전체 `4096`바이트를 쓰면 zero-fill padding까지 파일에 쓰려는 잘못된 모델이 된다.
++
++## 직접 확인
++
++구현 중 GDB에서 잡을 지점:
++
++```gdb
++b syscall_handler
++b do_munmap
++b pml4_is_dirty
++b file_write_at
++b pml4_clear_page
++b spt_remove_page
++b supplemental_page_table_kill
++```
++
++`mmap-unmap`에서 `do_munmap`에 멈춘 뒤 확인:
++
++```gdb
++p/x addr
++p/x region->base
++p region->page_cnt
++p/x page->va
++p pml4_is_dirty(thread_current()->pml4, page->va)
++```
++
++unmap 뒤에는 같은 주소 접근이 fault로 이어져야 한다.
++
++```text
++make -C build check TESTS=tests/vm/mmap-unmap
++```
++
++dirty/clean/process exit를 나눠 확인하는 후보:
++
++```text
++make -C build check TESTS=tests/vm/mmap-write
++make -C build check TESTS=tests/vm/mmap-clean
++make -C build check TESTS=tests/vm/mmap-exit
++make -C build check TESTS=tests/vm/mmap-close
++make -C build check TESTS=tests/vm/mmap-remove
++```
++
++현재 저장소의 VM 구현은 skeleton 상태이므로 위 명령은 지금 통과 확인이 아니라 구현 후 회귀 확인 지점이다.
++
++## 정리
++
++- PintOS `munmap()`은 시작 주소만 넘기므로, `do_mmap()`이 mapping 길이와 page 수를 metadata로 남겨야 한다.
++- `do_munmap()`은 region metadata로 page 범위를 찾고, page metadata로 file offset/read bytes를 찾아 dirty write-back한다.
++- page table entry는 write-back 판단 뒤 `pml4_clear_page()`로 지우는 편이 안전하다.
++- SPT entry와 frame, reopened file reference까지 정리해야 unmap 뒤 접근이 fault가 되고 file reference leak이 남지 않는다.
++- process exit에서는 `munmap()`을 직접 부르지 않아도 `supplemental_page_table_kill()`에서 같은 의미의 정리가 필요하다.
++- QEMU는 mapping 범위를 모르고, guest PTE dirty bit와 IDE sector write 효과만 에뮬레이션한다.
++
++## 다음 링크
++
++- [[mmap-syscall-handler-trace]]: `SYS_MUNMAP`이 `do_munmap()`으로 들어오는 입구
++- [[mmap-file-backed-page-knowledge]]: file-backed mapping 전체 모델
++- [[file-backed-page-metadata-knowledge]]: page별 file offset/read bytes metadata
++- [[mmap-dirty-writeback-qemu-trace]]: dirty page가 파일과 QEMU block write로 내려가는 흐름
++- [[supplemental-page-table-knowledge]]: unmap할 page를 찾는 의미 장부
++- [[file-descriptor-knowledge]]: fd close와 file object 생명주기를 분리하는 이유
