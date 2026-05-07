@@ -1,4 +1,24 @@
-This run produced a vault overlay because the Codex sandbox initially could not write to `/Users/woonyong/vault`.
+This staging area contains vault overlays produced when the Codex sandbox could not write to `/Users/woonyong/vault`.
+
+Latest run overlay:
+
+`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W08-SQL/os-wiki-staging/2026-05-08-syscall-register-snapshot/vault-overlay`
+
+This run deepens syscall register snapshots:
+
+- `traces/os/syscall-register-snapshot-trace.md`
+- `maps/os/concept-to-code-map.md`
+- `maps/os/week-2-user-programs-map.md`
+- `notes/os/cpu-register-execution.md`
+- `traces/os/syscall-end-to-end.md`
+
+Apply only after reviewing the current vault, because `/Users/woonyong/vault` already has local dirty changes outside this overlay.
+
+```sh
+rsync -av --progress /Users/woonyong/workspace/Krafton-Jungle/SW_AI-W08-SQL/os-wiki-staging/2026-05-08-syscall-register-snapshot/vault-overlay/ /Users/woonyong/vault/
+```
+
+Previous fd close/remove run:
 
 As of the end of this run, the actual vault already contains a separate committed version of the fd close/remove Lab:
 
@@ -26,4 +46,4 @@ Files in this run:
 - `maps/os/학습-가이드.md`
 - `notes/os/file-descriptor-knowledge.md`
 
-The older `os-wiki-staging/vault-overlay/` directory is preserved as prior-run output and is not the recommended apply target for this run.
+The older `os-wiki-staging/vault-overlay/` directory is preserved as prior-run output and is not the recommended apply target.
