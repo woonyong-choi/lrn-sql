@@ -1,0 +1,497 @@
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index 54535ba..dcdf1bd 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -248,6 +248,7 @@ related_to:
+     - [[page-fault-error-code-knowledge]]
+     - [[tlb-cr3-address-space-switch-knowledge]]
+     - [[supplemental-page-table-knowledge]]
++    - [[anon-page-swap-metadata-knowledge]]
+     - [[stack-growth-page-fault-knowledge]]
+     - [[week-3-4-virtual-memory-map]]
+   - 핵심 키워드
+@@ -261,6 +262,7 @@ related_to:
+     - [[tlb-cr3-address-space-switch-knowledge|CR3]]
+     - page fault
+     - supplemental page table
++    - swap slot metadata
+   - 실제 OS 관점
+     - Linux / Windows는 demand paging, COW, mmap, swap, page cache, protection을 모두 포함한다.
+   - PintOS 관점
+@@ -388,6 +390,7 @@ related_to:
+     - supplemental page table은 왜 page table만으로 부족해서 필요한가?
+     - frame이 부족하면 무엇을 내보내는가?
+     - anonymous page는 swap disk의 어느 slot으로 나갔다 돌아오는가?
++      - [[anon-page-swap-metadata-knowledge]]: swap slot 번호와 resident 상태를 page metadata에 남겨야 하는 이유
+     - mmap은 file I/O와 memory access를 어떻게 연결하는가?
+     - mmap dirty page는 어떤 순간 파일과 disk sector로 되돌아가는가?
+     - disk sector 번호는 QEMU block backend byte offset으로 어떻게 바뀌는가?
+@@ -398,6 +401,7 @@ related_to:
+     - [[page-fault-error-code-knowledge]]: `PF_P/PF_W/PF_U`가 `vm_try_handle_fault()` 판단표로 바뀌는 과정
+     - [[tlb-cr3-address-space-switch-knowledge]]: CR3가 현재 page table root를 고르고 TLB가 최근 번역을 캐시하는 방식
+     - [[supplemental-page-table-knowledge]]: fault address가 원래 어떤 backing 정보를 가진 페이지인지 찾는 표
++    - [[anon-page-swap-metadata-knowledge]]: anonymous page가 frame 밖으로 나간 뒤 slot 번호와 상태를 기억하는 방식
+     - [[mmap-file-backed-page-knowledge]]: 파일 byte가 user VA page로 보이고 dirty page가 write-back되는 흐름
+     - [[disk-sector-qemu-block-backend-knowledge]]: PintOS sector 번호가 QEMU block backend byte offset으로 바뀌는 기준
+   - 핵심 흐름
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index ddf8066..565503e 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -37,6 +37,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[page-fault-error-code-knowledge]]
+ - [[tlb-cr3-address-space-switch-knowledge]]
+ - [[supplemental-page-table-knowledge]]
++- [[anon-page-swap-metadata-knowledge]]
+ - [[stack-growth-page-fault-knowledge]]
+ - [[disk-sector-qemu-block-backend-knowledge]]
+ - [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]
+@@ -49,6 +50,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[page-fault-error-code-knowledge]]: `CR2`와 `PF_P/PF_W/PF_U`로 not-present, write, user fault를 분류하는 법
+ - [[tlb-cr3-address-space-switch-knowledge]]: CR3가 page table root를 고르고 TLB가 최근 VA -> PA 번역을 캐시하는 방식
+ - [[supplemental-page-table-knowledge]]: page table만으로는 기억할 수 없는 "원래 합법한 페이지" 정보
++- [[anon-page-swap-metadata-knowledge]]: anonymous page가 evict된 뒤 swap slot과 resident 상태를 어디에 남기는지
+ - [[stack-growth-page-fault-knowledge]]: `CR2`, 유저 `RSP`, `USER_STACK`으로 스택 성장 fault를 살릴지 판단하는 기준
+ - [[mmap-file-backed-page-knowledge]]: 파일 바이트가 유저 가상 주소의 page로 보이는 과정
+ - [[disk-sector-qemu-block-backend-knowledge]]: PintOS disk sector 번호가 QEMU block backend byte offset으로 내려가는 기준
+diff --git a/notes/os/anon-page-swap-metadata-knowledge.md b/notes/os/anon-page-swap-metadata-knowledge.md
+new file mode 100644
+index 0000000..2f37920
+--- /dev/null
++++ b/notes/os/anon-page-swap-metadata-knowledge.md
+@@ -0,0 +1,435 @@
++---
++type: Knowledge
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - layer:memory
++  - layer:kernel
++  - layer:device
++  - topic:swap
++  - topic:frame
++  - topic:page-table
++  - topic:gdb
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[supplemental-page-table-knowledge]]"
++  - "[[frame-eviction-trace]]"
++  - "[[swap-lab]]"
++  - "[[swap-disk-ide-qemu-trace]]"
++---
++
++# Anonymous page swap metadata는 어디에 저장되나
++
++## 작은 질문
++
++[[swap-lab]]에서는 anonymous page 한 장이 swap disk의 sector 8개로 나갔다가 다시 돌아온다고 했다.
++
++그런데 구현할 때 바로 다음 질문이 생긴다.
++
++> page가 frame에서 쫓겨난 뒤, "이 page는 swap slot 3에 있다"는 사실은 어디에 저장해야 할까?
++
++정답은 CPU page table도 아니고 QEMU도 아니다. PintOS의 [[supplemental-page-table-knowledge|SPT]]가 page object를 찾게 해 주고, anonymous page 전용 metadata가 그 page의 swap 위치와 상태를 기억해야 한다.
++
++이번 문서는 다음 질문을 순서대로 따라간다.
++
++- 왜 swap slot 번호를 기억해야 하는가?
++- 실제 OS에서는 이런 resident/backing 상태를 어떻게 더 복잡하게 관리하는가?
++- PintOS 스켈레톤은 왜 `struct anon_page {}`를 비워 두었는가?
++- QEMU는 왜 이 metadata를 전혀 모르는가?
++- slot 3이면 sector와 byte offset은 어떻게 계산되는가?
++- GDB로 어떤 필드를 보면 구현이 맞는지 확인할 수 있는가?
++
++## 왜 필요한가
++
++frame eviction은 단순히 4KB를 disk에 쓰는 일이 아니다. 더 중요한 일은 **나중에 같은 VA가 다시 접근될 때 그 4KB를 어디서 읽어야 하는지 기억하는 것**이다.
++
++anonymous page는 실행 파일이나 mmap 파일 같은 원본 파일이 없다. 유저 프로그램이 실행 중에 만든 값이므로, frame에서 내보내기 전에 swap disk에 저장해야 한다.
++
++하지만 저장만 하고 위치를 잊어버리면 다음 page fault에서 복원할 수 없다.
++
++```text
++swap out:
++  VA 0x8049000의 page 내용을 slot 3에 기록
++  -> "slot 3"을 page metadata에 남겨야 함
++
++swap in:
++  VA 0x8049000 접근으로 page fault 발생
++  -> SPT에서 page 찾기
++  -> page metadata에서 slot 3 확인
++  -> slot 3의 sector 8개를 frame으로 읽기
++```
++
++이 말은 즉, swap metadata는 "디스크 주소"라기보다 **resident가 아닌 page를 다시 resident로 만들기 위한 약속**이다.
++
++## 핵심 모델
++
++처음에는 anonymous page의 상태를 세 칸짜리 표로 생각하면 된다.
++
++| 상태 | `page->frame` | anonymous metadata | 의미 |
++|---|---|---|---|
++| 처음 생성됨 | `NULL`일 수 있음 | slot 없음 | 아직 lazy claim 전이거나 zero page 후보 |
++| RAM에 있음 | frame을 가리킴 | slot 없음 또는 free 처리됨 | CPU가 PTE를 통해 접근 가능 |
++| swap에 있음 | `NULL` | slot 번호 있음 | PTE는 not-present이고, fault 때 slot에서 읽어야 함 |
++
++PintOS 구현자가 보통 채워야 할 정보는 다음 두 가지다.
++
++```c
++struct anon_page {
++    size_t slot_index;   /* page 하나를 담는 swap slot 번호 */
++    bool in_swap;        /* 이 page의 현재 backing이 swap slot인지 */
++};
++```
++
++이 코드는 한 가지 설계 예시다. 현재 저장소의 `struct anon_page`는 비어 있고, 과제 구현자는 같은 의미를 다른 필드 이름으로 표현할 수 있다.
++
++핵심 불변식은 필드 이름보다 중요하다.
++
++| 불변식 | 깨지면 생기는 문제 |
++|---|---|
++| swap out 성공 뒤 page는 slot 번호를 안다 | 다음 fault에서 읽을 위치를 모른다 |
++| swap in 성공 뒤 slot은 다시 free가 된다 | swap 공간 누수로 나중에 slot 부족이 난다 |
++| evict된 page의 PTE는 present가 아니다 | CPU가 stale frame을 계속 접근할 수 있다 |
++| frame과 page의 양방향 포인터가 맞다 | victim frame을 비울 때 어느 VA를 끊을지 모른다 |
++
++## 예시 상황
++
++유저 프로그램이 anonymous page B를 수정했다고 하자.
++
++```text
++page B VA        = 0x8049000
++page B frame kva = 0x800012340000
++page B 첫 바이트 = 0x7f
++선택된 swap slot = 3
++```
++
++빈 frame이 없어 B가 victim이 되면 구현은 대략 이런 상태 전이를 만들어야 한다.
++
++```text
++before swap out:
++  page B.frame        = F1
++  F1.page             = page B
++  page B.anon.in_swap = false
++  page B.anon.slot    = 없음
++  PTE(0x8049000)      = present, points to F1
++
++after swap out:
++  disk slot 3         = B의 4096B
++  page B.frame        = NULL
++  F1.page             = 새 page 또는 NULL
++  page B.anon.in_swap = true
++  page B.anon.slot    = 3
++  PTE(0x8049000)      = not-present
++```
++
++나중에 `0x8049000`을 다시 읽으면 CPU는 page fault를 낸다. PintOS는 SPT에서 page B를 찾고, `page B.anon.slot == 3`을 읽어 slot 3에서 frame을 채운다.
++
++## Linux / Windows에서는
++
++Linux와 Windows도 page가 RAM에 있는지, swap/pagefile에 있는지, file-backed인지 같은 상태를 관리한다.
++
++다만 현실 OS는 PintOS처럼 `slot_index` 하나로 끝나지 않는다.
++
++| 관점 | 실제 OS에서 더 복잡한 이유 |
++|---|---|
++| resident 상태 | per-process working set, LRU 계열 list, cgroup, NUMA 상태가 얽힌다 |
++| backing 위치 | swap partition/file, pagefile, mapped file, compressed memory 등으로 갈라진다 |
++| dirty/writeback | PTE dirty bit, page cache 상태, writeback queue를 함께 본다 |
++| 동시성 | 여러 CPU와 thread가 같은 page 상태를 볼 수 있어 lock과 reference count가 필요하다 |
++
++그래도 핵심 질문은 PintOS와 같다.
++
++> 지금 이 virtual page의 최신 bytes는 RAM에 있는가, 아니면 다른 backing store에 있는가?
++
++PintOS는 이 질문을 `struct page`, `struct frame`, `struct anon_page`, page table bit로 작게 줄여서 보게 만든다.
++
++## PintOS에서는
++
++PintOS KAIST 스켈레톤은 anonymous page의 metadata 자리를 이미 만들어 두었다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`
++  - `struct page` 안에 `union { struct anon_page anon; ... }`이 있다.
++  - `struct page`는 `void *va`와 `struct frame *frame`을 가진다.
++  - `struct frame`은 `void *kva`와 `struct page *page`를 가진다.
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/anon.h`
++  - 현재 `struct anon_page {}`는 비어 있다.
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/anon.c`
++  - `static struct disk *swap_disk;`
++  - `vm_anon_init()`
++  - `anon_swap_in()`
++  - `anon_swap_out()`
++  - `anon_destroy()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++  - `vm_do_claim_page()`는 frame과 page를 연결한 뒤 `swap_in(page, frame->kva)`를 호출한다.
++  - `vm_evict_frame()`은 victim page의 `swap_out()`을 호출해야 하는 자리다.
++
++여기서 중요한 점은 `swap_in`과 `swap_out`이 page type별 함수 테이블로 분기된다는 것이다.
++
++```c
++#define swap_in(page, v) (page)->operations->swap_in ((page), v)
++#define swap_out(page) (page)->operations->swap_out (page)
++```
++
++따라서 frame eviction 코드는 "anonymous page는 disk slot, file-backed page는 file offset" 같은 세부 저장 방식을 깊게 알 필요가 없다. `page->operations->swap_out`이 page type별 책임을 맡는다.
++
++PintOS disk layer는 sector 단위 I/O를 제공한다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/devices/disk.h`
++  - `DISK_SECTOR_SIZE = 512`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/devices/disk.c`
++  - 주석상 `1:1 - swap`
++  - `disk_get(1, 1)`로 swap disk를 잡는 흐름을 만들 수 있다.
++  - `disk_read()`와 `disk_write()`는 한 번에 sector 하나를 읽고 쓴다.
++
++현재 저장소 코드는 아직 TODO 상태다. 그러므로 이 문서는 "이미 동작하는 구현"을 설명하는 것이 아니라, **스켈레톤에서 어떤 상태를 채워야 테스트가 의미 있게 통과하는지**를 설명한다.
++
++## QEMU에서는
++
++QEMU는 `struct anon_page`도, SPT도, swap slot bitmap도 모른다.
++
++QEMU가 보는 것은 guest가 다음 일을 했다는 사실뿐이다.
++
++```text
++guest PintOS가 ATA disk sector N에 512B write command를 냈다
++guest PintOS가 ATA disk sector N에서 512B read command를 냈다
++```
++
++관련 QEMU 근거는 다음이다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/hw/ide/core.c`
++  - `ide_sector_write()`
++  - `ide_sector_read()`
++  - `blk_aio_pwritev(s->blk, sector_num << BDRV_SECTOR_BITS, ...)`
++  - `blk_aio_preadv(s->blk, sector_num << BDRV_SECTOR_BITS, ...)`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/include/block/block-common.h`
++  - `BDRV_SECTOR_BITS = 9`
++  - `BDRV_SECTOR_SIZE = 1ULL << BDRV_SECTOR_BITS`
++
++이 말은 즉, QEMU는 "slot 3"을 처리하지 않는다. QEMU는 "sector 24부터 31까지"를 처리한다. slot 3이라는 의미는 PintOS가 metadata로 붙인 이름이다.
++
++## 차이점
++
++| 구분 | 무엇을 기억하나 | 이 문서에서 구분할 점 |
++|---|---|---|
++| Linux / Windows | resident state, backing store, swap/pagefile 위치, dirty/writeback 상태 | 실제 OS는 정책과 동시성이 훨씬 복잡하다 |
++| PintOS | `struct page`, `struct frame`, `struct anon_page`, SPT, PTE present bit | slot 번호와 resident 상태를 직접 설계해야 한다 |
++| QEMU | guest ATA sector I/O와 block backend byte offset | swap slot 의미를 모른다 |
++
++가장 흔한 혼동은 "swap slot 번호가 page table에 들어간다"는 생각이다.
++
++PintOS x86-64 page table의 present bit가 꺼진 PTE에 OS 전용 정보를 넣는 설계도 현실 OS에는 있을 수 있다. 하지만 이 PintOS 스켈레톤에서 초보자가 먼저 잡아야 할 모델은 SPT와 `struct page`가 합법적인 page와 backing metadata를 기억한다는 것이다.
++
++## 코드 증거
++
++### 1. `struct anon_page`는 비어 있는 구현 자리다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/anon.h`
++
++현재 구조:
++
++```c
++struct anon_page {
++};
++```
++
++이 빈 공간은 anonymous page 전용 상태를 넣으라는 신호다. swap slot 번호, slot 사용 여부, 필요하다면 pinning이나 lock과 연결되는 상태를 구현자가 선택해 넣는다.
++
++### 2. `struct page`는 타입별 metadata를 union으로 가진다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`
++
++핵심 구조:
++
++```c
++struct page {
++    const struct page_operations *operations;
++    void *va;
++    struct frame *frame;
++    union {
++        struct uninit_page uninit;
++        struct anon_page anon;
++        struct file_page file;
++    };
++};
++```
++
++따라서 anonymous page에서 `page->anon`은 "이 page가 anonymous일 때만 의미 있는 상태"를 담는 자리다.
++
++### 3. claim은 page type별 `swap_in()`으로 끝난다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++
++핵심 흐름:
++
++```c
++frame->page = page;
++page->frame = frame;
++return swap_in (page, frame->kva);
++```
++
++anonymous page가 swap에 있었다면 `anon_swap_in()`은 `page->anon.slot` 같은 정보를 보고 disk에서 읽어야 한다. 처음 claim되는 zero page라면 disk에서 읽지 않고 0으로 채우는 흐름이 될 수 있다.
++
++### 4. eviction은 page type별 `swap_out()`으로 내려가야 한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/anon.c`
++
++`vm_evict_frame()`은 TODO지만, 주석은 victim frame을 얻어 page를 swap out해야 한다는 방향을 말한다. anonymous page라면 `anon_swap_out()`이 frame의 4096B를 swap disk sector 8개에 쓰고 slot metadata를 남겨야 한다.
++
++### 5. disk sector는 512B다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/devices/disk.h`
++
++핵심 값:
++
++```c
++#define DISK_SECTOR_SIZE 512
++```
++
++page 하나가 4096B라면 swap slot 하나는 sector 8개다.
++
++## 숫자와 메모리
++
++### 1. slot 번호에서 sector 번호로
++
++```text
++PGSIZE           = 4096 = 0x1000
++DISK_SECTOR_SIZE = 512  = 0x200
++sectors_per_page = 4096 / 512 = 8
++slot_index       = 3
++base_sector      = slot_index * sectors_per_page
++                 = 3 * 8 = 24
++```
++
++slot 3은 sector 24부터 31까지다.
++
++```text
++sector 24 <- page bytes 0x000..0x1ff
++sector 25 <- page bytes 0x200..0x3ff
++sector 26 <- page bytes 0x400..0x5ff
++...
++sector 31 <- page bytes 0xe00..0xfff
++```
++
++### 2. VA 안 offset에서 swap sector 안 offset으로
++
++fault address가 `0x8049123`이라고 하자.
++
++```text
++VA                 = 0x8049123
++page base          = 0x8049000
++offset in page     = 0x123 = 291
++sector offset      = 0x123 / 0x200 = 0
++offset in sector   = 0x123 % 0x200 = 0x123
++slot 3 base sector = 24
++target sector      = 24 + 0 = 24
++```
++
++따라서 이 바이트는 swap out 뒤에 "slot 3의 sector 24, sector 내부 offset `0x123`"에 대응된다.
++
++### 3. QEMU block backend offset으로
++
++QEMU 쪽에서는 sector 번호가 byte offset으로 바뀐다.
++
++```text
++BDRV_SECTOR_BITS = 9
++sector 24 offset = 24 << 9
++                 = 24 * 512
++                 = 12288
++                 = 0x3000
++```
++
++이 offset은 host의 실제 물리 디스크 주소가 아니다. QEMU가 swap disk image로 연결한 block backend 안의 byte offset이다.
++
++## 직접 확인
++
++구현 뒤에는 PintOS GDB에서 다음 지점을 본다.
++
++```text
++break vm_evict_frame
++break anon_swap_out
++break anon_swap_in
++break disk_write
++break disk_read
++```
++
++`anon_swap_out()`에서 확인할 값:
++
++```text
++p/x page->va
++p/x page->frame->kva
++p page->anon.in_swap
++p page->anon.slot_index
++```
++
++예상 관찰:
++
++```text
++swap out 전:
++  page->frame != NULL
++  page->anon.in_swap == false
++
++swap out 후:
++  page->frame == NULL
++  page->anon.in_swap == true
++  page->anon.slot_index == 할당한 slot
++```
++
++`disk_write()`에서는 sector 번호가 맞는지 본다.
++
++```text
++p sec_no
++p/x sec_no
++```
++
++slot 3이면 첫 sector는 24여야 한다.
++
++```text
++slot_index = 3
++sec_no     = 24, 25, 26, 27, 28, 29, 30, 31
++```
++
++구현 뒤 회귀 테스트는 다음이 기준이다.
++
++```text
++cd /Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos
++make -C build check TESTS=tests/vm/swap-anon
++```
++
++현재 저장소의 VM 코드는 TODO가 남아 있으므로, 이 명령은 문서 작성 시점의 통과 검증이 아니라 구현 후 확인 절차다.
++
++## 정리
++
++- anonymous page는 원본 파일이 없으므로 frame에서 쫓겨날 때 swap backing이 필요하다.
++- swap out은 4096B를 sector 8개에 쓰는 일과, page metadata에 slot 번호를 남기는 일을 함께 해야 한다.
++- PintOS 스켈레톤에서는 `struct anon_page`가 이 metadata를 담을 자리다.
++- SPT는 fault address로 `struct page`를 찾게 해 주고, `page->anon`은 anonymous page 전용 backing 상태를 기억한다.
++- QEMU는 swap slot을 모르며, guest가 요청한 ATA sector read/write를 block backend byte offset으로 바꿀 뿐이다.
++
++## 다음 링크
++
++- [[supplemental-page-table-knowledge]]: fault address에서 page metadata를 찾는 장부
++- [[frame-eviction-trace]]: victim frame을 고르고 `swap_out()`으로 내려가는 앞 단계
++- [[swap-lab]]: anonymous page 한 장이 sector 8개로 나갔다 돌아오는 실험
++- [[swap-disk-ide-qemu-trace]]: slot 번호가 QEMU block backend offset으로 내려가는 흐름
++- [[disk-sector-qemu-block-backend-knowledge]]: sector 번호와 byte offset 계산만 따로 확인
