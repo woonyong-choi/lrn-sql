@@ -1,0 +1,772 @@
+diff --git a/notes/os/file-backed-page-metadata-knowledge.md b/notes/os/file-backed-page-metadata-knowledge.md
+index 1f76b20..52ad7be 100644
+--- a/notes/os/file-backed-page-metadata-knowledge.md
++++ b/notes/os/file-backed-page-metadata-knowledge.md
+@@ -15,48 +15,40 @@ tags:
+   - week:vm
+   - topic:mmap
+   - topic:page-table
++  - topic:page-fault
+   - topic:fd
+   - topic:gdb
+   - layer:memory
+   - layer:kernel
+   - layer:device
+-  - layer:emulator
+ related_to:
+   - "[[concept-to-code-map]]"
+   - "[[week-3-4-virtual-memory-map]]"
+   - "[[mmap-file-backed-page-knowledge]]"
+   - "[[mmap-dirty-writeback-qemu-trace]]"
+   - "[[supplemental-page-table-knowledge]]"
+-  - "[[page-fault-trace]]"
+   - "[[file-descriptor-knowledge]]"
+ ---
+-# file-backed page metadata에는 무엇을 저장해야 하나
++# file-backed page metadata는 왜 따로 필요할까
+ 
+ ## 작은 질문
+ 
+-PintOS VM 스켈레톤에는 이미 file-backed page 자리가 있다.
++`mmap()`은 파일을 메모리처럼 보이게 만든다.
+ 
+-```c
+-struct page {
+-    ...
+-    union {
+-        struct uninit_page uninit;
+-        struct anon_page anon;
+-        struct file_page file;
+-    };
+-};
+-```
++그런데 page fault가 난 순간 PintOS는 이런 질문에 답해야 한다.
+ 
+-그런데 현재 `struct file_page`는 비어 있다.
++```text
++fault VA = 0x10001388
+ 
+-```c
+-struct file_page {
+-};
++이 주소는 어느 파일에서 와야 할까?
++파일의 몇 번째 byte부터 읽어야 할까?
++4096B page 전체가 파일 내용일까, 뒤쪽은 0으로 채워야 할까?
++나중에 dirty이면 파일의 어느 offset에 몇 byte를 되돌려야 할까?
+ ```
+ 
+-그러면 질문은 이것이다.
++하드웨어 page table은 이 질문에 답하지 못한다. page table은 지금 VA가 어느 frame으로 번역되는지만 담기 때문이다.
+ 
+-> `mmap()`으로 만든 page가 첫 page fault 때 파일의 어느 바이트를 읽고, `munmap()` 때 어느 바이트를 다시 써야 하는지는 어디에 기억해야 할까?
++이 말은 즉, file-backed page에는 "현재 frame 주소"와 별개로 **원본 파일과의 관계**를 기억하는 metadata가 필요하다.
+ 
+ ## 목차
+ 
+@@ -76,254 +68,250 @@ struct file_page {
+ 
+ ## 꼬리 질문
+ 
+-이번 문서는 다음 질문을 한 줄로 이어서 답한다.
++이번 문서는 다음 질문을 순서대로 따라간다.
+ 
+-- 왜 page table만으로는 file-backed page를 복구할 수 없을까?
+-- 실제 OS는 file mapping의 원본 파일과 offset을 어디에 기억할까?
+-- PintOS의 `struct file_page`에는 최소 어떤 의미가 들어가야 할까?
+-- `file_reopen()`은 왜 fd close 이후에도 mapping을 살리는 데 필요할까?
+-- QEMU는 `struct file_page`를 알고 있을까?
+-- `addr=0x10000000`, `length=6000`, `offset=0x1000`이면 page별 metadata 값은 어떻게 계산될까?
+-- GDB로 어떤 필드를 보면 lazy load와 write-back 판단을 확인할 수 있을까?
++- 왜 `struct page`의 `va`와 `frame`만으로는 `mmap`을 구현할 수 없을까?
++- 실제 OS는 파일 mapping의 의미를 어디에 기억할까?
++- PintOS의 빈 `struct file_page`에는 어떤 정보가 들어가야 할까?
++- `file_reopen()`은 왜 `mmap-close` 같은 테스트에서 중요할까?
++- QEMU는 file-backed page metadata를 알고 있을까?
++- `addr=0x10000000`, `length=6000`, `offset=0x1000`이면 각 page는 어떤 파일 구간을 가리킬까?
++- GDB로 어디를 보면 metadata가 page-in/write-back에 쓰이는지 확인할 수 있을까?
+ 
+ ## 왜 필요한가
+ 
+-page table은 빠른 주소 번역 표다.
+-
+-```text
+-VA page 0x10001000 -> frame 0x... , writable, user, dirty
+-```
++`struct page`의 기본 필드는 "가상 page와 물리 frame의 현재 연결"을 설명한다.
+ 
+-하지만 page table은 이 질문에 답하지 못한다.
+-
+-```text
+-이 page의 원본 파일은 무엇인가?
+-파일의 몇 번째 offset부터 읽어야 하는가?
+-마지막 page에서 실제 파일 바이트는 몇 바이트인가?
+-나머지는 0으로 채워야 하는가?
+-fd를 close해도 mapping이 계속 살아야 하는가?
+-dirty이면 파일의 어느 offset으로 다시 써야 하는가?
++```c
++struct page {
++    const struct page_operations *operations;
++    void *va;
++    struct frame *frame;
++    ...
++};
+ ```
+ 
+-이 정보가 없으면 page fault를 처리할 수 없다.
++하지만 `mmap`이 필요로 하는 질문은 조금 다르다.
+ 
+-첫 접근 때 frame을 얻어도, 커널은 그 frame에 어떤 파일 바이트를 채워야 하는지 모른다. `munmap()`이나 eviction 때도 dirty frame을 어느 파일 offset으로 되돌려야 하는지 모른다.
++| 질문 | `struct page` 기본 필드만으로 답할 수 있나? | 필요한 정보 |
++|---|---|---|
++| 이 page는 어느 파일에서 읽나? | 아니오 | `struct file *file` |
++| 파일의 어느 offset부터 읽나? | 아니오 | `off_t ofs` |
++| 파일에서 실제로 읽을 byte 수는? | 아니오 | `size_t read_bytes` |
++| page 뒤쪽을 0으로 채울 byte 수는? | 아니오 | `size_t zero_bytes` |
++| write-back을 허용하나? | 기본 필드만으로 부족 | `writable` 또는 page 권한 metadata |
++| `munmap(addr)`가 어느 page들을 해제하나? | page 하나만으로 부족할 수 있음 | mapping 시작/길이 또는 범위 추적 |
+ 
+-이 말은 즉, file-backed page에는 **주소 번역 정보가 아니라 backing store 정보**가 필요하다.
+-
+-## 핵심 모델
++page fault 시점에는 아직 frame이 없을 수 있다. 그래도 커널은 이 page가 합법인지, 합법이면 어디서 내용을 가져와야 하는지 알아야 한다.
+ 
+-처음에는 `struct file_page`를 "한 VA page와 파일 구간을 잇는 영수증"으로 생각하면 된다.
++따라서 file-backed page metadata는 lazy loading의 약속이다.
+ 
+ ```text
+-user VA page
+-  -> file object
+-  -> file offset
+-  -> read bytes
+-  -> zero bytes
+-  -> writable
+-```
++mmap 시점:
++  "이 VA page는 이 file offset에서 read_bytes만큼 읽고, 나머지는 0으로 채워라"를 기록
+ 
+-의미는 다음과 같다.
++첫 접근 page fault:
++  기록을 보고 file_read_at(file, kva, read_bytes, ofs)
++  kva + read_bytes부터 zero_bytes만큼 memset(0)
+ 
+-| 의미 | 왜 필요한가 |
+-|---|---|
+-| `file` | page-in/write-back 대상 파일을 찾기 위해 필요 |
+-| `ofs` | 이 page가 파일의 어느 위치와 연결되는지 기억 |
+-| `read_bytes` | frame 앞쪽에 실제로 읽을 파일 바이트 수 |
+-| `zero_bytes` | frame 뒤쪽에 0으로 채울 padding 수 |
+-| `writable` | `pml4_set_page()`와 write protection 판단에 필요 |
++munmap / eviction:
++  dirty이면 file_write_at(file, kva, read_bytes, ofs)
++```
+ 
+-필드 이름은 구현마다 달라도 된다. 중요한 것은 이 다섯 의미가 page fault와 write-back 시점까지 살아 있어야 한다는 점이다.
++## 핵심 모델
+ 
+-예를 들어 구현 후보는 이런 모양일 수 있다.
++머릿속에는 page table과 file-backed metadata를 분리해서 넣으면 된다.
+ 
+-```c
+-struct file_page {
+-    struct file *file;
+-    off_t ofs;
+-    size_t read_bytes;
+-    size_t zero_bytes;
+-    bool writable;
+-};
+-```
++| 층 | 담는 정보 | 예시 |
++|---|---|---|
++| page table | 지금 VA가 어느 frame으로 번역되는가 | `0x10001000 -> frame 0x...`, writable bit |
++| supplemental page table | 이 VA page가 원래 합법인가 | key `0x10001000 -> struct page` |
++| file-backed metadata | 이 page의 원본 파일 구간은 어디인가 | file, offset `0x2000`, read `1904`, zero `2192` |
+ 
+-단, 파일 포인터의 소유권은 별도로 정해야 한다.
++`mmap` 구현에서 중요한 점은 page 단위로 정보가 달라진다는 것이다.
+ 
+-같은 reopened file을 여러 page가 함께 가리키게 하면 `file_close()`를 한 번만 해야 한다. 반대로 page마다 `file_reopen()`을 따로 하면 각 page가 자기 파일 객체를 닫을 수 있지만 열린 파일 객체가 많아진다.
++같은 파일 mapping 안에서도 첫 page와 마지막 page의 `read_bytes`, `zero_bytes`, `file offset`이 다를 수 있다.
+ 
+ ## 예시 상황
+ 
+-파일의 byte `0x1000`부터 `6000`바이트를 주소 `0x10000000`에 매핑한다고 하자.
++파일 `large.txt`의 offset `0x1000`부터 `6000`바이트를 매핑한다고 하자.
+ 
+ ```c
+ char *p = mmap((void *) 0x10000000, 6000, 1, fd, 0x1000);
+ ```
+ 
+-page size는 `4096 = 0x1000`이다.
+-
+-이 mapping은 두 개의 VA page로 나뉜다.
++page size가 `4096 = 0x1000`이면 두 page가 필요하다.
+ 
+ | VA page | file offset | read bytes | zero bytes | writable |
+ |---|---:|---:|---:|---|
+ | `0x10000000` | `0x1000` | `4096` | `0` | true |
+ | `0x10001000` | `0x2000` | `1904` | `2192` | true |
+ 
+-두 번째 page를 처음 읽으면 커널은 이렇게 해야 한다.
+-
+-```text
+-file_read_at(file, frame, 1904, 0x2000)
+-memset(frame + 1904, 0, 2192)
+-pml4_set_page(pml4, 0x10001000, frame, true)
+-```
+-
+-나중에 두 번째 page가 dirty이면 이렇게 되돌려야 한다.
++`p[5000]` 접근을 계산하면 이렇다.
+ 
+ ```text
+-file_write_at(file, frame, 1904, 0x2000)
++mapping base      = 0x10000000
++access index      = 5000 = 0x1388
++access VA         = 0x10001388
++VA page base      = 0x10001000
++offset in page    = 0x388
++page file offset  = 0x2000
++actual file byte  = 0x2000 + 0x388 = 0x2388
+ ```
+ 
+-여기서 `2192`바이트의 zero padding은 page 안에서는 0이어야 하지만, 원본 파일에 대응되는 바이트가 아니다.
++PintOS가 이 계산을 매번 다시 추측하면 위험하다. `do_mmap()`이 page를 만들 때 이미 page별 metadata로 저장해 두는 편이 정확하다.
+ 
+ ## Linux / Windows에서는
+ 
+-Linux에서 `mmap()`은 프로세스 주소 공간에 VMA를 만든다. VMA는 주소 범위, 권한, backing file, file offset 같은 의미를 들고 있고, 실제 page fault 처리에서 file page와 page cache를 연결한다.
++Linux에서 파일 mapping의 의미는 프로세스 주소 공간의 VMA와 page cache, file object 쪽 구조로 이어진다.
++
++- VMA는 주소 범위, 권한, file, offset, shared/private 같은 의미를 담는다.
++- page fault가 나면 커널 VM은 VMA를 보고 file-backed page를 page cache와 연결한다.
++- dirty file page는 `msync()`, `munmap()`, memory pressure, background writeback 같은 여러 계기로 파일에 기록될 수 있다.
+ 
+-Windows도 file mapping object와 mapped view를 통해 비슷한 문제를 푼다. user API 이름은 `CreateFileMapping`, `MapViewOfFile`이고, 커널은 section object와 view, modified page 처리로 이어지는 더 큰 구조를 사용한다.
++Windows도 file mapping object와 mapped view, section object 계열 구조로 같은 문제를 푼다.
+ 
+-현실 OS는 PintOS보다 훨씬 복잡하다.
++현실 OS는 PintOS보다 훨씬 복잡하다. 공유 mapping, private mapping, copy-on-write, file truncation, page cache 일관성, writeback error, thread별 주소 공간 동기화까지 고려한다.
+ 
+-- 같은 파일 page를 여러 프로세스가 공유할 수 있다.
+-- `MAP_PRIVATE` 계열에서는 copy-on-write가 들어간다.
+-- page cache, truncate, 권한, write-back error, memory pressure를 함께 다룬다.
+-- metadata는 단순히 page 구조체 하나에만 들어가지 않는다.
++그래도 핵심 질문은 같다.
+ 
+-처음 배울 때는 "실제 OS는 mapping 범위 단위 metadata와 page cache를 함께 사용하고, PintOS는 이를 page별 metadata로 축소해서 직접 구현한다"고 잡으면 된다.
++> 이 VA range는 어느 backing object의 어느 offset과 연결되어 있는가?
+ 
+ ## PintOS에서는
+ 
+-현재 저장소 상태는 VM skeleton이다.
++이 저장소의 PintOS VM file-backed 구현은 아직 스켈레톤이다.
+ 
+-`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`에는 `struct page` union 안에 `struct file_page file` 자리가 있다.
++파일:
+ 
+-`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/file.h`의 `struct file_page`는 비어 있다.
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/file.h`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/file.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/uninit.c`
+ 
+-`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/file.c`에는 file-backed page용 함수 이름만 놓여 있다.
++현재 `struct file_page`는 비어 있다.
+ 
+ ```c
+-file_backed_initializer()
+-file_backed_swap_in()
+-file_backed_swap_out()
+-file_backed_destroy()
+-do_mmap()
+-do_munmap()
++struct file_page {
++};
+ ```
+ 
+-따라서 이 문서는 "이미 구현된 구조"를 설명하는 것이 아니라, 스켈레톤이 요구하는 metadata 판단 기준을 정리한다.
++이 빈 구조체는 "필요 없다"가 아니라, 구현자가 file-backed page에 필요한 정보를 넣으라는 자리다.
+ 
+-PintOS에서 자연스러운 흐름은 다음이다.
++보통 최소 의미는 다음처럼 잡는다.
+ 
+-```text
+-do_mmap(addr, length, writable, file, offset)
+-  -> addr/length/offset/page overlap 검사
+-  -> mapping이 fd close와 분리되도록 file_reopen(file)
+-  -> page마다 file offset/read_bytes/zero_bytes 계산
+-  -> VM_FILE uninit page를 SPT에 삽입
+-  -> 각 page의 aux 또는 file_page에 metadata 연결
+-
+-첫 접근 page fault
+-  -> vm_try_handle_fault()
+-  -> spt_find_page()
+-  -> vm_do_claim_page()
+-  -> uninit_initialize()
+-  -> file_backed_initializer()
+-  -> lazy init callback 또는 file_backed_swap_in()
+-  -> file_read_at(file, kva, read_bytes, ofs)
+-  -> zero_bytes만큼 memset()
+-
+-munmap / eviction / process exit
+-  -> dirty 여부 확인
+-  -> dirty이면 file_write_at(file, kva, read_bytes, ofs)
+-  -> page table/SPT/frame/file reference 정리
++```c
++struct file_page {
++    struct file *file;      /* reopened file */
++    off_t ofs;              /* file offset for this page */
++    size_t read_bytes;      /* bytes copied from file */
++    size_t zero_bytes;      /* bytes zero-filled after file bytes */
++    bool writable;          /* user write permission, if not stored elsewhere */
++};
+ ```
+ 
+-여기서 `file_reopen()`이 중요하다.
++여기에 `munmap(addr)`가 mapping 전체를 찾기 위한 정보가 더 필요할 수 있다.
+ 
+-`mmap-close` 테스트는 사용자가 `mmap()` 직후 원래 fd를 `close()`해도 mapping으로 파일을 계속 읽을 수 있어야 한다. 따라서 mapping은 fd table entry가 들고 있던 `struct file *`에 그대로 매달리면 안 된다.
++예를 들어 다음 중 하나를 설계할 수 있다.
+ 
+-`mmap-remove` 테스트도 close/remove 이후 mapping으로 기존 파일 내용을 읽는 상황을 만든다. 이 동작을 이해하려면 fd 번호, 열린 file object, inode reference, mapping 생명주기를 분리해서 봐야 한다.
++| 설계 | 의미 |
++|---|---|
++| mapping list를 별도로 둠 | 시작 주소, 길이, file reference를 mapping 단위로 추적 |
++| page마다 mapping id를 둠 | `munmap(start)`가 같은 mapping id의 page를 순회 |
++| SPT에서 연속 page를 검사 | 시작 주소부터 등록된 file page를 순회하되 경계 판단이 필요 |
+ 
+-## QEMU에서는
++중요한 것은 "page 하나를 page-in/write-back하는 정보"와 "`munmap()`이 mapping 범위를 아는 정보"를 섞지 않는 것이다.
+ 
+-QEMU는 `struct file_page`를 모른다.
++### 왜 `file_reopen()`이 필요한가
+ 
+-QEMU가 보는 것은 다음 두 효과뿐이다.
++PintOS의 `mmap` 테스트에는 mapping 후 fd를 닫아도 mapping이 살아 있어야 하는 경우가 있다.
+ 
+-첫째, guest CPU가 page fault와 page table update를 겪는다. QEMU x86 코드에는 dirty bit 자체가 있다.
++대표 테스트:
+ 
+-- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/cpu.h`
+-  - `PG_DIRTY_BIT = 6`
+-  - `PG_DIRTY_MASK`
+-- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/tcg/system/excp_helper.c`
+-  - `access_type == MMU_DATA_STORE`이면 dirty bit set 후보에 `PG_DIRTY_MASK`를 포함한다.
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-close.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-remove.c`
+ 
+-둘째, PintOS가 파일 시스템 write-back을 수행하면 IDE sector write와 block backend write로 내려간다.
++fd table의 `struct file *`를 그대로 들고 있으면 사용자가 `close(fd)` 했을 때 mapping의 backing file까지 사라질 수 있다.
+ 
+-- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/hw/ide/core.c`
+-  - `ide_sector_write()`
+-  - `blk_aio_pwritev(s->blk, sector_num << BDRV_SECTOR_BITS, ...)`
+-- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/include/block/block-common.h`
+-  - `BDRV_SECTOR_BITS = 9`
+-  - `BDRV_SECTOR_SIZE = 512`
++그래서 `do_mmap()`은 보통 `file_reopen(file)`으로 mapping 전용 file object를 만든다.
+ 
+-이 말은 즉, QEMU는 "이 page가 mmap file-backed page다"라는 뜻을 처리하지 않는다. 그 의미는 PintOS 커널의 `struct page`, `struct file_page`, SPT, 파일 시스템 코드가 만든다.
++파일:
+ 
+-## 차이점
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/filesys/file.c`
+ 
+-| 항목 | Linux / Windows | PintOS | QEMU |
+-|---|---|---|---|
+-| file mapping metadata | VMA/section/view/page cache 등 | `struct page`, `struct file_page`, SPT에 직접 설계 | 모름 |
+-| 원본 파일 생명주기 | 커널 객체 reference와 파일 시스템 계층이 관리 | `file_reopen()` 또는 별도 mapping object로 관리해야 함 | host block image만 봄 |
+-| lazy load | fault handler가 page cache/file에서 채움 | `VM_FILE` uninit page와 `file_read_at()` 구현 | #PF와 guest memory access 재현 |
+-| write-back | dirty file page writeback 정책 | dirty이면 `file_write_at(file, kva, read_bytes, ofs)` | sector write만 수행 |
+-| 마지막 page | 파일 크기, truncate, page cache와 함께 처리 | `read_bytes`와 `zero_bytes`를 직접 맞춰야 함 | 파일 길이 의미를 모름 |
++```c
++struct file *
++file_reopen (struct file *file) {
++    return file_open (inode_reopen (file->inode));
++}
++```
+ 
+-## 코드 증거
++이 말은 즉, fd close와 mapping lifetime을 분리한다는 뜻이다.
+ 
+-### 1. `struct page`에는 type별 metadata 자리가 있다
++## QEMU에서는
++
++QEMU는 `struct file_page`를 모른다.
++
++QEMU가 보는 것은 다음뿐이다.
++
++- guest CPU가 page fault를 일으키는가
++- PintOS가 guest page table에 PTE를 설치하는가
++- 유저 store가 guest PTE dirty bit를 세우는가
++- PintOS 파일 시스템이 IDE disk sector를 읽거나 쓰는가
++
++QEMU의 x86 TCG page walk는 쓰기 접근이면 dirty bit에 해당하는 값을 세우는 경로를 갖는다.
+ 
+ 파일:
+ 
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/tcg/system/excp_helper.c`
+ 
+-핵심:
++핵심 흐름:
+ 
+ ```c
+-union {
+-    struct uninit_page uninit;
+-    struct anon_page anon;
+-    struct file_page file;
+-};
++uint32_t set = PG_ACCESSED_MASK;
++if (access_type == MMU_DATA_STORE) {
++    set |= PG_DIRTY_MASK;
++}
+ ```
+ 
+-이 union은 "이 page가 어떤 종류인가"에 따라 다른 metadata를 담게 하려는 자리다.
++하지만 이것은 하드웨어 dirty bit 동작을 흉내 내는 것이다. "이 dirty page를 어느 파일 offset에 써야 하는가"는 PintOS의 `struct file_page`와 `file_backed_swap_out()`이 결정한다.
++
++## 차이점
++
++| 항목 | Linux / Windows | PintOS | QEMU |
++|---|---|---|---|
++| mapping metadata | VMA, section, page cache 등 복합 구조 | `struct page`, `struct file_page`, SPT를 직접 설계 | 없음 |
++| file lifetime | kernel object/reference count로 관리 | `file_reopen()` 등으로 fd close와 분리해야 함 | guest file을 모름 |
++| page-in | VM/page cache fault handler | `file_backed_swap_in()` + `file_read_at()` | guest memory access와 #PF 재현 |
++| dirty write-back | page cache/writeback 정책 | `pml4_is_dirty()` + `file_write_at()` | dirty bit/IDE write의 하드웨어 효과 |
++| 단순화 | 공유/private/COW 등 복잡 | Project 3 테스트 범위 중심 | OS 정책 없음 |
++
++## 코드 증거
+ 
+-### 2. 현재 `struct file_page`는 비어 있다
++### 1. `struct page`는 타입별 데이터를 union으로 품는다
+ 
+ 파일:
+ 
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/file.h`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`
+ 
+-핵심:
++핵심 구조:
+ 
+ ```c
+-struct file_page {
++struct page {
++    const struct page_operations *operations;
++    void *va;
++    struct frame *frame;
++
++    union {
++        struct uninit_page uninit;
++        struct anon_page anon;
++        struct file_page file;
++    };
+ };
+ ```
+ 
+-비어 있다는 것은 "file-backed page에 metadata가 필요 없다"는 뜻이 아니다. 과제 구현자가 이 자리에 필요한 정보를 설계하라는 뜻에 가깝다.
++file-backed page 정보는 `page->file`에 들어간다.
+ 
+-### 3. `file_backed_swap_in/out`은 `page->file`을 읽을 준비가 되어 있다
++### 2. file-backed 연산 테이블은 page-in/write-back 자리를 정한다
+ 
+ 파일:
+ 
+@@ -332,24 +320,24 @@ struct file_page {
+ 핵심:
+ 
+ ```c
+-static bool
+-file_backed_swap_in (struct page *page, void *kva) {
+-    struct file_page *file_page UNUSED = &page->file;
+-}
+-
+-static bool
+-file_backed_swap_out (struct page *page) {
+-    struct file_page *file_page UNUSED = &page->file;
+-}
++static const struct page_operations file_ops = {
++    .swap_in = file_backed_swap_in,
++    .swap_out = file_backed_swap_out,
++    .destroy = file_backed_destroy,
++    .type = VM_FILE,
++};
+ ```
+ 
+-여기서 `file_page`가 비어 있으면 `file_read_at()`에 넘길 file, size, offset을 알 수 없다.
++`file_backed_swap_in()`은 metadata를 보고 파일에서 frame으로 읽어야 한다.
++
++`file_backed_swap_out()`은 dirty이면 metadata를 보고 frame에서 파일로 써야 한다.
+ 
+-### 4. lazy page는 `aux`를 첫 fault까지 들고 갈 수 있다
++### 3. lazy page는 aux를 들고 첫 fault까지 기다린다
+ 
+ 파일:
+ 
+ - `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/uninit.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/uninit.h`
+ 
+ 핵심:
+ 
+@@ -362,34 +350,16 @@ file_backed_swap_out (struct page *page) {
+ }
+ ```
+ 
+-그리고 첫 fault에서 다음 순서로 호출된다.
++그리고 첫 fault 때:
+ 
+ ```c
+ return uninit->page_initializer (page, uninit->type, kva) &&
+     (init ? init (page, aux) : true);
+ ```
+ 
+-이 구조 때문에 `do_mmap()`은 page별 metadata를 `aux`로 넘겨 첫 fault 때 `struct file_page`에 옮기거나, page 생성 직후 `page->file`에 직접 채우는 식으로 설계할 수 있다.
++따라서 `do_mmap()`은 page별 file offset, read bytes, zero bytes를 담은 `aux`를 만들고, 첫 fault 때 그 정보를 `page->file`로 옮기거나 바로 frame을 채우는 설계를 해야 한다.
+ 
+-### 5. VM용 `load_segment()`도 같은 계산을 요구한다
+-
+-파일:
+-
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/process.c`
+-
+-핵심:
+-
+-```c
+-size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
+-size_t page_zero_bytes = PGSIZE - page_read_bytes;
+-void *aux = NULL;
+-```
+-
+-현재는 `aux = NULL`인 TODO 상태다. 이 코드도 결국 "이 page를 파일에서 몇 바이트 읽고 몇 바이트 0으로 채울 것인가"를 page fault 시점까지 전달해야 한다.
+-
+-실행 파일 segment와 `mmap` file-backed page는 용도가 다르지만, 둘 다 lazy loading에서는 file, offset, read bytes, zero bytes를 잃으면 안 된다는 점이 같다.
+-
+-### 6. offset 기반 파일 I/O 함수가 이미 있다
++### 4. offset 기반 I/O는 file position을 움직이지 않는다
+ 
+ 파일:
+ 
+@@ -398,89 +368,96 @@ void *aux = NULL;
+ 핵심:
+ 
+ ```c
+-file_read_at(file, buffer, size, file_ofs)
+-file_write_at(file, buffer, size, file_ofs)
++off_t
++file_read_at (struct file *file, void *buffer, off_t size, off_t file_ofs) {
++    return inode_read_at (file->inode, buffer, size, file_ofs);
++}
++
++off_t
++file_write_at (struct file *file, const void *buffer, off_t size,
++               off_t file_ofs) {
++    return inode_write_at (file->inode, buffer, size, file_ofs);
++}
+ ```
+ 
+-이 함수들은 파일의 현재 위치를 바꾸지 않는다. 그래서 page별 offset이 정해진 `mmap` page-in/write-back에는 `file_read()`보다 `file_read_at()`이 맞다.
++`mmap` page-in/write-back은 page마다 file offset이 정해져 있으므로 `file_read()`보다 `file_read_at()`이 맞다.
+ 
+-### 7. 테스트가 metadata 필요성을 직접 드러낸다
++### 5. 테스트가 metadata 필요성을 드러낸다
+ 
+ 파일:
+ 
+ - `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/lazy-file.c`
+ - `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-read.c`
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-off.c`
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-close.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-write.c`
+ - `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-clean.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-off.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/mmap-bad-off.c`
+ 
+-테스트 요구사항을 metadata로 바꾸면 다음과 같다.
++테스트 요구를 metadata로 번역하면 다음과 같다.
+ 
+-| 테스트 | 필요한 metadata |
++| 테스트 | 필요한 metadata 판단 |
+ |---|---|
+-| `lazy-file` | 아직 접근하지 않은 page는 frame이 없어야 함 |
+-| `mmap-read` | EOF 뒤 zero-fill 크기를 알아야 함 |
+-| `mmap-off` | mapping 시작 offset `0x1000`을 기억해야 함 |
+-| `mmap-close` | 원래 fd가 닫혀도 mapping file reference가 살아야 함 |
+-| `mmap-clean` | clean page는 write-back하지 않아야 함 |
++| `lazy-file` | `mmap()` 직후에는 frame이 없어야 하고, 첫 접근 page만 로드되어야 함 |
++| `mmap-read` | 파일 끝 뒤 page 나머지는 0으로 채워야 함 |
++| `mmap-write` | writable mapping dirty page를 `munmap()` 때 파일에 반영해야 함 |
++| `mmap-clean` | clean page를 write-back해 다른 파일 변경을 덮어쓰면 안 됨 |
++| `mmap-off` | page-aligned nonzero offset이 정확한 파일 page로 연결되어야 함 |
++| `mmap-bad-off` | page-aligned가 아닌 offset은 실패해야 함 |
+ 
+ ## 숫자와 메모리
+ 
+-입력값을 다시 보자.
++다음 mapping을 page별 metadata로 쪼개 보자.
++
++```text
++addr   = 0x10000000
++length = 6000 = 0x1770
++offset = 0x1000
++PGSIZE = 4096 = 0x1000
++```
++
++첫 page:
+ 
+ ```text
+-addr    = 0x10000000
+-length  = 6000 = 0x1770
+-offset  = 0x1000
+-PGSIZE  = 4096 = 0x1000
++va          = 0x10000000
++file offset = 0x1000
++read bytes  = min(6000, 4096) = 4096
++zero bytes  = 0
+ ```
+ 
+-page별 metadata는 이렇게 계산된다.
++두 번째 page:
+ 
+ ```text
+-page 0:
+-  va         = 0x10000000
+-  ofs        = 0x1000
+-  read_bytes = min(6000, 4096) = 4096
+-  zero_bytes = 0
+-
+-page 1:
+-  va         = 0x10001000
+-  ofs        = 0x1000 + 0x1000 = 0x2000
+-  read_bytes = 6000 - 4096 = 1904 = 0x770
+-  zero_bytes = 4096 - 1904 = 2192 = 0x890
++remaining length = 6000 - 4096 = 1904 = 0x770
++va               = 0x10001000
++file offset      = 0x1000 + 0x1000 = 0x2000
++read bytes       = 1904
++zero bytes       = 4096 - 1904 = 2192 = 0x890
+ ```
+ 
+-두 번째 page를 frame에 채우면 메모리 모양은 이렇다.
++두 번째 frame의 바이트 의미:
+ 
+ ```text
+-frame byte 0x000..0x76f
+-  -> file offset 0x2000..0x276f
++frame offset 0x000..0x76f:
++  file offset 0x2000..0x276f
+ 
+-frame byte 0x770..0xfff
+-  -> 00 00 00 ... 00
++frame offset 0x770..0xfff:
++  zero-fill padding
+ ```
+ 
+-`p[5000]`은 다음 위치다.
++dirty write-back 때는 `read_bytes`만 파일에 써야 한다.
+ 
+ ```text
+-offset in mapping = 5000 = 0x1388
+-VA                = 0x10000000 + 0x1388 = 0x10001388
+-page base         = 0x10001000
+-offset in page    = 0x388
+-file offset       = 0x2000 + 0x388 = 0x2388
++file_write_at(file, frame->kva, 1904, 0x2000)
+ ```
+ 
+-이 계산이 맞으려면 `0x10001000` page의 metadata에 `ofs = 0x2000`이 남아 있어야 한다.
++`zero_bytes`까지 쓰면 파일 길이를 넘어서는 padding을 파일 내용처럼 다루게 된다.
+ 
+ ## 직접 확인
+ 
+-구현 중 GDB에서 먼저 잡을 위치는 다음이다.
++구현 중 GDB로 볼 지점은 다음이다.
+ 
+ ```gdb
+ break do_mmap
+-break vm_alloc_page_with_initializer
+-break uninit_initialize
+ break file_backed_initializer
+ break file_backed_swap_in
+ break file_backed_swap_out
+@@ -498,61 +475,51 @@ p/x offset
+ p writable
+ ```
+ 
+-page를 만들 때 확인할 값:
+-
+-```gdb
+-p/x upage
+-p/x ofs
+-p read_bytes
+-p zero_bytes
+-p writable
+-```
+-
+-첫 fault 이후 확인할 값:
++page를 SPT에 넣은 뒤 확인할 값:
+ 
+ ```gdb
+ p/x page->va
+-p page_get_type(page)
+ p page->file.file
+ p/x page->file.ofs
+ p page->file.read_bytes
+ p page->file.zero_bytes
+-x/32xb page->frame->kva
+ ```
+ 
+-실제 필드 이름은 구현에 맞춰 바꿔 읽으면 된다.
+-
+-dirty write-back을 확인할 때는 다음 기준을 본다.
++첫 접근 후 page-in을 확인할 때:
+ 
+ ```gdb
++x/32xb page->frame->kva
+ p pml4_is_dirty(thread_current()->pml4, page->va)
+ ```
+ 
+-그리고 `mmap-close`, `mmap-read`, `mmap-off`, `mmap-clean`을 최소 회귀 후보로 둔다.
++테스트 후보:
+ 
+ ```text
+ cd /Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos
+-make -C build check TESTS=tests/vm/mmap-close
++make -C build check TESTS=tests/vm/lazy-file
+ make -C build check TESTS=tests/vm/mmap-read
+-make -C build check TESTS=tests/vm/mmap-off
++make -C build check TESTS=tests/vm/mmap-write
+ make -C build check TESTS=tests/vm/mmap-clean
++make -C build check TESTS=tests/vm/mmap-off
++make -C build check TESTS=tests/vm/mmap-bad-off
+ ```
+ 
+-현재 저장소의 VM 구현은 아직 TODO 상태이므로, 위 명령은 지금 통과 확인이 아니라 구현 후 확인 지점이다.
++현재 저장소의 VM 구현은 아직 TODO가 많으므로, 위 명령은 지금 통과 확인용이 아니라 구현 후 회귀 확인용이다.
+ 
+ ## 정리
+ 
+-- file-backed page metadata는 "이 VA page가 어떤 파일 구간을 대표하는가"를 기억하는 정보다.
+-- page table은 frame 번역과 dirty bit를 알려 주지만, 원본 파일과 offset은 알려 주지 않는다.
+-- PintOS의 빈 `struct file_page`에는 최소 `file`, `ofs`, `read_bytes`, `zero_bytes`, `writable` 의미가 필요하다.
+-- fd를 닫아도 mapping이 살아야 하므로 `file_reopen()`이나 별도 mapping object로 생명주기를 분리해야 한다.
+-- 마지막 page는 `read_bytes`만 파일에 대응되고, `zero_bytes`는 page 내부 padding이다.
+-- QEMU는 이 metadata를 모르고, guest page fault/dirty bit/IDE sector write 같은 하드웨어 효과만 재현한다.
++- file-backed page metadata는 "이 VA page가 어느 파일의 어느 byte 구간에서 왔는가"를 기억한다.
++- page table은 현재 번역만 담고, file offset/read bytes/zero bytes 같은 의미는 담지 못한다.
++- PintOS에서는 빈 `struct file_page`와 `file_backed_swap_in/out()`이 이 metadata를 구현해야 하는 자리다.
++- `file_reopen()`은 fd close와 mapping lifetime을 분리하기 위해 필요하다.
++- dirty write-back은 page 전체 4096B가 아니라 파일에서 온 `read_bytes`만 대상으로 삼아야 한다.
++- QEMU는 이 metadata를 모르고, guest page fault/dirty bit/disk sector I/O의 하드웨어 효과만 재현한다.
+ 
+ ## 다음 링크
+ 
+-- [[mmap-file-backed-page-knowledge]]: `mmap` 전체 흐름에서 file-backed page가 어디에 들어가는지
+-- [[mmap-dirty-writeback-qemu-trace]]: dirty file-backed page가 `file_write_at()`과 QEMU block write로 내려가는 흐름
+-- [[supplemental-page-table-knowledge]]: page fault 때 backing metadata를 다시 찾는 의미 장부
+-- [[page-fault-trace]]: not-present fault가 lazy load로 살아나는 입구
+-- [[file-descriptor-knowledge]]: fd 번호와 열린 file object 생명주기를 구분하는 법
++- [[mmap-file-backed-page-knowledge]]: `mmap()` 전체 흐름과 lazy file-backed page 모델
++- [[mmap-dirty-writeback-qemu-trace]]: dirty page가 `file_write_at()`과 QEMU block write로 내려가는 흐름
++- [[supplemental-page-table-knowledge]]: page fault 때 file-backed 약속을 다시 찾는 커널용 표
++- [[page-fault-trace]]: 첫 접근이 page-in으로 이어지는 관문
++- [[file-descriptor-knowledge]]: fd table의 `struct file`과 mapping 전용 file reference 구분
++- [[disk-sector-qemu-block-backend-knowledge]]: file write가 disk sector와 QEMU block offset으로 내려가는 기준
