@@ -1,0 +1,527 @@
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index c6258d0..aa6bc9b 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -81,6 +81,7 @@ related_to:
+   - [[guest-physical-memory-qemu-knowledge]]
+   - [[page-table-entry-bits-knowledge]]
+   - [[accessed-dirty-eviction-knowledge]]
++  - [[clock-frame-table-eviction-knowledge]]
+   - [[clock-hand-victim-selection-lab]]
+   - [[page-fault-error-code-knowledge]]
+   - [[vm-try-handle-fault-decision-trace]]
+@@ -422,6 +423,7 @@ related_to:
+     - page fault handler가 성공하면 왜 fault를 낸 같은 명령어를 다시 실행하는가?
+     - supplemental page table은 왜 page table만으로 부족해서 필요한가?
+     - frame이 부족하면 무엇을 내보내는가?
++    - `vm_get_victim()`은 어떤 frame table과 clock hand를 순회해야 하는가?
+     - anonymous page는 swap disk의 어느 slot으로 나갔다 돌아오는가?
+     - swap out 뒤 anonymous page는 slot 번호를 어디에 기억해야 하는가?
+     - mmap은 file I/O와 memory access를 어떻게 연결하는가?
+@@ -435,6 +437,7 @@ related_to:
+     - [[guest-physical-memory-qemu-knowledge]]: guest physical address가 QEMU host process의 RAMBlock으로 이어지는 층
+     - [[page-table-entry-bits-knowledge]]: frame 주소와 present/writable/user/accessed/dirty bit가 PTE 한 칸에 같이 들어가는 방식
+     - [[accessed-dirty-eviction-knowledge]]: accessed bit로 victim 후보를 미루고 dirty bit로 swap/file write-back 필요성을 판단하는 법
++    - [[clock-frame-table-eviction-knowledge]]: frame table과 clock hand로 `vm_get_victim()`의 순회 상태를 설계하는 법
+     - [[page-fault-error-code-knowledge]]: `PF_P/PF_W/PF_U`가 `vm_try_handle_fault()` 판단표로 바뀌는 과정
+     - [[vm-try-handle-fault-decision-trace]]: #PF 정보를 SPT lookup, stack growth, protection fault, frame claim 분기로 바꾸는 흐름
+     - [[page-fault-instruction-retry-knowledge]]: `CR2`와 `f->rip`를 구분하고 `iretq`가 같은 명령어로 돌아가는 이유
+@@ -736,9 +739,13 @@ related_to:
+       - `pml4_clear_page`
+       - `pml4_is_accessed`
+       - `pml4_is_dirty`
++    - `pintos/include/lib/kernel/list.h`
++      - `struct list`
++      - `struct list_elem`
+   - 증명하는 것
+     - frame은 한정된 4KB 자리이고, page는 그 자리를 빌려 쓰는 의미 단위다.
+     - 현재 PintOS VM 코드는 eviction 정책을 `TODO`로 남겨 둔 스켈레톤이다.
++    - `vm_get_victim()`이 순회하려면 사용 중인 frame metadata를 frame table로 모아야 한다.
+     - victim page를 내보내면 old PTE를 not-present로 만들고 새 page mapping을 설치해야 한다.
+   - 연결 문서
+     - [[accessed-dirty-eviction-knowledge]]
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index ff914da..3b4ff1a 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -37,6 +37,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[guest-physical-memory-qemu-knowledge]]
+ - [[page-table-entry-bits-knowledge]]
+ - [[accessed-dirty-eviction-knowledge]]
++- [[clock-frame-table-eviction-knowledge]]
+ - [[page-fault-error-code-knowledge]]
+ - [[vm-try-handle-fault-decision-trace]]
+ - [[page-fault-instruction-retry-knowledge]]
+@@ -56,6 +57,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[guest-physical-memory-qemu-knowledge]]: PintOS guest physical address와 QEMU `RAMBlock.host` 기반 host virtual pointer를 구분하는 법
+ - [[page-table-entry-bits-knowledge]]: PTE 한 칸이 frame 주소와 present/writable/user/accessed/dirty bit를 함께 담는 방식
+ - [[accessed-dirty-eviction-knowledge]]: accessed bit와 dirty bit를 victim 선택, swap, file write-back 판단으로 연결하는 법
++- [[clock-frame-table-eviction-knowledge]]: frame table과 clock hand를 `vm_get_victim()` 설계로 연결하는 법
+ - [[page-fault-error-code-knowledge]]: `CR2`와 `PF_P/PF_W/PF_U`로 not-present, write, user fault를 분류하는 법
+ - [[vm-try-handle-fault-decision-trace]]: page fault 정보를 SPT lookup, stack growth, protection fault, frame claim 분기로 바꾸는 법
+ - [[page-fault-instruction-retry-knowledge]]: fault handler가 page table을 고친 뒤 `iretq`로 같은 명령어를 다시 실행하는 이유
+diff --git a/notes/os/accessed-dirty-eviction-knowledge.md b/notes/os/accessed-dirty-eviction-knowledge.md
+index 9a16312..cf66010 100644
+--- a/notes/os/accessed-dirty-eviction-knowledge.md
++++ b/notes/os/accessed-dirty-eviction-knowledge.md
+@@ -392,6 +392,7 @@ QEMU 쪽에서 더 내려가 보고 싶다면 `target/i386/tcg/system/excp_helpe
+ 
+ - [[page-table-entry-bits-knowledge]]: PTE 한 칸에 frame 주소와 flag가 같이 들어가는 기본 구조
+ - [[frame-eviction-trace]]: victim page를 고르고 frame을 재사용하는 전체 흐름
++- [[clock-frame-table-eviction-knowledge]]: accessed bit를 clock hand 순회 정책으로 연결하는 설계
+ - [[clock-hand-victim-selection-lab]]: accessed bit clear와 clock hand 이동을 frame table 설계로 연결
+ - [[mmap-dirty-writeback-qemu-trace]]: dirty file-backed page가 파일과 QEMU block write로 내려가는 흐름
+ - [[swap-lab]]: anonymous page가 swap slot으로 나갔다 돌아오는 실험
+diff --git a/notes/os/clock-frame-table-eviction-knowledge.md b/notes/os/clock-frame-table-eviction-knowledge.md
+new file mode 100644
+index 0000000..9e35a13
+--- /dev/null
++++ b/notes/os/clock-frame-table-eviction-knowledge.md
+@@ -0,0 +1,435 @@
++---
++type: Knowledge
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - layer:memory
++  - layer:kernel
++  - layer:emulator
++  - topic:frame
++  - topic:page-table
++  - topic:swap
++  - topic:gdb
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[frame-eviction-trace]]"
++  - "[[accessed-dirty-eviction-knowledge]]"
++  - "[[page-table-entry-bits-knowledge]]"
++---
++# Clock Hand와 Frame Table로 victim 고르기
++
++## 작은 질문
++
++[[accessed-dirty-eviction-knowledge]]에서 accessed bit를 보고 "최근에 쓴 page는 한 번 더 기회를 준다"고 했다.
++
++그러면 다음 질문이 생긴다.
++
++> 그 "다음 page"는 어디에 있고, `vm_get_victim()`은 다음번에 어디서 이어서 봐야 할까?
++
++이 질문에 답하려면 accessed bit 하나만으로는 부족하다. 현재 RAM에 올라와 있는 frame 후보 목록과, 그 목록을 어디까지 봤는지 기억하는 cursor가 필요하다.
++
++이 문서에서는 그 두 상태를 **frame table**과 **clock hand**로 부른다.
++
++## 목차
++
++- 작은 질문
++- 왜 필요한가
++- 핵심 모델
++- 예시 상황
++- Linux / Windows에서는
++- PintOS에서는
++- QEMU에서는
++- 차이점
++- 코드 증거
++- 숫자와 메모리
++- 직접 확인
++- 정리
++- 다음 링크
++
++## 왜 필요한가
++
++Eviction 정책은 한 번의 판단으로 끝나지 않는다.
++
++예를 들어 user pool에 frame이 4개 있고, 네 page가 모두 올라와 있다고 하자.
++
++```text
++F0 -> page A
++F1 -> page B
++F2 -> page C
++F3 -> page D
++```
++
++새 page E를 올리려면 A/B/C/D 중 하나를 골라야 한다. 그런데 `vm_get_victim()`이 매번 F0부터만 보면 F0 근처 page가 과도하게 검사된다. 반대로 이전에 어디까지 봤는지 기억하면 전체 frame을 더 고르게 훑을 수 있다.
++
++이 말은 즉, clock 알고리즘에는 두 종류의 상태가 필요하다.
++
++| 상태 | 답하는 질문 |
++|---|---|
++| frame table | 지금 eviction 후보 frame이 무엇인가? |
++| clock hand | 다음 victim 검사는 어느 frame부터 이어서 할까? |
++| frame table lock | claim/evict가 동시에 일어날 때 목록이 깨지지 않는가? |
++
++accessed bit는 "최근 썼는가"라는 힌트이고, clock hand는 "그 힌트를 어떤 순서로 볼 것인가"라는 순회 상태다.
++
++## 핵심 모델
++
++Clock은 이름 그대로 원형 시계처럼 생각하면 된다.
++
++```text
++frame table:
++
++        hand
++         v
++  +------+------+------+------+
++  | F0/A | F1/B | F2/C | F3/D |
++  +------+------+------+------+
++     ^                         |
++     +-------------------------+
++```
++
++victim 선택 흐름은 단순하다.
++
++```text
++while true:
++  frame = *clock_hand
++  page  = frame->page
++
++  if page is pinned or not evictable:
++      clock_hand++
++      continue
++
++  if PTE accessed bit == 1:
++      clear accessed bit
++      clock_hand++
++      continue
++
++  return frame as victim
++```
++
++여기서 "pin"은 I/O 중이거나 커널이 잠시 움직이면 안 되는 page를 보호하기 위한 설계 후보다. 현재 PintOS skeleton에는 pin 필드가 없으므로, 과제 구현 범위에 맞춰 추가할지 결정해야 한다.
++
++중요한 점은 dirty bit가 victim을 고른 **뒤** 더 강하게 등장한다는 것이다.
++
++```text
++victim 확정
++  -> dirty인가?
++     -> anonymous page면 swap slot에 4096B 저장
++     -> file-backed page면 파일 offset에 write-back 가능
++  -> old PTE present bit clear
++  -> frame을 새 page에 재사용
++```
++
++## 예시 상황
++
++frame table의 현재 상태가 다음과 같다고 하자.
++
++```text
++clock hand -> F0
++
++F0 -> page A, accessed=1, dirty=0
++F1 -> page B, accessed=1, dirty=1
++F2 -> page C, accessed=0, dirty=0
++F3 -> page D, accessed=0, dirty=1
++```
++
++`vm_get_victim()`이 clock hand부터 보면:
++
++```text
++1. F0/A를 본다.
++   accessed=1
++   -> pml4_set_accessed(A, false)
++   -> victim으로 고르지 않고 hand를 F1로 옮긴다.
++
++2. F1/B를 본다.
++   accessed=1
++   -> pml4_set_accessed(B, false)
++   -> hand를 F2로 옮긴다.
++
++3. F2/C를 본다.
++   accessed=0
++   -> F2를 victim으로 고른다.
++```
++
++이때 C가 file-backed clean page라면 backing file에서 다시 만들 수 있는지 확인한 뒤 frame을 재사용할 수 있다. C가 anonymous page라면 내용 보존을 위해 swap slot metadata를 채우는 경로까지 생각해야 한다.
++
++반대로 F3/D가 victim이었다면 dirty bit 때문에 추가 보존 작업이 필요하다.
++
++## Linux / Windows에서는
++
++Linux와 Windows도 resident page를 추적하는 커널 metadata와 회수(reclaim) 정책을 가진다.
++
++하지만 실제 OS는 PintOS보다 훨씬 복잡하다.
++
++- Linux는 zone/node, LRU 계열 list, anonymous/file-backed page, page cache, cgroup, NUMA, lock contention을 함께 본다.
++- Windows는 process working set, standby/modified page list, pagefile, section object, priority 같은 상태를 함께 본다.
++
++공통 모델은 같다.
++
++> 물리 메모리 한 칸을 재사용하려면, 커널은 그 칸이 현재 어떤 가상 page의 내용을 담는지 추적해야 한다.
++
++PintOS는 이 모델을 `struct frame`, `struct page`, `pml4_is_accessed()` 같은 작은 부품으로 축소해서 직접 구현하게 한다.
++
++## PintOS에서는
++
++현재 PintOS 저장소의 VM skeleton에서 victim 선택 자리는 비어 있다.
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++  - `vm_get_frame()`
++  - `vm_evict_frame()`
++  - `vm_get_victim()`
++  - `vm_do_claim_page()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`
++  - `struct page`
++  - `struct frame`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++  - `pml4_is_accessed()`
++  - `pml4_set_accessed()`
++  - `pml4_is_dirty()`
++  - `pml4_clear_page()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/lib/kernel/list.h`
++  - `struct list`
++  - `struct list_elem`
++  - `list_entry()`
++
++`palloc_get_page(PAL_USER)`는 유저 풀의 free bitmap에서 4KB page 하나를 찾는다. 사용 가능한 page가 없으면 `NULL`을 반환한다. 이때부터는 `palloc`이 아니라 VM layer가 결정을 내려야 한다.
++
++현재 `struct frame`은 최소 정보만 가진다.
++
++```c
++struct frame {
++    void *kva;
++    struct page *page;
++};
++```
++
++Clock eviction을 구현하려면 보통 다음 정보가 더 필요하다.
++
++| 추가 후보 | 이유 |
++|---|---|
++| `struct list_elem elem` | frame table 안에 frame을 넣고 순회하기 위해 |
++| owner thread 또는 owner pml4 | victim page의 PTE accessed/dirty bit를 올바른 page table에서 읽기 위해 |
++| `bool pinned` | disk I/O나 커널 복사 중인 page를 eviction에서 제외하기 위해 |
++| global `frame_table` | 사용 중인 frame 전체 후보 목록 |
++| global `clock_hand` | 다음 검사 위치 |
++| global lock | frame table과 hand를 동시에 수정하지 못하게 보호 |
++
++특히 owner pml4가 중요하다. `pml4_is_accessed()`는 인자로 받은 pml4에서 `page->va`의 PTE를 찾는다. victim이 현재 thread의 page라는 보장이 없으면 `thread_current()->pml4`만으로는 부족하다.
++
++이 말은 즉:
++
++```text
++frame->page->va만 있음
++  -> 어느 process의 page table에서 이 VA를 찾아야 하는지 모름
++
++frame->owner 또는 page->owner_pml4가 있음
++  -> pml4_is_accessed(owner_pml4, page->va)로 올바른 PTE를 봄
++```
++
++PintOS skeleton은 이 설계를 강제하지 않는다. `struct supplemental_page_table`도 비어 있고, `struct frame`도 최소형이다. 그래서 frame table과 owner 정보를 어디에 둘지는 구현자가 정해야 한다.
++
++## QEMU에서는
++
++QEMU는 PintOS의 frame table도, clock hand도 모른다.
++
++QEMU가 재현하는 것은 x86 하드웨어 동작이다.
++
++- guest CPU가 VA를 접근한다.
++- QEMU가 guest page table walk를 수행한다.
++- 접근이 성립하면 accessed bit가 set된다.
++- store 접근이면 dirty bit도 set된다.
++
++대표 코드:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/cpu.h`
++  - `PG_ACCESSED_BIT = 5`
++  - `PG_DIRTY_BIT = 6`
++  - `PG_ACCESSED_MASK`
++  - `PG_DIRTY_MASK`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/tcg/system/excp_helper.c`
++  - page walk 뒤 `PG_ACCESSED_MASK`를 set
++  - store 접근이면 `PG_DIRTY_MASK`도 함께 set
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/monitor.c`
++  - QEMU monitor에서 PTE의 A/D 표시를 출력하는 경로
++
++중요한 경계는 이것이다.
++
++```text
++QEMU:
++  guest PTE의 A/D bit 효과를 만든다.
++
++PintOS:
++  그 bit를 읽고 어떤 frame을 evict할지 결정한다.
++```
++
++QEMU는 어떤 page가 anonymous인지, 어떤 swap slot을 써야 하는지, `clock_hand`가 어디를 가리켜야 하는지 해석하지 않는다.
++
++## 차이점
++
++| 항목 | Linux / Windows | PintOS | QEMU |
++|---|---|---|---|
++| 후보 목록 | 복잡한 resident page metadata와 reclaim list | 직접 설계할 frame table | 없음 |
++| 순회 정책 | LRU 계열, working set, priority 등 | clock hand 같은 단순 정책 구현 가능 | 없음 |
++| accessed/dirty 생성 | CPU/MMU가 만들고 OS가 해석 | QEMU가 만든 guest PTE bit를 PintOS가 helper로 읽음 | x86 page walk 효과를 에뮬레이션 |
++| owner 추적 | process/mm_struct/working set 등 풍부한 metadata | 구현자가 page/frame과 thread/pml4 연결 필요 | guest OS metadata를 모름 |
++| 목적 | 성능, 공정성, 보안, I/O까지 고려 | VM 과제의 핵심 흐름 학습 | 하드웨어처럼 보이는 실행 환경 제공 |
++
++## 코드 증거
++
++### 1. `vm_get_victim()`은 정책 자리만 열어 둔다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++
++핵심 형태:
++
++```c
++static struct frame *
++vm_get_victim (void) {
++    struct frame *victim = NULL;
++    /* TODO: The policy for eviction is up to you. */
++
++    return victim;
++}
++```
++
++따라서 frame table, clock hand, lock은 현재 구현되어 있는 기능이 아니라 이 TODO를 채우기 위한 설계 후보로 읽어야 한다.
++
++### 2. `vm_get_frame()`은 palloc 실패 뒤 eviction을 기대한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/palloc.c`
++
++`palloc_get_page(PAL_USER)`는 user pool에서 free page 하나를 찾고, 없으면 `NULL`을 줄 수 있다. `vm_get_frame()` 주석은 이 경우 evict해서 사용 가능한 공간을 얻으라고 말한다.
++
++### 3. `pml4_is_accessed()`는 pml4와 vpage가 모두 필요하다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++
++핵심 형태:
++
++```c
++uint64_t *pte = pml4e_walk (pml4, (uint64_t) vpage, false);
++return pte != NULL && (*pte & PTE_A) != 0;
++```
++
++이 한 줄 때문에 owner pml4 문제가 생긴다. `vpage`만 알아서는 PTE를 찾을 수 없고, 어느 pml4에서 찾을지도 알아야 한다.
++
++### 4. PintOS list는 intrusive list다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/lib/kernel/list.h`
++
++PintOS list는 원소 객체 안에 `struct list_elem`을 직접 넣는 방식이다. 따라서 frame table을 list로 만들려면 `struct frame` 안에 list 원소 멤버를 추가해야 한다.
++
++```c
++struct frame {
++    void *kva;
++    struct page *page;
++    struct list_elem elem;
++};
++```
++
++이 코드는 설계 예시다. 현재 skeleton에 이미 들어 있다는 뜻이 아니다.
++
++## 숫자와 메모리
++
++4KB page에서는 page offset이 12비트다. 그래서 frame base address의 하위 12비트는 0이고, PTE는 그 낮은 비트에 flag를 함께 저장한다.
++
++예를 들어 어떤 page가 frame base `0x12345000`에 매핑되어 있고, present/write/user/accessed/dirty가 모두 켜졌다고 하자.
++
++```text
++frame base = 0x12345000
++PTE_P      = 0x001
++PTE_W      = 0x002
++PTE_U      = 0x004
++PTE_A      = 0x020
++PTE_D      = 0x040
++--------------------------------
++PTE        = 0x12345067
++```
++
++Clock hand가 이 page를 처음 보면 accessed가 1이므로 한 번 기회를 준다.
++
++```text
++clear accessed:
++0x12345067 & ~0x020 = 0x12345047
++```
++
++한 바퀴 뒤에도 accessed가 다시 set되지 않았다면 victim 후보가 된다. 이후 present bit를 끄면 CPU는 이 VA를 곧장 frame으로 번역하지 못하고 page fault를 낸다.
++
++```text
++clear present after accessed clear:
++0x12345047 & ~0x001 = 0x12345046
++```
++
++이때 dirty bit `0x040`은 여전히 남아 있다. 이 정보가 anonymous page면 swap out, file-backed page면 write-back 판단으로 이어진다.
++
++## 직접 확인
++
++Clock eviction을 구현한 뒤에는 다음 순서로 확인할 수 있다.
++
++```text
++break vm_get_frame
++break vm_get_victim
++break vm_evict_frame
++break pml4_set_accessed
++break pml4_clear_page
++```
++
++`vm_get_victim()` 안에서는 다음 값을 본다.
++
++```text
++p/x frame->kva
++p/x frame->page->va
++p frame->page->frame
++p/x owner->pml4
++p pml4_is_accessed(owner->pml4, frame->page->va)
++```
++
++직접 확인할 질문은 다음과 같다.
++
++- `palloc_get_page(PAL_USER)`가 실패했을 때만 eviction 경로로 들어오는가?
++- accessed가 1인 page는 바로 victim이 아니라 0으로 clear되고 지나가는가?
++- accessed를 clear한 뒤 같은 page를 다시 읽으면 QEMU/x86 효과로 accessed가 다시 1이 되는가?
++- victim 확정 뒤 old page의 PTE present bit가 꺼지는가?
++- `frame->page`와 `page->frame`이 서로 일관되게 바뀌는가?
++
++QEMU 쪽이 궁금하면 `target/i386/tcg/system/excp_helper.c`의 `PG_ACCESSED_MASK`, `PG_DIRTY_MASK` set 지점에 breakpoint를 걸어도 된다. 다만 이 breakpoint는 guest OS 정책이 아니라 x86 page walk 효과를 보는 것이다.
++
++## 정리
++
++Clock hand는 replacement policy의 전체가 아니라, frame table을 훑는 cursor다.
++
++- `palloc`은 free frame만 안다.
++- frame table은 사용 중인 frame 후보를 모은다.
++- clock hand는 다음 검사 위치를 기억한다.
++- accessed bit는 최근 접근 page를 한 번 지나치게 해 준다.
++- dirty bit는 victim 확정 뒤 내용을 저장해야 하는지 알려 준다.
++- QEMU는 bit 효과를 만들지만, victim 정책은 PintOS가 정한다.
++
++## 다음 링크
++
++- [[frame-eviction-trace]]: victim 선택 뒤 `swap_out()`과 frame 재사용까지 이어지는 전체 흐름
++- [[accessed-dirty-eviction-knowledge]]: PTE accessed/dirty bit가 어떤 의미인지 다시 보기
++- [[swap-lab]]: anonymous page가 swap slot으로 보존되는 숫자 실험
++- [[page-table-entry-bits-knowledge]]: PTE 한 칸에 frame 주소와 flag가 같이 들어가는 구조
++- [[tlb-cr3-address-space-switch-knowledge]]: accessed bit를 clear할 때 TLB invalidation을 함께 봐야 하는 이유
+diff --git a/traces/os/frame-eviction-trace.md b/traces/os/frame-eviction-trace.md
+index c9d53a3..2c87e5e 100644
+--- a/traces/os/frame-eviction-trace.md
++++ b/traces/os/frame-eviction-trace.md
+@@ -403,6 +403,7 @@ QEMU는 이 정책을 모르고, guest physical memory와 x86 page-table 하드
+ - [[address-translation-memory]]: VA, page base, offset, PTE를 숫자로 분해하는 법
+ - [[page-table-entry-bits-knowledge]]: present/accessed/dirty bit가 eviction 판단으로 이어지는 이유
+ - [[accessed-dirty-eviction-knowledge]]: clock식 victim 선택과 dirty write-back 판단을 bit 단위로 분해
++- [[clock-frame-table-eviction-knowledge]]: frame table과 clock hand를 `vm_get_victim()` 설계로 연결
+ - [[clock-hand-victim-selection-lab]]: frame table과 clock hand를 실제 구현 후보로 계산하고 관찰
+ - [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]: frame/page/PTE를 바이트로 보는 연습
+ - [[mmap-file-backed-page-knowledge]]: file-backed page는 eviction 때 어디로 writeback되는가
