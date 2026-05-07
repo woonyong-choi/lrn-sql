@@ -8,8 +8,11 @@ To apply the changes yourself, run one of the following commands in your local t
 
 2) Manual copy:
 
-- Copy `traces/os/context-switch-trace.md` into `/Users/woonyong/vault/traces/os/`
-- Replace the two map files in `/Users/woonyong/vault/maps/os/` with the overlay versions.
+- Copy these into `/Users/woonyong/vault/` (same relative paths):
+  - `traces/os/thread-scheduler-trace.md`
+  - `traces/os/context-switch-trace.md`
+  - `maps/os/concept-to-code-map.md`
+  - `maps/os/week-1-threads-map.md`
 
 Overlay root:
 
