@@ -1,0 +1,509 @@
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index b7f5621..10d78b9 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -76,7 +76,7 @@ related_to:
+ - 2.6단계: `fork()`가 열린 fd table을 물려주는 법
+   - [[fd-table-fork-duplication-knowledge]]
+ - 3단계: 주소가 바이트로 바뀌는 법
+-  - [[address-translation-memory]]
++  - [[address-translation-memory]]: user VA가 page table, PTE flag, guest physical frame, QEMU host memory로 내려가는 전체 층
+   - [[x86-64-page-table-walk-knowledge]]
+   - [[guest-physical-memory-qemu-knowledge]]
+   - [[page-table-entry-bits-knowledge]]
+@@ -261,7 +261,7 @@ related_to:
+       - size: `5`
+ - Q4. 가상 주소는 어떻게 실제 바이트가 되는가?
+   - 먼저 볼 문서
+-    - [[address-translation-memory]]
++    - [[address-translation-memory]]: 주소 숫자를 page base/offset, PTE, frame, QEMU backing으로 나누는 입구
+     - [[x86-64-page-table-walk-knowledge]]
+     - [[pml4-get-page-kernel-va-lab]]
+     - [[guest-physical-memory-qemu-knowledge]]
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index 0981a34..1d8789e 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -31,7 +31,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ 
+ ## 먼저 볼 것
+ 
+-- [[address-translation-memory]]
++- [[address-translation-memory]]: user VA가 page table, PTE flag, guest physical frame, QEMU host memory로 내려가는 기본 모델
+ - [[x86-64-page-table-walk-knowledge]]
+ - [[pml4-get-page-kernel-va-lab]]
+ - [[guest-physical-memory-qemu-knowledge]]
+@@ -51,7 +51,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ 
+ ## 핵심 개념
+ 
+-- [[address-translation-memory]]
++- [[address-translation-memory]]: 주소 숫자를 page base/offset, frame, 권한 bit, guest memory backing으로 나누는 법
+ - [[x86-64-page-table-walk-knowledge]]: 가상 주소를 PML4/PDPE/PDE/PTE index와 12비트 offset으로 분해하는 법
+ - [[pml4-get-page-kernel-va-lab]]: `pml4_get_page()`가 유저 VA를 커널이 읽을 수 있는 kernel VA로 바꾸는 계산
+ - [[guest-physical-memory-qemu-knowledge]]: PintOS guest physical address와 QEMU `RAMBlock.host` 기반 host virtual pointer를 구분하는 법
+diff --git a/notes/os/address-translation-memory.md b/notes/os/address-translation-memory.md
+index 10e9a6e..8b1d191 100644
+--- a/notes/os/address-translation-memory.md
++++ b/notes/os/address-translation-memory.md
+@@ -14,12 +14,22 @@ tags:
+   - domain:qemu
+   - week:vm
+   - layer:memory
++  - layer:kernel
++  - layer:user
+   - topic:page-table
+   - topic:frame
++  - topic:gdb
+ related_to:
+   - "[[concept-to-code-map]]"
+   - "[[week-3-4-virtual-memory-map]]"
+   - "[[x86-64-page-table-walk-knowledge]]"
++  - "[[pml4-get-page-kernel-va-lab]]"
++  - "[[page-table-entry-bits-knowledge]]"
++  - "[[guest-physical-memory-qemu-knowledge]]"
++  - "[[page-fault-trace]]"
++  - "[[qemu-gdb-stub-guest-state-knowledge]]"
++  - "[[tlb-cr3-address-space-switch-knowledge]]"
++  - "[[supplemental-page-table-knowledge]]"
+ ---
+ 
+ # 주소 변환과 메모리
+@@ -28,165 +38,359 @@ related_to:
+ 
+ 프로그램이 `0x8048123` 주소를 읽는다고 할 때, 그 숫자는 실제 RAM의 어느 바이트를 가리킬까?
+ 
+-운영체제를 제대로 이해하려면 "주소는 곧 데이터"가 아니라는 점부터 잡아야 한다. 주소는 데이터를 찾기 위한 숫자이고, 그 숫자가 실제 바이트로 이어지려면 주소 변환이 필요하다.
++처음에는 주소를 "메모리 위치 번호"로 생각하기 쉽다. 하지만 현대 OS에서 유저 프로그램이 보는 주소는 대부분 가상 주소다. 이 숫자는 바로 RAM 칩의 위치가 아니라, 현재 프로세스의 page table을 통해 해석해야 하는 이름표다.
++
++이 말은 즉, 같은 `0x8048123`이라도 프로세스 A와 프로세스 B에서 전혀 다른 실제 frame을 가리킬 수 있다. 반대로 page table에 약속이 없으면 같은 숫자는 아무 바이트도 가리키지 못하고 page fault가 된다.
++
++## 왜 필요한가
++
++주소 변환이 필요한 이유는 세 가지다.
++
++- 프로세스 격리: 한 프로세스가 다른 프로세스의 메모리를 마음대로 읽지 못하게 한다.
++- 편한 실행 환경: 프로그램은 자기 코드와 스택이 연속된 주소 공간에 놓인 것처럼 생각할 수 있다.
++- 지연과 공유: 파일 page, zero page, swap page를 실제 접근 시점까지 미루거나 여러 프로세스가 공유할 수 있다.
++
++주소 변환이 없으면 커널은 모든 프로그램이 실제 RAM 배치를 직접 알고 조심해서 쓰기를 기대해야 한다. 그것은 보안과 안정성 면에서 거의 불가능하다.
+ 
+ ## 핵심 모델
+ 
+-가상 메모리는 프로세스가 자기만의 연속된 주소 공간을 가진 것처럼 보이게 한다. 실제 바이트는 물리 프레임에 있고, page table이 가상 페이지를 물리 프레임으로 연결한다.
++가상 메모리는 네 층으로 보면 된다.
++
++| 층 | 질문 | 대표 값 |
++|---|---|---|
++| 유저 가상 주소 | 프로그램이 들고 있는 숫자는 무엇인가? | `0x8048123` |
++| page table | 이 가상 page는 어느 frame과 권한으로 연결되는가? | PTE |
++| guest physical frame | PintOS가 물리 메모리라고 믿는 page는 어디인가? | `0x12345000` |
++| QEMU host memory | 그 guest frame은 host process 안에서 어디에 backing되는가? | `RAMBlock.host + offset` |
+ 
+-조금 더 내려가면 x86-64는 page table을 한 장짜리 표로 보지 않는다. 4KB page 기준으로 가상 주소를 PML4, PDPE, PDE, PTE index와 offset으로 나눠 4단계 표를 걷는다. 이 계산은 [[x86-64-page-table-walk-knowledge]]에서 손으로 분해한다.
++PintOS를 읽을 때 핵심은 "유저 VA를 곧바로 커널 포인터처럼 dereference하지 않는다"는 점이다. 먼저 현재 thread의 page table에서 VA가 어느 frame으로 연결되는지 확인하고, PintOS 커널이 읽을 수 있는 kernel VA로 바꿔야 한다.
+ 
+-PintOS 커널 코드에서 유저 주소의 실제 바이트를 읽어야 할 때는 한 단계가 더 필요하다. `pml4_get_page()`는 유저 VA를 그대로 돌려주지 않고, 같은 frame을 커널이 읽을 수 있는 kernel VA로 바꾼다. 이 계산은 [[pml4-get-page-kernel-va-lab]]에서 `ptov(PTE_ADDR(*pte)) + pg_ofs(uaddr)`로 직접 확인한다.
++이 계산을 코드로 내리면 보통 다음 순서가 된다.
++
++```text
++uaddr
++  -> pg_round_down(uaddr)로 page base 계산
++  -> PML4/PDPE/PDE/PTE index로 page table walk
++  -> PTE_ADDR(*pte)로 frame base 추출
++  -> pg_ofs(uaddr)로 page 안 offset 추가
++  -> ptov(frame_base) + offset으로 kernel VA 획득
++```
++
++`PML4/PDPE/PDE/PTE` index를 손으로 쪼개는 계산은 [[x86-64-page-table-walk-knowledge]]에서 따로 본다. 이 문서는 더 큰 질문, 즉 "주소라는 숫자가 실제 바이트가 되기까지 어떤 층을 지나가는가"에 집중한다.
++
++## 예시 상황
++
++유저 프로그램이 다음 포인터를 읽는다고 하자.
++
++```c
++char *p = (char *) 0x8048123;
++char c = *p;
++```
++
++CPU와 OS는 이 주소를 한 번에 RAM으로 보내지 않는다.
++
++```text
++virtual address = 0x8048123
++page size       = 4096 = 0x1000
++page base       = 0x8048000
++offset          = 0x123
++```
++
++page table에 다음 약속이 있다고 하자.
++
++```text
++VA page 0x8048000 -> frame 0x12345000
++permission       -> present, user, writable
++```
++
++그러면 최종 바이트 위치는 다음처럼 계산된다.
++
++```text
++guest physical address = 0x12345000 + 0x123
++                       = 0x12345123
++```
++
++하지만 이것도 host physical address가 아니다. QEMU에서 PintOS를 실행 중이라면 `0x12345123`은 guest physical address이고, QEMU process가 관리하는 guest RAM 영역 안의 offset으로 다시 이어진다. 이 층은 [[guest-physical-memory-qemu-knowledge]]에서 더 자세히 본다.
+ 
+ ## Linux / Windows에서는
+ 
+-Linux와 Windows 모두 demand paging, protection, sharing, copy-on-write, mmap/file mapping, swap을 사용한다.
++Linux와 Windows 모두 유저 프로세스마다 독립된 주소 공간을 제공한다. 둘 다 page table, page fault, file mapping, copy-on-write, demand paging, swap 같은 개념을 사용한다.
++
++Linux에서는 프로세스 주소 공간을 `mm_struct`와 VMA 영역들로 설명할 수 있다. page table은 현재 CPU가 실제 load/store를 번역하는 표이고, VMA는 "이 주소 범위가 합법인가, 어떤 파일이나 anonymous memory에 속하는가"를 기억하는 정책 정보에 가깝다.
++
++Windows도 스레드와 프로세스 주소 공간, VAD, section object, pagefile, working set 같은 구조를 통해 비슷한 문제를 푼다. API 표면은 Linux의 `mmap()`과 다르게 `CreateFileMapping`, `MapViewOfFile` 같은 handle 중심 모델로 드러난다.
+ 
+-현실 OS의 VM은 단순 주소 변환보다 훨씬 넓다. 파일 캐시, 보안, 성능 최적화, 프로세스 격리까지 포함한다.
++현실 OS는 PintOS보다 훨씬 복잡하다. NUMA, huge page, shared library, ASLR, memory compression, 보안 정책, 다중 CPU TLB shootdown까지 고려해야 한다.
+ 
+ ## PintOS에서는
+ 
+-PintOS VM 주차에서는 이 큰 세계를 교육용으로 축소한다.
++PintOS VM 주차에서는 이 큰 세계를 교육용으로 줄인다.
++
++대표 코드 위치는 다음이다.
++
++| 파일 | 읽을 이유 |
++|---|---|
++| `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/vaddr.h` | page size, offset, `ptov()`, `vtop()` |
++| `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/pte.h` | PML4/PDPE/PDE/PTE index와 PTE flag |
++| `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c` | page table walk, mapping 설치, CR3 교체 |
++| `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/exception.c` | page fault에서 `CR2`와 error code 읽기 |
++| `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c` | SPT 조회, frame claim, stack growth 분기 |
++
++PintOS에서 주소 변환을 이해할 때 자주 보는 함수는 세 개다.
++
++| 함수 | 의미 |
++|---|---|
++| `pml4_get_page(pml4, uaddr)` | 유저 VA가 매핑되어 있으면 kernel VA로 바꿔 반환 |
++| `pml4_set_page(pml4, upage, kpage, rw)` | 유저 VA page를 `kpage`가 가리키는 frame에 연결 |
++| `pml4_activate(pml4)` | CPU의 `CR3`를 바꿔 현재 주소 공간 기준을 교체 |
++
++중요한 차이는 page table과 supplemental page table이다.
+ 
+-대표 파일:
++| 표 | 답하는 질문 |
++|---|---|
++| page table | 지금 CPU가 이 VA를 frame으로 번역할 수 있는가? |
++| supplemental page table | fault가 났을 때 이 VA는 원래 합법적인 page인가, backing은 어디인가? |
+ 
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/anon.c`
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/file.c`
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/pte.h`
++그래서 VM 구현에서 page fault를 살리는 흐름은 보통 이렇게 이어진다.
+ 
+-핵심:
++```text
++page_fault()
++  -> fault_addr = rcr2()
++  -> vm_try_handle_fault(...)
++  -> SPT에서 page metadata 찾기
++  -> vm_do_claim_page(page)
++  -> pml4_set_page(..., page->va, frame->kva, writable)
++  -> 같은 명령어 재실행
++```
+ 
+-- page fault가 발생하면 supplemental page table에서 원본 정보를 찾는다.
+-- 필요한 frame을 얻는다.
+-- file, swap, zero page 중 알맞은 곳에서 내용을 채운다.
+-- page table에 mapping을 설치한다.
++이 전체 판단 흐름은 [[page-fault-trace]]와 [[vm-do-claim-page-trace]]로 이어진다.
+ 
+ ## QEMU에서는
+ 
+-QEMU에서는 세 주소를 구분해야 한다.
++QEMU는 PintOS의 page fault 정책을 결정하지 않는다. QEMU는 guest CPU와 guest memory system을 흉내 낸다.
+ 
+-| 이름 | 의미 |
+-|---|---|
+-| guest virtual address | PintOS 프로세스가 쓰는 주소 |
+-| guest physical address | PintOS가 물리 메모리라고 믿는 주소 |
+-| host virtual address | QEMU process 내부의 실제 주소 |
++QEMU 관점의 층은 이렇게 나뉜다.
++
++```text
++guest virtual address
++  -> QEMU가 guest CPU의 MMU 동작을 재현하며 page table walk
++guest physical address
++  -> QEMU AddressSpace에서 MemoryRegion으로 translate
++host virtual address
++  -> RAMBlock.host + offset 형태의 QEMU process memory
++```
++
++QEMU 코드에서 page table walk의 힌트는 `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/arch_memory_mapping.c`에 있다. 이 파일은 `env->cr[3]`에서 page table root를 잡고, `address_space_ldq()`로 PML4E/PDPTE/PDE/PTE를 guest physical memory에서 읽는다.
+ 
+-PintOS의 page table은 guest OS 자료구조다. QEMU는 guest CPU가 메모리를 읽고 쓸 때 guest-visible MMU 동작을 재현한다.
++실제 TCG 실행 중 fault를 만들 때는 `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/tcg/system/excp_helper.c` 쪽에서 `env->cr[3]`를 기준으로 주소를 번역하고, 실패하면 `env->cr[2]`에 fault 주소를 넣고 `EXCP0E_PAGE` 예외를 올린다.
++
++QEMU GDB stub은 `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/gdbstub.c`에서 `env->cr[2]`, `env->cr[3]` 같은 guest control register를 읽어 GDB에 보여준다. 그래서 GDB에서 보는 `CR2/CR3`는 host CPU register가 아니라 guest CPU state다. 이 구분은 [[qemu-gdb-stub-guest-state-knowledge]]와 함께 봐야 한다.
+ 
+ ## 차이점
+ 
+ | 항목 | Linux / Windows | PintOS | QEMU |
+ |---|---|---|---|
+-| VM 목적 | 격리, 성능, 캐시, 보안, 호환성 | VM 원리 학습 | guest memory access 재현 |
+-| page fault | 복잡한 정책과 subsystem 연결 | 과제 함수에서 처리 | fault를 guest CPU exception처럼 전달 |
+-| physical memory | 실제 RAM | PintOS가 보는 RAM | host process memory로 backing |
++| 주체 | 실제 운영체제 | 교육용 guest OS | 하드웨어를 흉내 내는 host process |
++| 주소 공간 정책 | VMA/VAD, COW, swap, file cache, 보안 정책 | SPT, frame table, swap, file-backed page 과제 구현 | 정책을 모르고 guest CPU 동작 재현 |
++| page table | 실제 CPU가 사용하는 주소 변환 표 | PintOS가 만들고 `CR3`에 넣는 guest page table | guest memory 안의 자료구조로 읽음 |
++| page fault 처리 | 커널 VM subsystem이 복합 판단 | `page_fault()`와 `vm_try_handle_fault()`가 판단 | #PF를 guest에 전달 |
++| physical address | 실제 하드웨어 물리 주소 | PintOS가 믿는 guest physical address | `RAMBlock.host`로 backing되는 host memory offset |
+ 
+ ## 코드 증거
+ 
+-페이지 폴트가 발생하면 PintOS는 fault address를 읽고, VM 처리 함수에 넘긴다.
++### 1. page offset과 page base는 12비트 기준이다
++
++PintOS: `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/vaddr.h`
+ 
+-파일:
++```c
++#define PGBITS  12
++#define PGSIZE  (1 << PGBITS)
++#define pg_ofs(va) ((uint64_t) (va) & PGMASK)
++#define pg_round_down(va) (void *) ((uint64_t) (va) & ~PGMASK)
++```
+ 
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/exception.c`
++`PGBITS=12`이므로 page offset은 아래 12비트다. `0x8048123`의 offset이 `0x123`인 이유가 여기서 나온다.
+ 
+-핵심 코드:
++### 2. PTE는 frame 주소와 flag를 함께 담는다
+ 
+-```c
+-fault_addr = (void *) rcr2();
++PintOS: `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/pte.h`
+ 
+-if (vm_try_handle_fault (f, fault_addr, user, write, not_present))
+-    return;
++```c
++#define PTE_ADDR(pte) ((uint64_t) (pte) & ~0xFFF)
++#define PTE_P 0x1
++#define PTE_W 0x2
++#define PTE_U 0x4
+ ```
+ 
+-이 코드는 CPU의 CR2 레지스터에서 fault가 난 가상 주소를 읽고, PintOS VM 코드가 처리하도록 넘긴다는 증거다.
++PTE 값 하나는 "어느 frame인가"와 "어떤 권한인가"를 동시에 담는다. 그래서 PTE를 읽을 때는 `PTE_ADDR(*pte)`처럼 주소 비트를 분리하고, `PTE_P/PTE_W/PTE_U` 같은 flag를 따로 검사한다.
++
++### 3. `pml4_get_page()`는 user VA를 kernel VA로 바꾼다
++
++PintOS: `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
+ 
+-PintOS가 가상 페이지를 물리 프레임에 연결할 때는 page table entry를 만든다.
++```c
++uint64_t *pte = pml4e_walk (pml4, (uint64_t) uaddr, 0);
++
++if (pte && (*pte & PTE_P))
++    return ptov (PTE_ADDR (*pte)) + pg_ofs (uaddr);
++```
+ 
+-파일:
++여기서 반환값은 유저 VA가 아니다. 같은 frame을 PintOS 커널이 접근할 수 있도록 `ptov()`로 바꾼 kernel VA다. 이 계산은 [[pml4-get-page-kernel-va-lab]]에서 숫자로 확인한다.
+ 
+-- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++### 4. `pml4_set_page()`는 frame 주소와 권한 flag를 PTE에 쓴다
+ 
+-핵심 코드:
++PintOS: `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
+ 
+ ```c
+ *pte = vtop (kpage) | PTE_P | (rw ? PTE_W : 0) | PTE_U;
+ ```
+ 
+-이 코드는 kernel virtual address인 `kpage`를 물리 주소로 바꾼 뒤, present/writable/user bit와 함께 PTE에 기록한다는 뜻이다.
++`kpage`는 kernel VA다. PTE에는 kernel VA가 아니라 `vtop(kpage)`로 얻은 physical frame base가 들어간다. 여기에 present, writable, user flag가 붙는다.
+ 
+-QEMU에서는 guest physical memory 접근이 QEMU의 address space로 이어진다.
++### 5. page fault 주소는 `CR2`에서 온다
+ 
+-파일:
++PintOS: `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/exception.c`
+ 
+-- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/system/physmem.c`
++```c
++fault_addr = (void *) rcr2();
++
++not_present = (f->error_code & PF_P) == 0;
++write = (f->error_code & PF_W) != 0;
++user = (f->error_code & PF_U) != 0;
++```
++
++`fault_addr`는 접근하려다 실패한 주소다. `f->rip`는 실패한 명령어 주소다. 둘을 섞으면 page fault 디버깅이 바로 꼬인다.
++
++### 6. QEMU도 guest `CR3`와 guest memory를 기준으로 page table을 읽는다
+ 
+-핵심 단서:
++QEMU: `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/arch_memory_mapping.c`
+ 
+ ```c
+-address_space_read(&address_space_memory, addr, ...);
+-address_space_write(&address_space_memory, addr, ...);
++pml4e_addr = (env->cr[3] & PLM4_ADDR_MASK) & a20_mask;
++pml4e = address_space_ldq(as, pml4e_addr, MEMTXATTRS_UNSPECIFIED, NULL);
+ ```
+ 
+-즉 PintOS가 보는 guest physical address는 host physical address가 아니라 QEMU가 관리하는 guest memory address space 안의 주소다.
++여기서 `env->cr[3]`는 guest CPU의 CR3다. `address_space_ldq()`는 QEMU가 관리하는 guest physical address space에서 page table entry를 읽는다.
+ 
+-이 층을 더 엄밀하게 나누면 [[guest-physical-memory-qemu-knowledge]]에서처럼 `guest physical address -> RAMBlock.host + offset -> host virtual address` 흐름으로 볼 수 있다.
++## 숫자와 메모리
+ 
+-## 숫자 예제
++### 1. 주소를 page base와 offset으로 나누기
+ 
+ ```text
+ virtual address = 0x8048123
+-page size       = 4096 = 0x1000
+-offset          = 0x123
+-page base       = 0x8048000
++page size       = 0x1000
++PGMASK          = 0xfff
++
++offset          = 0x8048123 & 0xfff
++                = 0x123
++
++page base       = 0x8048123 & ~0xfff
++                = 0x8048000
++```
++
++### 2. PTE 값 해석하기
++
++PTE가 다음 값이라고 하자.
++
++```text
++pte = 0x0000000012345007
+ ```
+ 
+-x86-64 4단계 page table walk 관점에서는 같은 주소가 다음 index로도 나뉜다.
++아래 12비트는 flag다.
+ 
+ ```text
+-PML4 index = 0
+-PDPE index = 0
+-PDE index  = 64
+-PTE index  = 72
+-offset     = 0x123
++PTE_ADDR(pte) = 0x0000000012345000
++flags         = 0x007
++              = PTE_P | PTE_W | PTE_U
+ ```
+ 
+-page table이 page base `0x8048000`을 frame base `0x12345000`에 연결하면:
++따라서 최종 guest physical address는 다음이다.
+ 
+ ```text
+-physical address = 0x12345000 + 0x123
+-                 = 0x12345123
++frame base = 0x12345000
++offset     = 0x00000123
++result     = 0x12345123
+ ```
+ 
+-## 메모리 보기
++### 3. 같은 바이트를 다르게 해석하기
+ 
+-주소는 내용이 아니다. 주소는 바이트를 찾기 위한 숫자다.
++주소 변환이 끝나면 결국 raw bytes를 읽는다.
+ 
+ ```text
+ 0x12345123:
+-  48 65 6c 6c 6f 00
++  48 65 6c 6c 6f 00 00 00
++```
++
++이 바이트는 해석 방식에 따라 달라진다.
++
++| 해석 | 의미 |
++|---|---|
++| 문자열 | `"Hello"` |
++| little-endian 정수 | 낮은 주소 바이트부터 조합한 숫자 |
++| machine instruction | CPU decode 규칙에 따른 명령어 후보 |
++| struct field | 기준 포인터와 field offset에 따른 값 |
++
++그래서 메모리 디버깅에서는 "주소가 맞는가"와 "그 바이트를 어떤 타입으로 읽고 있는가"를 분리해야 한다. 이 관점은 [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]으로 이어진다.
++
++## 직접 확인
++
++### 1. PintOS page fault에서 fault 주소 확인
++
++```gdb
++break page_fault
++continue
++p/x fault_addr
++p/x f->rip
++p/x f->error_code
+ ```
+ 
+-이 바이트는 ASCII로 보면 `"Hello"`, `uint32_t`로 보면 다른 정수, instruction으로 보면 전혀 다른 의미가 될 수 있다.
++확인할 질문:
+ 
+-## 디버깅 체크리스트
++- `fault_addr`와 `f->rip`가 다른 값인가?
++- `PF_P/PF_W/PF_U` bit로 not-present, write, user fault를 구분할 수 있는가?
+ 
+-- page fault handler breakpoint
+-- fault address 확인
+-- page table entry 확인
+-- frame table 확인
+-- `x/32xb address`로 raw bytes 확인
++### 2. PintOS page table entry 확인
++
++```gdb
++break pml4_get_page
++continue
++p/x uaddr
++p/x pg_ofs(uaddr)
++p/x *pte
++p/x PTE_ADDR(*pte)
++```
++
++확인할 질문:
++
++- `uaddr`의 page offset이 계산과 같은가?
++- `PTE_ADDR(*pte)`가 4KB 정렬된 frame base인가?
++- 반환값이 `uaddr`가 아니라 `ptov(PTE_ADDR(*pte)) + pg_ofs(uaddr)`인가?
++
++### 3. QEMU GDB stub에서 guest control register 구분
++
++```gdb
++p/x $cr2
++p/x $cr3
++```
++
++이 값은 host macOS/Linux의 실제 CR2/CR3가 아니다. QEMU가 노출하는 guest CPU state다. GDB가 어느 층을 보고 있는지는 [[qemu-gdb-stub-guest-state-knowledge]]에서 다시 확인한다.
++
++## 정리
++
++- 유저 주소는 실제 RAM 주소가 아니라 현재 주소 공간 안의 이름표다.
++- page table은 가상 page를 frame base와 permission bit로 바꾼다.
++- PintOS의 `pml4_get_page()`는 user VA를 같은 frame의 kernel VA로 바꿔 커널이 읽을 수 있게 한다.
++- page fault가 나면 `CR2`는 실패한 VA를, error code는 실패 이유를 알려준다.
++- QEMU는 PintOS의 VM 정책을 모른다. guest CPU의 주소 변환과 fault 전달, guest physical memory backing을 재현할 뿐이다.
+ 
+ ## 다음으로 볼 문서
+ 
+-- [[week-3-4-virtual-memory-map]]
++- [[week-3-4-virtual-memory-map]]: VM 주차 전체 링크 허브
+ - [[x86-64-page-table-walk-knowledge]]: VA를 PML4/PDPE/PDE/PTE index와 offset으로 쪼개는 법
+ - [[pml4-get-page-kernel-va-lab]]: `pml4_get_page()`가 user VA를 kernel VA로 바꾸는 계산
+-- [[page-fault-trace]]
+-- [[guest-physical-memory-qemu-knowledge]]: guest physical address가 QEMU host process memory로 backing되는 방식
+ - [[page-table-entry-bits-knowledge]]: PTE 한 칸이 frame 주소와 permission bit를 함께 담는 방식
++- [[page-fault-trace]]: #PF가 `vm_try_handle_fault()` 정책 판단으로 이어지는 흐름
++- [[guest-physical-memory-qemu-knowledge]]: guest physical address가 QEMU host process memory로 backing되는 방식
+ - [[tlb-cr3-address-space-switch-knowledge]]: 현재 주소 공간의 page table root와 최근 번역 cache를 함께 보기
+ - [[supplemental-page-table-knowledge]]: page fault가 났을 때 커널이 "이 주소의 원래 의미"를 찾는 표
+-- [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]
++- [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]: 같은 raw bytes를 다른 타입으로 해석하는 연습
