@@ -1,0 +1,506 @@
+diff --git a/traces/os/lazy-page-claim-trace.md b/traces/os/lazy-page-claim-trace.md
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/traces/os/lazy-page-claim-trace.md
+@@ -0,0 +1,367 @@
++---
++type: Trace
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - layer:memory
++  - layer:kernel
++  - layer:user
++  - layer:emulator
++  - topic:page-fault
++  - topic:page-table
++  - topic:frame
++  - topic:mmap
++  - topic:gdb
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[page-fault-trace]]"
++  - "[[supplemental-page-table-knowledge]]"
++  - "[[page-fault-instruction-retry-knowledge]]"
++  - "[[frame-eviction-trace]]"
++  - "[[mmap-file-backed-page-knowledge]]"
++---
++# Lazy Page Claim Trace
++
++## 작은 질문
++
++PintOS VM에서 `load_segment()`가 실행 파일의 page를 등록했다고 하자. 그런데 그 순간에는 아직 물리 frame도 없고, page table mapping도 없을 수 있다.
++
++그러면 처음 배우는 사람 입장에서는 질문이 생긴다.
++
++> "SPT에 page가 있다"는 말은 언제 실제 4096바이트 메모리가 된다는 뜻일까?
++
++정답은 첫 접근 page fault에서 **claim**될 때다.
++
++이 Trace는 "약속으로만 존재하던 page"가 `struct frame`, PTE, 실제 byte 내용으로 바뀌는 순간을 따라간다.
++
++## 왜 필요한가
++
++[[page-fault-instruction-retry-knowledge]]에서 본 것처럼, page fault handler가 성공하면 CPU는 같은 명령어를 다시 실행한다.
++
++하지만 같은 명령어가 성공하려면 두 가지가 준비되어 있어야 한다.
++
++- page table에 `VA page -> frame` mapping이 있어야 한다.
++- frame 안의 4096바이트가 올바른 내용으로 채워져 있어야 한다.
++
++이 말은 즉, `vm_try_handle_fault()`가 `true`를 반환하려면 단순히 "이 주소는 합법이다"라고 판단하는 데서 끝나면 안 된다. 실제 frame을 얻고, PTE를 만들고, 필요하면 파일이나 swap에서 내용을 채운 뒤 돌아가야 한다.
++
++## 핵심 모델
++
++lazy loading은 두 단계로 나누어 보면 쉽다.
++
++| 단계 | 질문 | 대표 함수 |
++|---|---|---|
++| 등록 | 이 VA page는 나중에 어디서 내용을 가져올까? | `vm_alloc_page_with_initializer()` |
++| claim | 지금 fault가 났으니 실제 frame과 PTE를 만들까? | `vm_do_claim_page()` |
++
++흐름은 이렇게 이어진다.
++
++```text
++프로세스 로드 시점
++  -> load_segment()
++  -> vm_alloc_page_with_initializer()
++  -> uninit_new()
++  -> spt_insert_page()
++
++첫 메모리 접근 시점
++  -> CPU #PF
++  -> page_fault()
++  -> vm_try_handle_fault()
++  -> spt_find_page()
++  -> vm_do_claim_page()
++     -> vm_get_frame()
++     -> frame->page = page
++     -> page->frame = frame
++     -> pml4_set_page(page->va, frame->kva, writable)
++     -> swap_in(page, frame->kva)
++        -> uninit_initialize()
++           -> anon_initializer() 또는 file_backed_initializer()
++           -> lazy_load_segment(page, aux)
++  -> iretq
++  -> fault를 낸 명령어 재실행
++```
++
++여기서 `uninit`은 "초기화가 필요 없다"는 뜻이 아니다. 아직 실제 frame에 내용을 채우지 않았고, 첫 claim 때 어떤 initializer를 실행할지 기억하고 있다는 뜻이다.
++
++## 예시 상황
++
++실행 파일의 한 page를 지연 로딩한다고 하자.
++
++```text
++upage           = 0x8048000
++file offset     = 0x2000
++page_read_bytes = 1000
++page_zero_bytes = 3096
++writable        = false
++```
++
++프로세스 로드 시점에는 page table에 mapping을 만들지 않는다. 대신 SPT에 이런 약속을 남긴다.
++
++```text
++key: 0x8048000
++page:
++  operations = uninit_ops
++  va         = 0x8048000
++  frame      = NULL
++  init       = lazy_load_segment
++  aux        = file, offset, read_bytes, zero_bytes 같은 정보
++```
++
++유저 코드가 처음으로 `0x8048123`을 읽으면 page fault가 난다.
++
++```text
++fault_addr = 0x8048123
++page base  = 0x8048000
++offset     = 0x123
++```
++
++PintOS가 SPT에서 `0x8048000` page를 찾으면, 이 fault는 죽일 fault가 아니라 claim 후보가 된다.
++
++## Linux / Windows에서는
++
++Linux와 Windows도 demand paging을 쓴다.
++
++Linux는 실행 파일이나 `mmap()` 영역을 처음부터 전부 RAM에 올리지 않는다. 주소 범위와 backing object 정보를 VM 자료구조에 남겨 두고, page fault가 나면 필요한 page를 page cache, 파일, anonymous memory, swap 등에서 준비한다.
++
++Windows도 section object, prototype PTE, pagefile, committed page 같은 구조를 통해 "아직 resident하지 않지만 합법적인 page"를 관리한다.
++
++현실 OS는 PintOS보다 훨씬 복잡하다. page cache, copy-on-write, shared mapping, NUMA, working set, 보안 정책까지 함께 봐야 한다.
++
++그래도 핵심 질문은 같다.
++
++> 지금 page fault가 난 VA가 원래 합법한 lazy page라면, 실제 physical frame을 붙이고 내용을 채운 뒤 같은 명령어를 다시 실행하게 한다.
++
++## PintOS에서는
++
++PintOS에서 claim 경로는 다음 파일에 흩어져 있다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/process.c`
++  - `load_segment()`
++  - `lazy_load_segment()`
++  - `setup_stack()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++  - `vm_alloc_page_with_initializer()`
++  - `spt_find_page()`
++  - `vm_try_handle_fault()`
++  - `vm_claim_page()`
++  - `vm_do_claim_page()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/uninit.c`
++  - `uninit_new()`
++  - `uninit_initialize()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++  - `pml4_set_page()`
++
++현재 저장소의 VM 코드는 skeleton 상태다. 즉 이 문서는 "이미 구현되어 있다"는 설명이 아니라, TODO 자리에 채워야 할 실행 흐름을 코드 증거로 읽는 Trace다.
++
++특히 VM용 `load_segment()`는 각 page마다 `vm_alloc_page_with_initializer()`를 호출하지만, `aux` 구성은 아직 TODO다.
++
++```c
++void *aux = NULL;
++if (!vm_alloc_page_with_initializer (VM_ANON, upage, writable,
++                                     lazy_load_segment, aux))
++    return false;
++```
++
++여기서 `aux`가 계속 `NULL`이면 첫 page fault 때 `lazy_load_segment()`가 어떤 file offset에서 몇 바이트를 읽어야 하는지 알 수 없다. 그래서 실제 구현에서는 file pointer, offset, read bytes, zero bytes, writable 같은 정보를 page fault 시점까지 보존해야 한다.
++
++## QEMU에서는
++
++QEMU는 PintOS의 SPT나 `struct page` 의미를 모른다.
++
++QEMU가 보는 흐름은 더 낮은 층이다.
++
++```text
++유저 VA 접근
++  -> guest page table walk 실패
++  -> QEMU가 guest #PF를 만든다
++  -> PintOS page_fault() 실행
++  -> PintOS가 guest memory 안의 SPT와 frame table을 수정
++  -> PintOS가 guest page table PTE를 쓴다
++  -> 같은 유저 명령어 재실행
++  -> 이번에는 QEMU page walk가 성공한다
++```
++
++관련 QEMU 코드 단서는 다음이다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/tcg/system/excp_helper.c`
++  - `x86_cpu_tlb_fill()`
++  - `env->cr[2] = err.cr2`
++  - `raise_exception_err_ra(...)`
++  - page walk 중 `PG_ACCESSED_MASK`, store 접근 시 `PG_DIRTY_MASK`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/target/i386/emulate/x86_mmu.c`
++  - `mmu_gva_to_gpa()`
++  - `address_space_read()`
++
++이 말은 즉, QEMU는 "lazy page를 claim한다"는 정책을 실행하지 않는다. QEMU는 PintOS가 PTE를 고친 뒤 같은 guest VA 접근이 성공하는 하드웨어 효과를 재현한다.
++
++## 차이점
++
++| 항목 | Linux / Windows | PintOS | QEMU |
++|---|---|---|---|
++| lazy page 등록 | VMA, section, page cache metadata 등 | SPT의 `struct page`와 `uninit_page` | 알지 못함 |
++| 첫 접근 처리 | VM subsystem이 resident page 준비 | `vm_try_handle_fault()`가 claim 여부 결정 | #PF 전달 |
++| 실제 frame 연결 | physical page allocator와 page table | `vm_get_frame()` + `pml4_set_page()` | guest PTE를 하드웨어처럼 해석 |
++| 내용 채우기 | file/page cache/swap/zero page 등 | `swap_in()` -> initializer/lazy callback | guest memory read/write만 제공 |
++| 단순화 | 정책과 상태가 매우 많음 | 과제 코드에 핵심만 구현 | OS 정책 없음 |
++
++## 코드 증거
++
++### 1. 등록 단계는 `uninit_new()`로 약속을 저장한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/uninit.c`
++
++핵심 모양은 다음이다.
++
++```c
++*page = (struct page) {
++    .operations = &uninit_ops,
++    .va = va,
++    .frame = NULL,
++    .uninit = {
++        .init = init,
++        .type = type,
++        .aux = aux,
++        .page_initializer = initializer,
++    }
++};
++```
++
++`frame = NULL`이 중요하다. 이 page는 아직 RAM frame을 차지하지 않는다.
++
++### 2. fault 처리 단계는 SPT에서 page를 찾는다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++
++스켈레톤은 `vm_try_handle_fault()` 안에서 현재 thread의 SPT를 잡는다.
++
++```c
++struct supplemental_page_table *spt = &thread_current ()->spt;
++struct page *page = NULL;
++```
++
++구현해야 할 핵심은 보통 다음 순서다.
++
++```text
++page_base = pg_round_down(addr)
++page = spt_find_page(spt, page_base)
++page가 있으면 writable/not_present 조건을 확인
++조건이 맞으면 vm_do_claim_page(page)
++```
++
++SPT에 없더라도 [[stack-growth-page-fault-knowledge|스택 성장]] 후보라면 새 anonymous page를 만들고 claim할 수 있다.
++
++### 3. claim은 frame과 page를 서로 연결한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++
++`vm_do_claim_page()`는 먼저 frame을 얻고 양방향 포인터를 묶는다.
++
++```c
++struct frame *frame = vm_get_frame ();
++
++frame->page = page;
++page->frame = frame;
++```
++
++이 연결이 있어야 나중에 eviction 때 "이 frame에 들어 있는 유저 page가 무엇인가"를 되짚을 수 있다.
++
++### 4. PTE는 `pml4_set_page()`가 만든다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++
++핵심 줄:
++
++```c
++*pte = vtop (kpage) | PTE_P | (rw ? PTE_W : 0) | PTE_U;
++```
++
++이 줄은 `page->va`가 `frame->kva`가 가리키는 guest physical frame으로 번역되게 만든다.
++
++### 5. `swap_in()`은 page type별 내용을 채운다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/uninit.c`
++
++`vm_do_claim_page()` 마지막은 다음 호출이다.
++
++```c
++return swap_in (page, frame->kva);
++```
++
++page가 아직 `VM_UNINIT`이면 `swap_in`은 `uninit_initialize()`로 간다.
++
++```c
++return uninit->page_initializer (page, uninit->type, kva) &&
++       (init ? init (page, aux) : true);
++```
++
++여기서 첫 호출은 page의 operations를 anon/file 등 실제 타입으로 바꾸고, 두 번째 callback은 파일에서 읽거나 zero-fill하는 실제 초기화를 맡는다.
++
++## 숫자와 메모리
++
++아래 값으로 claim 결과를 계산해 보자.
++
++```text
++fault_addr      = 0x8048123
++page base       = 0x8048000
++offset          = 0x123
++
++frame->kva      = 0x800012340000
++vtop(frame->kva)= 0x0012340000
++writable        = false
++PTE flags       = PTE_P | PTE_U = 0x5
++installed PTE   = 0x0012340005
++```
++
++파일에서 1000바이트를 읽고 나머지를 0으로 채우는 page라면 frame 내부는 이렇게 된다.
++
++```text
++frame offset 0x000 .. 0x3e7  = file bytes 1000B
++frame offset 0x3e8 .. 0xfff  = zero bytes 3096B
++```
++
++유저가 다시 `0x8048123`을 읽으면:
++
++```text
++VA offset       = 0x123
++guest PA        = 0x0012340000 + 0x123
++                = 0x0012340123
++kernel view     = frame->kva + 0x123
++                = 0x800012340123
++```
++
++중요한 점은 `0x8048123` 자체가 host 주소가 아니라는 것이다. PintOS는 guest OS이고, QEMU는 guest physical memory를 host process memory로 backing한다. Host physical address는 이 계산에 직접 나오지 않는다.
++
++## 직접 확인
++
++PintOS VM 구현 중이라면 다음 breakpoint 순서로 본다.
++
++```gdb
++b load_segment
++b vm_alloc_page_with_initializer
++b uninit_new
++b spt_insert_page
++b page_fault
++b vm_try_handle_fault
++b vm_do_claim_page
++b pml4_set_page
++b uninit_initialize
++b lazy_load_segment
++```
++
++확인할 질문:
++
++- 등록 시점에 `page->frame == NULL`인가?
++- `page->va`는 page-aligned 주소인가?
++- `aux`에 file offset, read bytes, zero bytes가 살아 있는가?
++- fault 시점의 `fault_addr`를 `pg_round_down()`한 값으로 SPT를 찾는가?
++- `vm_do_claim_page()` 뒤 `page->frame`과 `frame->page`가 서로를 가리키는가?
++- `pml4_get_page(thread_current()->pml4, page->va)`가 claim 전에는 `NULL`, claim 후에는 kernel VA를 돌려주는가?
++- `x/32xb page->frame->kva`로 봤을 때 file bytes와 zero-fill 경계가 맞는가?
++
++현재 skeleton 그대로라면 여러 breakpoint가 TODO에서 멈추거나 `false`로 빠질 수 있다. 이 경우 관찰 목표는 "왜 아직 claim이 완성되지 않는가"를 확인하는 것이다.
++
++## 정리
++
++- SPT에 page가 있다는 말은 "이 VA는 원래 합법이고, 나중에 준비할 방법을 안다"는 뜻이다.
++- claim은 그 약속을 실제 frame, PTE, 4096바이트 내용으로 바꾸는 순간이다.
++- PintOS에서는 `vm_do_claim_page()`가 frame 연결과 PTE 설치, `swap_in()` 호출의 중심이다.
++- `VM_UNINIT` page는 첫 claim 때 anon/file page로 바뀌고, `lazy_load_segment()` 같은 callback이 frame 내용을 채운다.
++- QEMU는 claim 정책을 모르며, guest #PF와 guest page table walk 효과만 재현한다.
++
++## 다음 링크
++
++- [[supplemental-page-table-knowledge]]: SPT가 lazy page의 의미를 기억하는 이유
++- [[page-fault-trace]]: #PF가 `vm_try_handle_fault()`까지 들어오는 전체 흐름
++- [[page-fault-instruction-retry-knowledge]]: claim이 끝난 뒤 같은 명령어가 왜 다시 실행되는지
++- [[frame-eviction-trace]]: claim하려는데 빈 frame이 없을 때 이어지는 흐름
++- [[mmap-file-backed-page-knowledge]]: file-backed page가 첫 fault에서 frame으로 채워지는 방식
++- [[pml4-get-page-kernel-va-lab]]: claim 뒤 유저 VA가 kernel VA로 관찰되는 계산
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index 2222222..3333333 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -76,6 +76,7 @@ related_to:
+   - [[accessed-dirty-eviction-knowledge]]
+   - [[page-fault-error-code-knowledge]]
+   - [[page-fault-instruction-retry-knowledge]]
++  - [[lazy-page-claim-trace]]
+   - [[tlb-cr3-address-space-switch-knowledge]]
+   - [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]
+ - 3.5단계: 파일이 메모리처럼 보이는 법
+@@ -257,6 +258,7 @@ related_to:
+     - [[accessed-dirty-eviction-knowledge]]
+     - [[page-fault-error-code-knowledge]]
+     - [[page-fault-instruction-retry-knowledge]]
++    - [[lazy-page-claim-trace]]
+     - [[tlb-cr3-address-space-switch-knowledge]]
+     - [[supplemental-page-table-knowledge]]
+     - [[stack-growth-page-fault-knowledge]]
+@@ -419,6 +421,7 @@ related_to:
+     - [[accessed-dirty-eviction-knowledge]]: accessed bit로 victim 후보를 미루고 dirty bit로 swap/file write-back 필요성을 판단하는 법
+     - [[page-fault-error-code-knowledge]]: `PF_P/PF_W/PF_U`가 `vm_try_handle_fault()` 판단표로 바뀌는 과정
+     - [[page-fault-instruction-retry-knowledge]]: `CR2`와 `f->rip`를 구분하고 `iretq`가 같은 명령어로 돌아가는 이유
++    - [[lazy-page-claim-trace]]: SPT의 lazy page가 `struct frame`, PTE, 실제 4096바이트 내용으로 바뀌는 순간
+     - [[tlb-cr3-address-space-switch-knowledge]]: CR3가 현재 page table root를 고르고 TLB가 최근 번역을 캐시하는 방식
+     - [[supplemental-page-table-knowledge]]: fault address가 원래 어떤 backing 정보를 가진 페이지인지 찾는 표
+     - [[mmap-file-backed-page-knowledge]]: 파일 byte가 user VA page로 보이고 dirty page가 write-back되는 흐름
+@@ -1165,6 +1168,7 @@ related_to:
+   - [[user-pointer-validation-trace]]
+   - [[process-wait-exit-trace]]
+   - [[frame-eviction-trace]]
++  - [[lazy-page-claim-trace]]
+   - [[mmap-syscall-handler-trace]]
+   - [[mmap-dirty-writeback-qemu-trace]]
+ - 실험
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index 4444444..5555555 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -39,6 +39,7 @@ related_to:
+ - [[accessed-dirty-eviction-knowledge]]
+ - [[page-fault-error-code-knowledge]]
+ - [[page-fault-instruction-retry-knowledge]]
++- [[lazy-page-claim-trace]]
+ - [[tlb-cr3-address-space-switch-knowledge]]
+ - [[supplemental-page-table-knowledge]]
+ - [[stack-growth-page-fault-knowledge]]
+@@ -56,6 +57,7 @@ related_to:
+ - [[accessed-dirty-eviction-knowledge]]: accessed bit와 dirty bit를 victim 선택, swap, file write-back 판단으로 연결하는 법
+ - [[page-fault-error-code-knowledge]]: `CR2`와 `PF_P/PF_W/PF_U`로 not-present, write, user fault를 분류하는 법
+ - [[page-fault-instruction-retry-knowledge]]: fault handler가 page table을 고친 뒤 `iretq`로 같은 명령어를 다시 실행하는 이유
++- [[lazy-page-claim-trace]]: SPT의 lazy page가 첫 fault에서 frame, PTE, 실제 byte 내용으로 바뀌는 흐름
+ - [[tlb-cr3-address-space-switch-knowledge]]: CR3가 page table root를 고르고 TLB가 최근 VA -> PA 번역을 캐시하는 방식
+ - [[supplemental-page-table-knowledge]]: page table만으로는 기억할 수 없는 "원래 합법한 페이지" 정보
+ - [[stack-growth-page-fault-knowledge]]: `CR2`, 유저 `RSP`, `USER_STACK`으로 스택 성장 fault를 살릴지 판단하는 기준
+@@ -66,6 +68,7 @@ related_to:
+ ## 흐름 추적
+ 
+ - [[page-fault-trace]]: #PF가 OS 정책으로 이어지는 관문
++- [[lazy-page-claim-trace]]: `vm_do_claim_page()`가 page를 resident mapping으로 만드는 흐름
+ - [[frame-eviction-trace]]: 빈 frame이 없을 때 victim page를 내보내고 frame을 재사용하는 흐름
+ - [[mmap-syscall-handler-trace]]: user `mmap()` register 인자가 `syscall_handler()`에서 `do_mmap()`으로 이어지는 흐름
+ - [[mmap-munmap-range-trace]]: `do_munmap(addr)`가 mapping 범위를 찾아 dirty page와 PTE/SPT를 정리하는 흐름
+diff --git a/notes/os/supplemental-page-table-knowledge.md b/notes/os/supplemental-page-table-knowledge.md
+index 6666666..7777777 100644
+--- a/notes/os/supplemental-page-table-knowledge.md
++++ b/notes/os/supplemental-page-table-knowledge.md
+@@ -439,6 +439,7 @@ PintOS에서는 이 장부를 직접 설계해야 한다. 핵심은 page-rounded
+ ## 다음 링크
+ 
+ - [[page-fault-trace]]: #PF가 `vm_try_handle_fault()`로 들어오는 흐름
++- [[lazy-page-claim-trace]]: SPT의 `struct page`가 첫 fault에서 frame과 PTE를 얻는 흐름
+ - [[stack-growth-page-fault-knowledge]]: SPT에 없는 fault라도 스택 성장으로 살릴 수 있는 조건
+ - [[frame-eviction-trace]]: SPT가 기억한 page 의미를 이용해 frame을 내보내고 다시 claim하는 흐름
+ - [[mmap-file-backed-page-knowledge]]: file-backed page 약속이 SPT에 어떻게 남는지
+diff --git a/traces/os/page-fault-trace.md b/traces/os/page-fault-trace.md
+index 8888888..9999999 100644
+--- a/traces/os/page-fault-trace.md
++++ b/traces/os/page-fault-trace.md
+@@ -249,6 +249,7 @@ QEMU 관점에서는 다음 일만 보인다.
+ - [[address-translation-memory]]: 주소 변환의 큰 그림(숫자 예제 포함)
+ - [[page-fault-error-code-knowledge]]: `CR2`와 `PF_P/PF_W/PF_U`로 fault 종류를 분류하는 법
+ - [[page-fault-instruction-retry-knowledge]]: fault를 살린 뒤 같은 명령어를 다시 실행하는 이유
++- [[lazy-page-claim-trace]]: `vm_try_handle_fault()`가 실제 frame, PTE, page 내용을 준비하는 흐름
+ - [[stack-growth-page-fault-knowledge]]: `CR2`와 유저 `RSP`로 스택 성장 fault를 살릴지 판단하는 기준
+ - [[supplemental-page-table-knowledge]]: page table만으로는 부족한 fault 처리용 의미 장부
+ - [[frame-eviction-trace]]: fault를 살리려는데 빈 frame이 없을 때 이어지는 흐름
+diff --git a/notes/os/page-fault-instruction-retry-knowledge.md b/notes/os/page-fault-instruction-retry-knowledge.md
+index aaaaaaa..bbbbbbb 100644
+--- a/notes/os/page-fault-instruction-retry-knowledge.md
++++ b/notes/os/page-fault-instruction-retry-knowledge.md
+@@ -382,6 +382,7 @@ QEMU GDB stub으로 연결했다면 `info registers rip cr2`도 함께 본다.
+ 
+ - [[page-fault-trace]]: #PF가 PintOS handler와 VM 정책으로 들어오는 전체 흐름
+ - [[page-fault-error-code-knowledge]]: `PF_P/PF_W/PF_U`로 fault 종류를 분류하는 법
++- [[lazy-page-claim-trace]]: 재실행 전에 frame, PTE, 4096바이트 내용이 실제로 준비되는 흐름
+ - [[stack-growth-page-fault-knowledge]]: 같은 명령어 재실행을 가능하게 만드는 stack page 추가 기준
+ - [[supplemental-page-table-knowledge]]: fault 주소가 원래 합법한 page인지 판단하는 커널 장부
+ - [[qemu-gdb-stub-guest-state-knowledge]]: GDB에서 보이는 `rip`와 `cr2`가 guest state인 이유
