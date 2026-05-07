@@ -1,0 +1,476 @@
+diff --git a/labs/os/swap-lab.md b/labs/os/swap-lab.md
+new file mode 100644
+index 0000000..bdd589b
+--- /dev/null
++++ b/labs/os/swap-lab.md
+@@ -0,0 +1,470 @@
++---
++type: Lab
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - layer:memory
++  - layer:kernel
++  - layer:device
++  - layer:emulator
++  - topic:swap
++  - topic:frame
++  - topic:page-table
++  - topic:gdb
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[frame-eviction-trace]]"
++  - "[[page-fault-trace]]"
++  - "[[supplemental-page-table-knowledge]]"
++---
++
++# Swap Lab (anonymous page가 디스크 슬롯으로 나갔다 돌아오는 법)
++
++## 작은 질문
++
++프로그램이 RAM보다 큰 anonymous memory를 쓰면, 운영체제는 그 데이터를 어디에 숨겨 두었다가 다시 가져올까?
++
++예를 들어 `swap-anon` 테스트는 10MB 메모리 설정에서 20MB짜리 배열을 4KB 간격으로 건드린다. 모든 페이지를 RAM에 계속 둘 수 없다면, 어떤 페이지는 잠깐 디스크로 밀려나야 한다.
++
++이 Lab의 질문은 이것이다.
++
++> 4KB짜리 anonymous page 한 장은 swap disk의 몇 번째 sector들에 저장될까?
++
++## 목차
++
++- 왜 필요한가
++- 핵심 모델
++- 예시 상황
++- Linux / Windows에서는
++- PintOS에서는
++- QEMU에서는
++- 차이점
++- 코드 증거
++- 숫자와 메모리
++- 직접 확인
++- 정리
++- 다음 링크
++
++## 왜 필요한가
++
++[[frame-eviction-trace]]는 빈 frame이 없을 때 victim page를 골라 frame을 재사용해야 한다고 설명한다. 하지만 victim이 anonymous page라면 한 가지 문제가 남는다.
++
++anonymous page는 실행 파일이나 mmap 파일처럼 "원본 파일의 offset"으로 돌아갈 곳이 없다.
++
++예:
++
++```c
++static char big_chunks[20 * 1024 * 1024];
++big_chunks[i * 4096] = (char) i;
++```
++
++이 바이트는 프로그램이 실행 중에 만든 값이다. frame을 비우기 전에 이 값을 어딘가에 저장하지 않으면, 나중에 같은 주소를 다시 읽을 때 값이 사라진다.
++
++그래서 swap은 이런 질문에 답한다.
++
++- RAM에서 쫓겨난 anonymous page의 4096B를 어디에 보관할까?
++- 나중에 page fault가 다시 나면 어느 위치에서 읽어 올까?
++- 그 위치가 이미 사용 중인지 아닌지는 누가 기억할까?
++
++## 핵심 모델
++
++처음에는 swap을 "RAM 밖에 있는 임시 4KB 보관함 배열"로 생각하면 된다.
++
++| 개념 | 뜻 |
++|---|---|
++| frame | 지금 RAM에 올라와 있는 4KB 자리 |
++| anonymous page | 파일 원본 없이 실행 중에 생긴 page |
++| swap disk | anonymous page 내용을 임시 저장하는 디스크 |
++| swap slot | page 하나를 저장하는 swap disk의 연속 sector 묶음 |
++| slot bitmap | 어떤 swap slot이 비었는지 표시하는 표 |
++
++흐름은 두 방향이다.
++
++```text
++swap out:
++  victim frame 선택
++  -> page가 VM_ANON인지 확인
++  -> 빈 swap slot 선택
++  -> frame의 4096B를 disk sector 8개에 기록
++  -> page metadata에 slot 번호 저장
++  -> page table mapping 제거
++
++swap in:
++  같은 VA 접근으로 page fault 발생
++  -> SPT에서 struct page 찾기
++  -> frame 새로 확보
++  -> page metadata의 slot 번호 확인
++  -> disk sector 8개를 frame으로 읽음
++  -> slot을 free로 되돌림
++  -> page table mapping 설치
++```
++
++이 말은 즉, swap은 [[supplemental-page-table-knowledge|SPT]]와 함께 동작한다. page table은 "지금 resident인가"만 말해 주고, SPT와 page metadata가 "resident가 아니라면 swap slot 몇 번에 있는가"를 기억해야 한다.
++
++## 예시 상황
++
++`pintos/tests/vm/swap-anon.c`는 다음 상황을 만든다.
++
++```text
++CHUNK_SIZE = 20MB
++PAGE_SIZE  = 4096B
++PAGE_COUNT = 20MB / 4096B = 5120 pages
++```
++
++테스트는 각 page의 첫 바이트에 값을 쓴다.
++
++```text
++page 0    첫 바이트 = 0
++page 1    첫 바이트 = 1
++page 511  첫 바이트 = 255
++page 512  첫 바이트 = 0
++```
++
++`(char) i`로 저장하므로 256마다 값이 반복된다. 중요한 것은 모든 페이지의 첫 바이트가 나중에 다시 읽어도 같은 값이어야 한다는 점이다.
++
++겉으로는 단순한 배열 검사지만, 내부에서는 이런 일이 일어날 수 있다.
++
++```text
++write big_chunks[4096 * i]
++  -> page fault
++  -> frame 확보
++  -> 메모리에 값 기록
++  -> frame 부족
++  -> 오래된 anonymous page swap out
++  -> 나중에 다시 접근
++  -> swap in
++  -> 값 비교
++```
++
++## Linux / Windows에서는
++
++Linux와 Windows도 anonymous memory를 RAM에 계속 둘 수 없으면 swap/pagefile 같은 backing store를 사용할 수 있다.
++
++하지만 현실 OS는 PintOS보다 훨씬 많은 상태를 본다.
++
++- Linux는 anonymous page, file-backed page, page cache, reclaim, cgroup, NUMA, dirty/writeback 상태를 함께 고려한다.
++- Windows는 working set, standby/modified page list, pagefile, memory compression 같은 정책을 함께 다룬다.
++
++현실 OS에서도 핵심 질문은 같다.
++
++> 파일 원본이 없는 page를 RAM에서 내보내려면, 나중에 복원할 수 있는 backing store가 필요하다.
++
++다만 현실 OS의 swap은 단순한 "slot 배열"보다 훨씬 복잡하고, 성능과 보안 정책도 함께 들어간다.
++
++## PintOS에서는
++
++PintOS KAIST 스켈레톤에서는 anonymous page의 swap 자리가 이미 파일과 함수 이름으로 나뉘어 있다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/anon.c`
++  - `vm_anon_init()`
++  - `anon_swap_in()`
++  - `anon_swap_out()`
++  - `anon_destroy()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/anon.h`
++  - `struct anon_page`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/devices/disk.c`
++  - `disk_get()`
++  - `disk_read()`
++  - `disk_write()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/devices/disk.h`
++  - `DISK_SECTOR_SIZE`
++
++현재 코드에서 중요한 점은, swap도 아직 구현이 아니라 TODO 자리라는 것이다.
++
++`vm_anon_init()`은 이렇게 시작한다.
++
++```c
++static struct disk *swap_disk;
++
++void
++vm_anon_init (void) {
++    /* TODO: Set up the swap_disk. */
++    swap_disk = NULL;
++}
++```
++
++그리고 `struct anon_page`도 비어 있다.
++
++```c
++struct anon_page {
++};
++```
++
++이 빈 구조체에는 보통 다음 의미의 정보를 채우게 된다.
++
++```text
++struct anon_page
++  -> swap slot 번호
++  -> 지금 slot에 저장되어 있는지 여부
++```
++
++PintOS의 디스크 배치는 `disk.c` 주석에 명시되어 있다.
++
++```text
++0:0 - 부트 로더, 커널 명령줄 인자, 운영체제 커널
++0:1 - 파일 시스템
++1:0 - scratch
++1:1 - swap
++```
++
++따라서 스켈레톤에서 swap disk를 잡는 대표 흐름은 `disk_get(1, 1)`이다. 단, 이 문서는 현재 저장소 코드가 이미 그렇게 구현됐다고 말하는 것이 아니라, 코드 주석과 TODO가 요구하는 연결 지점을 설명한다.
++
++## QEMU에서는
++
++QEMU는 "이 sector가 swap slot이다"라는 의미를 모른다.
++
++QEMU가 보는 것은 guest인 PintOS가 ATA 디스크 명령을 보내고, 어떤 sector를 읽거나 쓰는 동작이다.
++
++PintOS 쪽에서는 `disk_read()`와 `disk_write()`가 ATA PIO 포트에 명령을 보낸다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/devices/disk.c`
++  - `select_sector()`
++  - `issue_pio_command()`
++  - `output_sector()`
++  - `input_sector()`
++
++QEMU 쪽에서는 IDE 장치 모델이 그 명령을 block backend I/O로 바꾼다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/hw/ide/core.c`
++  - `WIN_READ` -> `cmd_read_pio`
++  - `WIN_WRITE` -> `cmd_write_pio`
++  - `ide_sector_read()`
++  - `ide_sector_write()`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/block/block-backend.c`
++  - `blk_aio_preadv()`
++  - `blk_aio_pwritev()`
++
++이 말은 즉:
++
++```text
++PintOS anon_swap_out()
++  -> PintOS disk_write(swap_disk, sector, buffer)
++  -> guest ATA PIO write
++  -> QEMU IDE model
++  -> QEMU block backend write
++  -> host의 swap.dsk 파일에 bytes 반영
++```
++
++PintOS의 swap 정책은 PintOS가 정한다. QEMU는 그 정책을 이해하지 않고, 디스크처럼 보이는 장치를 제공한다.
++
++## 차이점
++
++| 항목 | Linux / Windows | PintOS | QEMU |
++|---|---|---|---|
++| swap 의미 | 커널 VM 정책의 일부 | `anon_swap_in/out` 과제 구현 | 의미를 모름 |
++| 저장 위치 | swap partition/file, pagefile 등 | `disk_get(1, 1)`로 얻는 swap disk | host 파일을 block device처럼 제공 |
++| page 크기 | 보통 4KB지만 huge page 등 다양 | `PGSIZE = 4096` | guest가 요청한 sector I/O만 처리 |
++| slot 관리 | 복잡한 allocator와 reclaim 정책 | bitmap/배열 등으로 직접 구현 | slot 개념 없음 |
++| 실패 처리 | OOM, reclaim, pagefile 확장 등 | slot 부족 시 실패/panic/test fail 가능 | I/O 성공/실패만 전달 |
++
++## 코드 증거
++
++### 1. page 하나는 4096B다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/vaddr.h`
++
++핵심 값:
++
++```c
++#define PGBITS 12
++#define PGSIZE (1 << PGBITS)
++```
++
++따라서 PintOS page/frame 하나는 `2^12 = 4096B`다.
++
++### 2. disk sector 하나는 512B다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/devices/disk.h`
++
++핵심 값:
++
++```c
++#define DISK_SECTOR_SIZE 512
++```
++
++따라서 anonymous page 한 장을 통째로 저장하려면 sector 8개가 필요하다.
++
++```text
++4096B / 512B = 8 sectors
++```
++
++### 3. swap disk는 네 번째 drive로 붙는다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/utils/pintos`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/devices/disk.c`
++
++`pintos` 실행 스크립트는 drive를 다음 순서로 QEMU에 붙인다.
++
++```text
++index 0 -> os
++index 1 -> fs
++index 2 -> scratch
++index 3 -> swap
++```
++
++PintOS의 `disk.c`는 이것을 `1:1 - swap`으로 설명한다. 그래서 guest PintOS 코드에서는 swap disk를 `disk_get(1, 1)`로 잡는 흐름이 자연스럽다.
++
++### 4. swap 테스트는 실제로 메모리 압박을 만든다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/swap-anon.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/Make.tests`
++
++`swap-anon`은 `CHUNK_SIZE = 20MB` 배열을 page 단위로 건드리고, 테스트 설정은 `MEMORY = 10`, `SWAP_DISK = 30`을 사용한다.
++
++이 테스트는 "anonymous page를 쫓아냈다가 다시 읽어도 값이 유지되는가"를 확인한다.
++
++## 숫자와 메모리
++
++### 1. slot 3은 어느 sector를 쓰는가
++
++입력:
++
++```text
++PGSIZE            = 4096
++DISK_SECTOR_SIZE  = 512
++sectors_per_page  = 4096 / 512 = 8
++slot              = 3
++```
++
++계산:
++
++```text
++base sector = slot * sectors_per_page
++            = 3 * 8
++            = 24
++
++slot 3이 쓰는 sector = 24, 25, 26, 27, 28, 29, 30, 31
++```
++
++메모리 복사 모델:
++
++```text
++frame kva + 0       -> sector 24
++frame kva + 512     -> sector 25
++frame kva + 1024    -> sector 26
++...
++frame kva + 3584    -> sector 31
++```
++
++즉 `disk_write()`를 8번 호출하거나, 같은 의미의 루프를 돌며 512B씩 나누어 기록해야 한다.
++
++### 2. `swap-anon`의 크기 감각
++
++`swap-anon.c`의 큰 배열은 다음 크기다.
++
++```text
++20MB = 20 * 1024 * 1024 = 20,971,520B
++page count = 20,971,520 / 4096 = 5120 pages
++```
++
++`pintos/tests/vm/Make.tests`는 `swap-anon`에 `SWAP_DISK = 30`을 준다.
++
++현재 `pintos/utils/pintos` 스크립트는 정수 disk 크기를 임시 파일로 만들 때 `0xfc000 * size` 바이트를 쓴다.
++
++```text
++swap disk bytes = 0xfc000 * 30
++                = 1,032,192 * 30
++                = 30,965,760B
++
++sectors = 30,965,760 / 512 = 60,480
++slots   = 60,480 / 8 = 7,560 page slots
++```
++
++이 숫자만 보면 `swap-anon`의 5120 pages를 담을 수 있는 slot 수가 있다. 물론 실제 실행에서는 커널, 파일 시스템, frame table 구현, eviction 정책, pinning 여부가 함께 영향을 준다.
++
++## 직접 확인
++
++아래 체크리스트는 구현이 들어간 뒤 GDB로 확인할 지점이다.
++
++### 1. swap disk가 잡히는지 확인
++
++```text
++break vm_anon_init
++next
++p swap_disk
++p swap_disk->name
++```
++
++기대 흐름:
++
++```text
++swap_disk != NULL
++swap_disk->name == "hd1:1" 또는 같은 의미의 swap drive
++```
++
++### 2. swap out이 sector 8개를 쓰는지 확인
++
++```text
++break anon_swap_out
++break disk_write
++continue
++p page->va
++p page->frame->kva
++p slot
++p sector
++```
++
++확인할 것:
++
++```text
++slot 3이면 sector 24..31이 연속으로 기록되는가?
++disk_write 호출 횟수가 page 하나당 8번인가?
++```
++
++### 3. swap in 뒤 값이 돌아오는지 확인
++
++```text
++break anon_swap_in
++break disk_read
++continue
++x/16xb kva
++```
++
++확인할 것:
++
++```text
++swap out 전에 frame에 있던 첫 바이트와
++swap in 뒤 frame의 첫 바이트가 같은가?
++```
++
++### 4. 테스트로 확인
++
++```text
++cd /Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos
++make -C build check TESTS=tests/vm/swap-anon
++```
++
++현재 저장소의 VM 구현은 아직 TODO가 많으므로, 이 명령은 지금 당장 통과 확인용이라기보다 구현 후 회귀 테스트용이다.
++
++## 정리
++
++- anonymous page는 원본 파일이 없으므로 eviction 때 swap backing이 필요하다.
++- PintOS의 page는 4096B이고 disk sector는 512B라서, page 하나는 sector 8개로 나뉜다.
++- `anon_swap_out()`은 frame의 4096B를 빈 swap slot에 기록하고, `anon_swap_in()`은 같은 slot에서 다시 읽어야 한다.
++- PintOS는 swap slot 정책을 구현해야 하지만, QEMU는 그 의미를 모른다. QEMU는 IDE/block I/O만 에뮬레이션한다.
++
++## 다음 링크
++
++- [[frame-eviction-trace]]: swap out이 호출되는 앞 단계
++- [[page-fault-trace]]: swap in이 다시 시작되는 입구
++- [[supplemental-page-table-knowledge]]: page metadata가 resident/swap 상태를 기억해야 하는 이유
++- `mmap-file-backed-page-knowledge`: anonymous page와 file-backed page의 backing 차이
