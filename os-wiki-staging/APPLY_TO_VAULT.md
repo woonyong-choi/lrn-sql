@@ -1,19 +1,22 @@
-This run produced a “vault overlay” because the Codex sandbox cannot write to `/Users/woonyong/vault`.
+This run produced a vault overlay because the Codex sandbox cannot write to `/Users/woonyong/vault`.
 
-To apply the changes yourself, run one of the following commands in your local terminal (outside Codex):
+Current run overlay:
 
-1) Overlay-copy (recommended):
+`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W08-SQL/os-wiki-staging/2026-05-08-lazy-file-backed-page/vault-overlay`
 
-`rsync -av --progress /Users/woonyong/workspace/Krafton-Jungle/SW_AI-W08-SQL/os-wiki-staging/vault-overlay/ /Users/woonyong/vault/`
+To apply this run to the vault from a local terminal outside Codex:
 
-2) Manual copy:
+```sh
+rsync -av --progress /Users/woonyong/workspace/Krafton-Jungle/SW_AI-W08-SQL/os-wiki-staging/2026-05-08-lazy-file-backed-page/vault-overlay/ /Users/woonyong/vault/
+```
 
-- Copy these into `/Users/woonyong/vault/` (same relative paths):
-  - `traces/os/thread-scheduler-trace.md`
-  - `traces/os/context-switch-trace.md`
-  - `maps/os/concept-to-code-map.md`
-  - `maps/os/week-1-threads-map.md`
+Files in this run:
 
-Overlay root:
+- `traces/os/lazy-file-backed-page-trace.md`
+- `maps/os/concept-to-code-map.md`
+- `maps/os/week-3-4-virtual-memory-map.md`
+- `notes/os/mmap-file-backed-page-knowledge.md`
+- `traces/os/page-fault-trace.md`
+- `traces/os/frame-eviction-trace.md`
 
-`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W08-SQL/os-wiki-staging/vault-overlay`
+The older `os-wiki-staging/vault-overlay/` directory is preserved as prior-run output and is not the recommended apply target for this run.
