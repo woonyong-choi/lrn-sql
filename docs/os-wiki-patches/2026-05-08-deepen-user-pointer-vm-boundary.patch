@@ -1,0 +1,243 @@
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index ff56d94..40c9715 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -669,6 +669,7 @@ related_to:
+     - `pintos/vm/vm.c`
+       - `vm_try_handle_fault`
+     - `pintos/threads/mmu.c`
++      - `pml4_get_page`
+       - `pml4_set_page`
+   - QEMU 코드
+     - `system/physmem.c`
+@@ -678,6 +679,7 @@ related_to:
+     - `target/i386/tcg/system/excp_helper.c`
+   - 증명하는 것
+     - PintOS page table은 guest OS 자료구조다.
++    - `pml4_get_page()`는 user VA 자체가 아니라 같은 frame을 커널이 볼 수 있는 kernel VA를 돌려준다.
+     - QEMU는 guest physical memory를 host process 안의 address space로 backing한다.
+   - 연결 문서
+     - [[address-translation-memory]]
+@@ -686,6 +688,7 @@ related_to:
+     - [[page-table-entry-bits-knowledge]]
+     - [[page-fault-error-code-knowledge]]
+     - [[stack-growth-page-fault-knowledge]]
++    - [[user-pointer-validation-trace]]
+ - frame eviction
+   - PintOS 코드
+     - `pintos/vm/vm.c`
+@@ -793,6 +796,18 @@ related_to:
+     - virtual page number = `0x8048`
+   - 연결 문서
+     - [[address-translation-memory]]
++- user VA에서 kernel VA로 보기
++  - 입력
++    - `user VA = 0x8048123`
++    - `KERN_BASE = 0x8004000000`
++    - `PTE frame = 0x001234000`
++  - 계산
++    - `offset = 0x123`
++    - `ptov(PTE frame) = 0x8005234000`
++    - `pml4_get_page()` 반환값 = `0x8005234123`
++  - 연결 문서
++    - [[user-pointer-validation-trace]]
++    - [[guest-physical-memory-qemu-knowledge]]
+ - guest physical memory backing
+   - 입력
+     - `guest PA = 0x001234123`
+@@ -1035,14 +1050,17 @@ related_to:
+   - breakpoint
+     - `page_fault`
+     - `vm_try_handle_fault`
++    - `pml4_get_page`
+     - `pml4_set_page`
+   - 확인
+     - fault address
+     - error code
+     - page table entry
+     - frame mapping
++    - user pointer가 지금 present mapping인지, SPT/page fault로 살릴 후보인지
+   - 연결 문서
+     - [[address-translation-memory]]
++    - [[user-pointer-validation-trace]]
+ - priority preemption 확인
+   - breakpoint
+     - `thread_create`
+diff --git a/maps/os/week-2-user-programs-map.md b/maps/os/week-2-user-programs-map.md
+index 8efa08a..9fd7c84 100644
+--- a/maps/os/week-2-user-programs-map.md
++++ b/maps/os/week-2-user-programs-map.md
+@@ -35,6 +35,7 @@ PintOS 2주차 User Programs 학습에서 유저 모드, ELF 로딩, 시스템 
+ - [[argument-passing-lab]]
+ - [[syscall-end-to-end]]
+ - [[syscall-entry-stack-switch-trace]]
++- [[user-pointer-validation-trace]]
+ - [[file-descriptor-knowledge]]
+ - [[cpu-register-execution]]
+ 
+@@ -43,6 +44,7 @@ PintOS 2주차 User Programs 학습에서 유저 모드, ELF 로딩, 시스템 
+ - [[elf-loader-knowledge]]: 실행 파일의 program header가 유저 가상 page mapping으로 바뀌는 지점
+ - [[cpu-register-execution]]: `RAX/RDI/RSI/RDX`가 syscall 요청서가 되고 `struct intr_frame`에 저장되는 방식
+ - [[syscall-entry-stack-switch-trace]]: `syscall` 명령 뒤 유저 스택에서 커널 스택으로 옮겨가고 register snapshot이 만들어지는 순간
++- [[user-pointer-validation-trace]]: 유저 포인터를 주소 범위, page table mapping, VM 이후 not-present 후보로 나눠 보는 기준
+ - [[file-descriptor-knowledge]]: fd 숫자가 “무엇을 가리키는지”부터 잡기
+ - [[fd-table-fork-duplication-knowledge]]: `fork()`가 fd table과 열린 파일 위치를 어떻게 물려주는지 확인
+ 
+@@ -50,7 +52,7 @@ PintOS 2주차 User Programs 학습에서 유저 모드, ELF 로딩, 시스템 
+ 
+ - [[syscall-end-to-end]]
+ - [[syscall-entry-stack-switch-trace]]
+-- [[user-pointer-validation-trace]]
++- [[user-pointer-validation-trace]]: `write(fd, buffer, size)`에서 user VA가 검증되고 kernel VA로 번역되는 흐름
+ - [[process-wait-exit-trace]]: `exit(status)`가 부모의 `wait(pid)` 반환값이 되는 흐름
+ 
+ ## 실험
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index 8694cd5..7e7d015 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -60,6 +60,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ ## 흐름 추적
+ 
+ - [[page-fault-trace]]: #PF가 OS 정책으로 이어지는 관문
++- [[user-pointer-validation-trace]]: VM 이후 `pml4_get_page() == NULL`이 불법 주소인지 lazy/stack-growth 후보인지 가르는 관점
+ - [[frame-eviction-trace]]: 빈 frame이 없을 때 victim page를 내보내고 frame을 재사용하는 흐름
+ - [[mmap-syscall-handler-trace]]: user `mmap()` register 인자가 `syscall_handler()`에서 `do_mmap()`으로 이어지는 흐름
+ - [[mmap-munmap-range-trace]]: `do_munmap(addr)`가 mapping 범위를 찾아 dirty page와 PTE/SPT를 정리하는 흐름
+diff --git a/traces/os/user-pointer-validation-trace.md b/traces/os/user-pointer-validation-trace.md
+index 319f414..cc2aadb 100644
+--- a/traces/os/user-pointer-validation-trace.md
++++ b/traces/os/user-pointer-validation-trace.md
+@@ -3,6 +3,7 @@ type: Trace
+ status: Draft
+ week:
+   - user-programs
++  - vm
+ systems:
+   - Linux
+   - Windows
+@@ -13,6 +14,7 @@ tags:
+   - domain:pintos
+   - domain:qemu
+   - week:user-programs
++  - week:vm
+   - layer:user
+   - layer:kernel
+   - layer:memory
+@@ -21,8 +23,11 @@ tags:
+   - topic:gdb
+ related_to:
+   - "[[week-2-user-programs-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
+   - "[[syscall-end-to-end]]"
+   - "[[address-translation-memory]]"
++  - "[[page-fault-trace]]"
++  - "[[supplemental-page-table-knowledge]]"
+   - "[[concept-to-code-map]]"
+ ---
+ 
+@@ -59,6 +64,17 @@ related_to:
+ 
+ 3) **구간(range length)**: `[p, p+size)`가 페이지 경계를 넘더라도, 구간 전체가 매핑되어 있다.
+ 
++## 꼬리에 꼬리를 무는 질문
++
++이번 Trace를 읽을 때는 질문을 이렇게 이어가면 된다.
++
++- 왜 커널은 유저 포인터를 바로 역참조하면 안 될까?
++- 유저 주소 범위 안이라는 사실만으로 충분할까?
++- `pml4_get_page()`가 `NULL`을 돌려주면 언제 "불법 주소"이고, 언제 "아직 올리지 않은 합법 page"일까?
++- VM 이후에는 유저 포인터 검증과 page fault 처리가 어떻게 역할을 나눠야 할까?
++- `pml4_get_page()`가 돌려주는 주소는 유저 VA인가, 커널이 같은 frame을 보기 위한 kernel VA인가?
++- QEMU는 유저 포인터 검증 정책을 알까, 아니면 실패한 주소 변환을 #PF로 전달만 할까?
++
+ ## 예시 상황 (실제로 어디서 터지나?)
+ 
+ ### 예시 1) `NULL` 포인터
+@@ -169,6 +185,86 @@ for (start = pg_round_down (addr); start <= pg_round_down (addr + size - 1); sta
+ 
+ 이 루프는 “버퍼가 걸치는 모든 페이지”를 한 번씩 찍어 보며 매핑을 확인한다.
+ 
++### 5) Project 3/VM 이후에는 무엇이 달라지나?
++
++Project 2의 유저 프로그램 과제에서는 `pml4_get_page(curr->pml4, addr) == NULL`을 곧바로 "잘못된 포인터"로 보아도 큰 흐름이 단순하다. 이미 로드된 유저 페이지를 대상으로 syscall 인자를 검사하기 때문이다.
++
++하지만 VM 주차로 가면 이 판단이 더 조심스러워진다.
++
++```text
++pml4_get_page(...) == NULL
++  -> 진짜 불법 주소일 수 있음
++  -> 아직 page table에 present하지 않은 합법 주소일 수도 있음
++```
++
++두 번째 경우가 생기는 이유는 [[supplemental-page-table-knowledge|supplemental page table]] 때문이다. lazy loading, swapped-out page, file-backed page, stack growth 후보는 아직 hardware page table에는 없을 수 있다. 그래도 커널의 의미 장부에는 "나중에 살릴 수 있는 page"로 남아 있을 수 있다.
++
++이 말은 즉, VM 이후의 검증은 단순히 `pml4_get_page()`만으로 끝나면 안 된다.
++
++| 상황 | `pml4_get_page()` | 추가로 봐야 할 것 | 결론 |
++|---|---:|---|---|
++| 커널 주소 또는 `NULL` | 보통 실패 | 주소 범위 | 즉시 거부 |
++| 현재 present mapping 있음 | non-NULL | 접근 권한, 구간 전체 | 바로 접근 가능 후보 |
++| SPT에 lazy/file/anon page 있음 | NULL | SPT lookup, fault 처리 | page fault로 살릴 수 있음 |
++| 스택 근처 not-present fault | NULL | `rsp`, `USER_STACK`, 한계 크기 | stack growth 후보 |
++| SPT에도 없고 스택도 아님 | NULL | 없음 | 종료 후보 |
++
++따라서 구현 관점의 질문은 이렇게 바뀐다.
++
++```text
++Project 2:
++  "이 포인터가 지금 당장 매핑되어 있나?"
++
++Project 3/VM:
++  "지금 당장 매핑되어 있나?"
++  "아니라면, page fault handler가 합법적으로 살릴 수 있는 주소인가?"
++```
++
++`check_address()` 같은 선검증 방식을 계속 쓸지, 실제 접근 중 #PF를 받아 처리하는 방식으로 바꿀지는 구현 선택이다. 중요한 점은 `pml4_get_page() == NULL`을 무조건 불법으로만 외우면 lazy loading과 stack growth 테스트에서 판단이 막힌다는 것이다.
++
++## 숫자와 메모리: user VA가 kernel VA로 바뀌는 순간
++
++`pml4_get_page()`의 반환값은 유저가 넘긴 주소 그대로가 아니다.
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/threads/mmu.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/threads/vaddr.h`
++
++핵심 한 줄은 다음이다.
++
++```c
++return ptov (PTE_ADDR (*pte)) + pg_ofs (uaddr);
++```
++
++PintOS에서 `KERN_BASE = 0x8004000000`이고, 유저 주소가 다음이라고 하자.
++
++```text
++user VA      = 0x8048123
++page offset  = 0x123
++PTE frame    = 0x001234000
++```
++
++그러면 `pml4_get_page()`는 이렇게 계산한다.
++
++```text
++ptov(0x001234000) = 0x8004000000 + 0x001234000
++                  = 0x8005234000
++
++return value      = 0x8005234000 + 0x123
++                  = 0x8005234123
++```
++
++이 반환값 `0x8005234123`은 PintOS 커널이 같은 guest physical frame을 읽기 위한 kernel virtual address다. 유저 프로그램이 알고 있던 `0x8048123`과 숫자가 다르지만, 같은 바이트를 가리키도록 page table과 kernel mapping이 이어져 있다.
++
++초보자가 자주 하는 착각은 다음이다.
++
++| 착각 | 바로잡기 |
++|---|---|
++| `pml4_get_page()`가 user VA를 검증만 하고 같은 값을 돌려준다 | present하면 kernel VA를 돌려준다 |
++| PTE frame 주소가 host physical address다 | PintOS가 보는 guest physical address다 |
++| QEMU가 user pointer가 안전한지 판단한다 | QEMU는 주소 변환 실패를 guest #PF로 전달한다 |
++
+ ## QEMU에서는 (하드웨어 효과: #PF를 어떻게 만들까?)
+ 
+ QEMU는 “유저 포인터를 검증하는 정책”을 제공하지 않는다. 그건 guest OS(PintOS)의 책임이다.
