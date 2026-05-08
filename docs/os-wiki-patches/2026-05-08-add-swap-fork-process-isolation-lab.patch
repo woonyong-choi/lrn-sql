@@ -1,0 +1,604 @@
+diff --git a/labs/os/swap-fork-process-isolation-lab.md b/labs/os/swap-fork-process-isolation-lab.md
+new file mode 100644
+index 0000000..f509db0
+--- /dev/null
++++ b/labs/os/swap-fork-process-isolation-lab.md
+@@ -0,0 +1,527 @@
++---
++type: Lab
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - layer:user
++  - layer:kernel
++  - layer:memory
++  - layer:device
++  - layer:emulator
++  - topic:process
++  - topic:swap
++  - topic:page-table
++  - topic:page-fault
++  - topic:gdb
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[pintos-vm-visual-map]]"
++  - "[[spt-copy-fork-trace]]"
++  - "[[anonymous-page-swap-slot-knowledge]]"
++  - "[[swap-lab]]"
++  - "[[swap-disk-ide-qemu-trace]]"
++---
++
++# swap-fork Lab (fork/exec 뒤 child별 swap 상태가 섞이지 않는가)
++
++## 작은 질문
++
++[[swap-lab]]에서는 한 프로세스의 anonymous page가 swap slot으로 나갔다 돌아오는 흐름을 봤다.
++
++그 다음 질문은 프로세스가 여러 개일 때다.
++
++> 같은 `child-swap` 프로그램을 10개 띄우면, 각 child의 anonymous page와 swap slot metadata는 서로 섞이지 않을까?
++
++이 Lab은 `tests/vm/swap-fork`를 그 질문으로 읽는다.
++
++중요한 주의점이 있다. 이 테스트는 "부모의 이미 swapped-out 된 page를 자식이 그대로 상속해 읽는지"를 직접 검증하는 테스트는 아니다. `swap-fork.c`의 child는 `fork()` 직후 곧바로 `exec("child-swap")`한다. 그래서 핵심은 다음에 가깝다.
++
++```text
++fork로 child 생성
++  -> child가 exec로 새 주소 공간을 로드
++  -> child-swap 10개가 각자 anonymous page를 만들고 접근
++  -> 각 child의 SPT / page / anon slot / cleanup 상태가 독립이어야 함
++```
++
++## 목차
++
++- [[swap-fork-process-isolation-lab#꼬리 질문|꼬리 질문]]
++- [[swap-fork-process-isolation-lab#왜 필요한가|왜 필요한가]]
++- [[swap-fork-process-isolation-lab#핵심 모델|핵심 모델]]
++- [[swap-fork-process-isolation-lab#예시 상황|예시 상황]]
++- [[swap-fork-process-isolation-lab#Linux / Windows에서는|Linux / Windows에서는]]
++- [[swap-fork-process-isolation-lab#PintOS에서는|PintOS에서는]]
++- [[swap-fork-process-isolation-lab#QEMU에서는|QEMU에서는]]
++- [[swap-fork-process-isolation-lab#차이점|차이점]]
++- [[swap-fork-process-isolation-lab#코드 증거|코드 증거]]
++- [[swap-fork-process-isolation-lab#숫자와 메모리|숫자와 메모리]]
++- [[swap-fork-process-isolation-lab#직접 확인|직접 확인]]
++- [[swap-fork-process-isolation-lab#정리|정리]]
++- [[swap-fork-process-isolation-lab#다음 링크|다음 링크]]
++
++## 꼬리 질문
++
++- `swap-anon`을 통과해도 왜 `swap-fork`에서 깨질 수 있을까?
++- child가 바로 `exec()`하는데 `fork()`의 SPT copy와 cleanup은 왜 여전히 중요할까?
++- 10개 child가 같은 유저 VA를 써도 왜 같은 `struct page`를 공유하면 안 될까?
++- anonymous page의 swap slot 번호는 process별 metadata와 어떻게 연결되어야 할까?
++- child exit 때 swapped-out page의 slot은 누가 해제해야 할까?
++- QEMU는 이 child별 slot 소유권을 알고 있을까?
++- 숫자를 넣으면 10개 child의 1MB anonymous 영역은 몇 page를 만든다고 볼 수 있을까?
++- GDB로 어디를 보면 SPT와 anon slot이 child별로 분리됐는지 확인할 수 있을까?
++
++## 왜 필요한가
++
++VM을 구현할 때 처음에는 한 프로세스만 보는 테스트가 쉽다.
++
++```text
++프로세스 A
++  page 0 -> slot 3
++  page 1 -> slot 4
++```
++
++하지만 실제 OS와 PintOS 테스트는 여러 프로세스를 동시에 실행한다.
++
++```text
++child A의 VA 0x404000 -> A의 struct page -> slot 3
++child B의 VA 0x404000 -> B의 struct page -> slot 9
++```
++
++두 child가 같은 가상 주소를 쓰더라도 같은 메모리를 뜻하지 않는다. 각 process는 자기 PML4, 자기 SPT, 자기 `struct page` 목록을 가진다.
++
++이 말은 즉, swap slot metadata도 "전역 slot 번호"와 "어느 process의 어느 page가 그 slot을 소유하는가"를 함께 맞춰야 한다. slot bitmap만 맞고 `struct page` 소유권이 꼬이면 다음 문제가 생긴다.
++
++| 버그 | 증상 |
++|---|---|
++| page metadata 공유 | 한 child cleanup이 다른 child page를 destroy할 수 있음 |
++| slot double free | 아직 다른 page가 쓰는 slot을 free로 표시해 덮어씀 |
++| slot leak | child exit 뒤 slot이 free되지 않아 swap 공간이 줄어듦 |
++| exec cleanup 누락 | fork로 잠깐 받은 옛 주소 공간이 새 exec 주소 공간과 섞임 |
++| SPT copy 실패 | child가 exec까지 가기 전에 잘못된 주소 공간 상태로 죽음 |
++
++`swap-fork`는 이런 생명주기 문제를 한 번에 압박한다.
++
++## 핵심 모델
++
++`swap-fork`는 세 개의 생명주기를 분리해서 보면 된다.
++
++| 생명주기 | 무엇이 생기나 | 언제 사라져야 하나 |
++|---|---|---|
++| fork 직후 child의 임시 주소 공간 | 부모에서 복사된 register, PML4, SPT 의미 | child가 `exec()`에 성공해 새 프로그램으로 바뀔 때 |
++| exec 뒤 `child-swap` 주소 공간 | 새 ELF, 새 stack, 새 anonymous page 의미 | child가 `exit(0)`할 때 |
++| swap slot 소유권 | resident가 아닌 anonymous page의 backing slot | swap-in 성공 또는 page destroy 때 |
++
++처음 배우는 단계에서는 이렇게 잡으면 된다.
++
++```text
++thread_current()
++  -> pml4: CPU가 걷는 page table root
++  -> spt : page fault를 살릴 수 있는 의미 장부
++
++struct page
++  -> va
++  -> frame 또는 NULL
++  -> anon.slot / anon.in_swap 같은 anonymous metadata
++
++swap bitmap
++  -> slot N이 비어 있는가
++```
++
++중요한 규칙은 두 가지다.
++
++1. 같은 VA라도 process가 다르면 다른 page다.
++2. 같은 slot을 두 live page가 동시에 소유하면 안 된다.
++
++## 예시 상황
++
++`swap-fork.c`는 child를 10개 만든다.
++
++```c
++#define CHILD_CNT 10
++
++for (i = 0; i < CHILD_CNT; i++) {
++    child[i] = fork("child-swap");
++    if (child[i] == 0) {
++        if (exec("child-swap") == -1)
++            fail("exec \"child-swap\"");
++    }
++}
++```
++
++각 child는 `child-swap.c`에서 1MB짜리 정적 배열을 page 단위로 건드린다.
++
++```c
++#define CHUNK_SIZE (1 * ONE_MB)
++#define PAGE_COUNT (CHUNK_SIZE / PAGE_SIZE)
++
++static char big_chunks[CHUNK_SIZE];
++
++for (i = 0; i < PAGE_COUNT; i++) {
++    mem = big_chunks + (i * PAGE_SIZE);
++    *mem = (char) i;
++}
++```
++
++테스트의 기대 출력은 child 10개가 모두 시작하고 parent가 정상 종료하는 것이다.
++
++```text
++(swap-fork) begin
++(child-swap) begin
++... 10번 ...
++(swap-fork) end
++```
++
++child 내부의 데이터 불일치는 출력으로 길게 나오지 않고 `fail("data is inconsistent")`나 parent의 `wait()` 실패로 드러난다.
++
++## Linux / Windows에서는
++
++Linux에서는 `fork()` 뒤 `exec()`가 흔한 프로세스 생성 흐름이다. `fork()` 직후에는 부모 주소 공간의 VMA와 page table 의미가 논리적으로 상속되고, 보통 copy-on-write로 실제 page copy를 늦춘다. `execve()`가 성공하면 이전 주소 공간은 버려지고 새 실행 파일 기준 주소 공간이 만들어진다.
++
++anonymous page가 메모리 압박으로 내려가면 Linux는 swap entry와 page metadata를 통해 어느 page가 어디에 저장됐는지 추적한다. 여러 process가 같은 VA를 써도 각 process의 address space 기준으로 해석한다.
++
++Windows는 Unix식 `fork()`를 일반 프로세스 생성 API로 제공하지 않는다. 보통 `CreateProcess`가 새 process와 address space를 만든다. 그래도 mapped section, private page, pagefile, working set 같은 구조를 통해 "process별 주소 공간"과 "backing storage"를 분리해서 관리한다.
++
++현실 OS는 PintOS보다 훨씬 복잡하다. SMP, page cache, COW refcount, shared mapping, pagefile allocation, process teardown race까지 함께 다룬다. PintOS에서는 이 복잡도를 줄여 SPT, page, frame, swap slot의 소유권을 직접 구현하게 한다.
++
++## PintOS에서는
++
++PintOS의 `swap-fork` 관련 경로는 네 묶음으로 나뉜다.
++
++| 묶음 | 파일 | 볼 것 |
++|---|---|---|
++| 테스트 driver | `pintos/tests/vm/swap-fork.c` | `CHILD_CNT=10`, `fork()`, child의 `exec()` |
++| child workload | `pintos/tests/vm/child-swap.c` | 1MB anonymous 배열을 page 단위로 write/read |
++| fork/exec 경계 | `pintos/userprog/process.c` | `__do_fork()`, `supplemental_page_table_copy()`, `process_exec()` |
++| VM/swap metadata | `pintos/vm/vm.c`, `pintos/vm/anon.c`, `pintos/include/vm/anon.h` | SPT, `anon_swap_in/out`, `anon_destroy()` |
++
++현재 저장소의 VM 코드는 스켈레톤이다.
++
++- `struct supplemental_page_table`은 비어 있다.
++- `supplemental_page_table_copy()`는 TODO다.
++- `struct anon_page`는 비어 있다.
++- `anon_swap_in()`, `anon_swap_out()`, `anon_destroy()`는 TODO다.
++
++따라서 이 문서는 "이미 구현된 동작" 설명이 아니라, `swap-fork`를 통과하려면 어떤 책임이 연결되어야 하는지 읽는 Lab이다.
++
++구현 판단 기준은 다음이다.
++
++| 구현 지점 | 확인할 책임 |
++|---|---|
++| `supplemental_page_table_copy()` | child가 parent의 `struct page *`를 그대로 공유하지 않게 한다 |
++| `process_exec()` / `process_cleanup()` | exec 성공 전 기존 SPT/PML4를 정리하고 새 주소 공간을 만든다 |
++| `anon_swap_out()` | 빈 slot을 할당하고 page metadata에 slot 번호를 남긴다 |
++| `anon_swap_in()` | 같은 slot에서 4096B를 읽고 slot free 시점을 정한다 |
++| `anon_destroy()` | swapped-out 상태로 죽는 page의 slot leak을 막는다 |
++| `supplemental_page_table_kill()` | process exit 때 남은 page를 타입별 destroy로 보낸다 |
++
++## QEMU에서는
++
++QEMU는 `swap-fork`라는 테스트 이름도, child별 SPT도 모른다.
++
++QEMU가 보는 것은 다음 정도다.
++
++```text
++guest CPU가 fork/exec/page fault 코드를 실행함
++guest page table walk 중 PTE가 없으면 #PF를 전달함
++PintOS가 disk_write/read를 호출하면 IDE sector I/O를 수행함
++sector_num << 9 바이트 offset으로 block backend에 요청함
++```
++
++예를 들어 PintOS가 anonymous page를 slot 7에 쓴다고 하자.
++
++```text
++PGSIZE = 4096
++DISK_SECTOR_SIZE = 512
++sectors_per_page = 8
++slot 7 -> sector 56..63
++```
++
++QEMU의 `hw/ide/core.c`에서는 `ide_sector_write()`가 sector 번호를 얻고 `blk_aio_pwritev()`에 `sector_num << BDRV_SECTOR_BITS`를 넘긴다.
++
++이 말은 즉, QEMU는 "child A의 page"라는 의미를 모르고, 단지 guest가 요청한 sector write/read를 수행한다. child별 소유권은 PintOS VM layer가 지켜야 한다.
++
++## 차이점
++
++| 질문 | Linux / Windows | PintOS | QEMU |
++|---|---|---|---|
++| fork 뒤 exec 경계 | Linux는 COW 주소 공간을 만들고 exec에서 교체, Windows는 일반 fork 모델 없음 | `__do_fork()` 뒤 child가 `process_exec()`로 주소 공간 교체 | OS 정책 없음 |
++| process별 주소 공간 | mm/VMA/VAD/section/pagefile metadata | `pml4`, SPT, `struct page` 구현 | guest CR3와 page table bytes만 에뮬레이션 |
++| anonymous swap 소유권 | 실제 커널 VM/pagefile subsystem | `struct anon_page`와 swap bitmap으로 구현 | slot 의미를 모름 |
++| 실패 관찰 | signal, exception, process exit, kernel log | PintOS test output과 `wait()` status | #PF, disk sector I/O, guest state |
++
++## 코드 증거
++
++### 1. `swap-fork` child는 곧바로 exec한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/swap-fork.c`
++
++핵심 흐름:
++
++```c
++child[i] = fork("child-swap");
++if (child[i] == 0) {
++    if (exec("child-swap") == -1)
++        fail("exec \"child-swap\"");
++}
++```
++
++따라서 이 테스트를 "부모의 swapped page 내용을 자식이 그대로 읽는 테스트"라고 설명하면 부정확하다. child는 fork 뒤 새 프로그램으로 바뀐다.
++
++### 2. `child-swap`은 child별 anonymous working set을 만든다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/child-swap.c`
++
++핵심 값:
++
++```c
++#define CHUNK_SIZE (1 * ONE_MB)
++#define PAGE_COUNT (CHUNK_SIZE / PAGE_SIZE)
++static char big_chunks[CHUNK_SIZE];
++```
++
++각 child는 자기 주소 공간의 `big_chunks`를 page 단위로 쓰고 다시 읽는다.
++
++### 3. 테스트 설정은 fork와 swap을 함께 압박한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/Make.tests`
++
++관련 설정:
++
++```make
++tests/vm/swap-fork_PUTFILES = tests/vm/child-swap
++tests/vm/swap-fork.output: SWAP_DISK = 200
++tests/vm/swap-fork.output: MEMORY = 40
++tests/vm/swap-fork.output: TIMEOUT = 600
++```
++
++이 설정은 child executable을 파일 시스템에 넣고, 제한된 memory와 충분한 swap disk를 함께 둔다.
++
++### 4. VM fork 경로는 SPT copy를 호출한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/process.c`
++
++핵심 분기:
++
++```c
++#ifdef VM
++    supplemental_page_table_init(&curr->spt);
++    if (!supplemental_page_table_copy(&curr->spt, &parent->spt))
++        goto error;
++#else
++    if (!pml4_for_each(parent->pml4, duplicate_pte, parent))
++        goto error;
++#endif
++```
++
++VM을 켠 뒤에는 present PTE만 복사하는 것으로 부족하다. 다만 `swap-fork`의 child는 곧바로 `exec()`하므로, 여기서 받은 옛 주소 공간은 오래 살아남으면 안 된다.
++
++### 5. anonymous swap 자리는 아직 TODO다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/anon.h`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/anon.c`
++
++현재 구조:
++
++```c
++struct anon_page {
++};
++
++static bool anon_swap_in(struct page *page, void *kva) { ... }
++static bool anon_swap_out(struct page *page) { ... }
++static void anon_destroy(struct page *page) { ... }
++```
++
++이 빈칸에 slot 번호, slot 보유 여부, 필요하면 동기화 기준이 들어간다.
++
++### 6. QEMU는 sector offset만 본다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/hw/ide/core.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/QEMU/block/block-backend.c`
++
++QEMU IDE write 경로는 sector 번호를 block backend byte offset으로 바꾼다.
++
++```c
++s->pio_aiocb = blk_aio_pwritev(s->blk,
++                               sector_num << BDRV_SECTOR_BITS,
++                               &s->qiov, 0, ide_sector_write_cb, s);
++```
++
++`blk_aio_pwritev()`는 그 byte offset과 buffer size를 block layer 요청으로 넘긴다. child별 SPT나 `struct anon_page` 의미는 이 층에 없다.
++
++## 숫자와 메모리
++
++### 1. child 하나가 건드리는 page 수
++
++`child-swap.c` 기준:
++
++```text
++CHUNK_SIZE = 1 MiB = 1 * 1024 * 1024 = 1,048,576 B
++PGSIZE     = 4096 B
++PAGE_COUNT = 1,048,576 / 4096 = 256 pages
++```
++
++child 10개가 모두 `child-swap`을 실행하면 anonymous working set만 단순 합산해도 다음과 같다.
++
++```text
++10 children * 256 pages = 2560 pages
++2560 pages * 4096 B     = 10,485,760 B = 10 MiB
++```
++
++여기에 각 child의 stack, page table, ELF page, kernel bookkeeping이 더 붙는다.
++
++### 2. 같은 VA라도 child별 의미가 다르다
++
++예를 들어 두 child가 모두 `big_chunks`의 첫 page를 `0x404000`에서 본다고 하자.
++
++```text
++child A:
++  PML4_A
++  SPT_A[0x404000] -> page A0 -> slot 7
++
++child B:
++  PML4_B
++  SPT_B[0x404000] -> page B0 -> slot 12
++```
++
++가상 주소 숫자는 같아도 page 객체와 slot 소유권은 달라야 한다.
++
++### 3. slot에서 QEMU offset으로
++
++slot 7이면:
++
++```text
++sectors_per_page = 4096 / 512 = 8
++base sector      = 7 * 8 = 56
++sector range     = 56..63
++QEMU byte offset = 56 << 9 = 28672 = 0x7000
++```
++
++slot 12이면:
++
++```text
++base sector      = 12 * 8 = 96
++QEMU byte offset = 96 << 9 = 49152 = 0xc000
++```
++
++QEMU offset이 다르다는 사실만으로 child 소유권이 맞다는 뜻은 아니다. 진짜 검증은 PintOS의 SPT/page/anon metadata가 그 offset으로 일관되게 연결되는지 보는 것이다.
++
++## 직접 확인
++
++PintOS GDB에서는 먼저 process 경계를 잡는다.
++
++```gdb
++break process_fork
++break __do_fork
++break process_exec
++break supplemental_page_table_copy
++break supplemental_page_table_kill
++```
++
++child별 주소 공간이 분리되는지 본다.
++
++```gdb
++p thread_current()->name
++p/x thread_current()->pml4
++p &thread_current()->spt
++```
++
++swap 구현 뒤에는 anonymous 경계를 잡는다.
++
++```gdb
++break anon_swap_out
++break anon_swap_in
++break anon_destroy
++break vm_try_handle_fault
++```
++
++확인할 값:
++
++```gdb
++p thread_current()->name
++p/x page->va
++p page->frame
++p page->anon
++```
++
++실행 후보:
++
++```sh
++make -C build check TESTS=tests/vm/swap-anon
++make -C build check TESTS=tests/vm/swap-fork
++```
++
++관찰 목표는 다음이다.
++
++```text
++swap-anon:
++  한 process 안에서 anonymous page가 slot으로 나갔다 돌아옴
++
++swap-fork:
++  여러 child가 각자 SPT/page/anon slot을 가지고 종료함
++  exec로 교체된 옛 주소 공간이 남지 않음
++  child exit 뒤 swapped-out page slot이 leak되지 않음
++```
++
++QEMU host process를 별도로 디버깅할 수 있다면 sector I/O만 본다.
++
++```gdb
++break ide_sector_write
++break ide_sector_read
++break blk_aio_pwritev
++break blk_aio_preadv
++```
++
++확인할 것:
++
++```text
++sector_num
++sector_num << 9
++qiov->size
++```
++
++QEMU에서 child별 SPT를 찾으려 하지 않는다. 그것은 guest PintOS 커널 메모리 안의 자료구조다.
++
++## 정리
++
++`swap-fork`는 단순히 "swap이 된다"만 묻지 않는다.
++
++child가 `fork()`로 생기고 곧바로 `exec()`하면서 주소 공간 생명주기가 한 번 갈아끼워진다. 그 뒤 10개 child가 각자 anonymous page를 만들고, 메모리 압박 상황에서 page와 slot metadata가 독립적으로 유지되어야 한다.
++
++따라서 이 테스트를 볼 때는 세 가지를 분리한다.
++
++- `fork()`의 SPT copy는 child가 exec까지 안전하게 가는 임시 주소 공간을 만든다.
++- `exec()`는 그 임시 주소 공간을 버리고 `child-swap`의 새 주소 공간을 만든다.
++- anonymous swap metadata는 child별 `struct page`와 slot bitmap 사이의 소유권을 끝까지 지켜야 한다.
++
++QEMU는 이 정책을 모른다. QEMU는 page fault와 disk sector I/O를 하드웨어처럼 전달할 뿐이고, child별 SPT/slot 소유권은 PintOS 구현의 책임이다.
++
++## 다음 링크
++
++- [[spt-copy-fork-trace]]: VM 이후 `fork()`가 present PTE뿐 아니라 SPT 의미를 복제해야 하는 이유
++- [[anonymous-page-swap-slot-knowledge]]: anonymous page가 swap slot 번호를 어디에 기억해야 하는지
++- [[swap-lab]]: anonymous page 한 장이 sector 8개로 나갔다 돌아오는 기본 실험
++- [[swap-disk-ide-qemu-trace]]: PintOS slot/sector가 QEMU block backend offset으로 내려가는 흐름
++- [[frame-eviction-trace]]: 어떤 frame을 victim으로 골라 swap out하는지
+diff --git a/labs/os/swap-lab.md b/labs/os/swap-lab.md
+index 17352e6..eb1c58e 100644
+--- a/labs/os/swap-lab.md
++++ b/labs/os/swap-lab.md
+@@ -30,0 +31 @@ related_to:
++  - "[[swap-fork-process-isolation-lab]]"
+@@ -469,0 +471 @@ make -C build check TESTS=tests/vm/swap-anon
++- [[swap-fork-process-isolation-lab]]: 한 프로세스의 swap을 여러 child 격리 문제로 확장해서 보는 Lab
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index 884d69f..c2c6457 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -112,0 +113 @@ related_to:
++  - [[swap-fork-process-isolation-lab]]
+@@ -472,0 +474,2 @@ related_to:
++    - fork/exec로 여러 child가 생기면 anonymous swap metadata는 왜 child별로 분리되어야 하는가?
++      - [[swap-fork-process-isolation-lab]]
+@@ -508,0 +512 @@ related_to:
++    - [[swap-fork-process-isolation-lab]]: `swap-fork`에서 여러 child의 SPT/page/anon slot 소유권이 섞이지 않는지 확인하는 지점
+@@ -520,0 +525 @@ related_to:
++    - [[swap-fork-process-isolation-lab]]: `fork()`와 `exec()` 뒤 child별 swap 상태가 독립인지 확인
+diff --git a/maps/os/pintos-vm-visual-map.md b/maps/os/pintos-vm-visual-map.md
+index 9cdb7a1..f7b0f28 100644
+--- a/maps/os/pintos-vm-visual-map.md
++++ b/maps/os/pintos-vm-visual-map.md
+@@ -101,0 +102 @@ related_to:
++- [[swap-fork-process-isolation-lab]]
+@@ -181,0 +183 @@ flowchart LR
++- [[swap-fork-process-isolation-lab]]
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index 39a901d..60cbb94 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -52,0 +53 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
++- [[swap-fork-process-isolation-lab]]
+@@ -81,0 +83 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
++- [[swap-fork-process-isolation-lab]]: `fork()` 뒤 `exec()`한 여러 child의 anonymous swap metadata가 서로 섞이지 않는지 확인
+@@ -97,0 +100 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
++- [[swap-fork-process-isolation-lab]]: `swap-fork`에서 fork/exec 주소 공간 교체와 child별 swap slot 소유권을 분리하는 흐름
+@@ -113,0 +117 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
++- [[swap-fork-process-isolation-lab]]: `swap-fork`에서 10개 child의 SPT/page/anon slot metadata가 독립인지 보는 실험
+diff --git a/notes/os/anonymous-page-swap-slot-knowledge.md b/notes/os/anonymous-page-swap-slot-knowledge.md
+index ea9162f..a293aa7 100644
+--- a/notes/os/anonymous-page-swap-slot-knowledge.md
++++ b/notes/os/anonymous-page-swap-slot-knowledge.md
+@@ -29,0 +30 @@ related_to:
++  - "[[swap-fork-process-isolation-lab]]"
+@@ -481,0 +483 @@ PintOS GDB stub은 guest register와 guest memory를 보여 준다. QEMU 내부
++- [[swap-fork-process-isolation-lab]]: 여러 child가 같은 VA를 써도 page와 slot metadata가 독립이어야 하는 이유
+diff --git a/notes/os/pintos-vm-implementation-lecture.md b/notes/os/pintos-vm-implementation-lecture.md
+index 34d4a50..d0c6bb1 100644
+--- a/notes/os/pintos-vm-implementation-lecture.md
++++ b/notes/os/pintos-vm-implementation-lecture.md
+@@ -28,0 +29 @@ related_to:
++  - "[[swap-fork-process-isolation-lab]]"
+@@ -506,0 +508 @@ x/32xb frame->kva
++- [[swap-fork-process-isolation-lab|fork/exec로 만든 여러 child의 anonymous swap 상태는 왜 서로 섞이면 안 되는가?]]
+@@ -538,0 +541 @@ x/32xb frame->kva
++- fork 뒤 exec한 child의 옛 SPT와 새 anonymous swap metadata가 서로 섞이지 않는가?
+@@ -549,0 +553 @@ x/32xb frame->kva
++- [[swap-fork-process-isolation-lab]]
+diff --git a/traces/os/spt-copy-fork-trace.md b/traces/os/spt-copy-fork-trace.md
+index f3627c9..054371e 100644
+--- a/traces/os/spt-copy-fork-trace.md
++++ b/traces/os/spt-copy-fork-trace.md
+@@ -34,0 +35 @@ related_to:
++  - "[[swap-fork-process-isolation-lab]]"
+@@ -515,0 +517 @@ make -C build check TESTS=tests/vm/swap-fork
++`swap-fork`를 볼 때는 한 가지를 분리해야 한다. 이 테스트의 child는 `fork()` 직후 곧바로 `exec("child-swap")`하므로, 부모의 swapped-out page를 자식이 직접 읽는지를 검증하는 최소 테스트는 아니다. 대신 fork/exec 경계와 여러 child의 anonymous swap metadata가 서로 섞이지 않는지를 [[swap-fork-process-isolation-lab]]에서 따로 본다.
+@@ -565,0 +569 @@ QEMU는 이 정책을 처리하지 않는다. QEMU는 guest CR3/PTE를 따라
++- [[swap-fork-process-isolation-lab]]: `swap-fork`가 실제로 묻는 fork/exec와 child별 swap 격리 기준
