@@ -1,0 +1,683 @@
+diff --git a/labs/os/swap-lab.md b/labs/os/swap-lab.md
+index 17352e6..2631f31 100644
+--- a/labs/os/swap-lab.md
++++ b/labs/os/swap-lab.md
+@@ -25,6 +25,7 @@ related_to:
+   - "[[concept-to-code-map]]"
+   - "[[week-3-4-virtual-memory-map]]"
+   - "[[anonymous-page-swap-slot-knowledge]]"
++  - "[[swap-slot-lifecycle-lab]]"
+   - "[[frame-eviction-trace]]"
+   - "[[page-fault-trace]]"
+   - "[[supplemental-page-table-knowledge]]"
+@@ -467,6 +468,7 @@ make -C build check TESTS=tests/vm/swap-anon
+ 
+ - [[frame-eviction-trace]]: swap out이 호출되는 앞 단계
+ - [[anonymous-page-swap-slot-knowledge]]: SPT와 `struct anon_page`가 swap slot을 기억해야 하는 이유
++- [[swap-slot-lifecycle-lab]]: swap slot을 언제 free로 되돌려야 누수가 나지 않는지 보는 실험
+ - [[swap-disk-ide-qemu-trace]]: slot 번호가 PintOS sector I/O와 QEMU block backend offset으로 내려가는 흐름
+ - [[page-fault-trace]]: swap in이 다시 시작되는 입구
+ - [[supplemental-page-table-knowledge]]: page metadata가 resident/swap 상태를 기억해야 하는 이유
+diff --git a/labs/os/swap-slot-lifecycle-lab.md b/labs/os/swap-slot-lifecycle-lab.md
+new file mode 100644
+index 0000000..374105d
+--- /dev/null
++++ b/labs/os/swap-slot-lifecycle-lab.md
+@@ -0,0 +1,513 @@
++---
++type: Lab
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - layer:memory
++  - layer:kernel
++  - layer:device
++  - topic:swap
++  - topic:frame
++  - topic:page-table
++  - topic:gdb
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[swap-lab]]"
++  - "[[anonymous-page-swap-slot-knowledge]]"
++  - "[[swap-disk-ide-qemu-trace]]"
++  - "[[frame-eviction-trace]]"
++  - "[[supplemental-page-table-knowledge]]"
++---
++
++# Swap slot 생명주기 Lab
++
++## 작은 질문
++
++[[swap-lab]]에서는 anonymous page 한 장이 swap slot 하나로 나간다고 했다.
++
++그러면 바로 다음 질문이 생긴다.
++
++> swap in이 끝난 뒤 그 slot은 언제 다시 비워야 할까?
++
++짧은 답은 이렇다.
++
++```text
++slot은 "디스크에 남은 바이트"가 아니라 "PintOS가 사용 중이라고 표시한 예약권"이다.
++
++따라서 page가 swap에서 RAM으로 돌아오면 slot 예약은 풀어야 한다.
++프로세스가 종료될 때 아직 swapped-out 상태인 page가 있으면 destroy 경로에서 slot 예약을 풀어야 한다.
++```
++
++이 Lab은 slot 번호를 저장하는 위치에서 한 걸음 더 나아가, slot의 할당과 해제가 어느 함수 경계에서 일어나야 하는지 정리한다.
++
++## 꼬리 질문
++
++이번 Lab은 다음 질문을 따라간다.
++
++- 왜 swap slot을 한 번 쓰고 영원히 붙잡으면 안 될까?
++- 실제 OS에서는 swap/pagefile 공간을 어떻게 다시 쓰나?
++- PintOS에서는 `anon_swap_out()`, `anon_swap_in()`, `anon_destroy()`가 각각 어떤 책임을 가져야 할까?
++- QEMU는 slot이 free인지 used인지 알까?
++- 30MB swap disk라면 slot 개수는 어떻게 계산될까?
++- GDB로 slot bitmap 누수와 double free를 어디서 확인할까?
++
++## 목차
++
++- 왜 필요한가
++- 핵심 모델
++- 예시 상황
++- Linux / Windows에서는
++- PintOS에서는
++- QEMU에서는
++- 차이점
++- 코드 증거
++- 숫자와 메모리
++- 직접 확인
++- 정리
++- 다음 링크
++
++## 왜 필요한가
++
++swap은 디스크를 무한한 메모리처럼 쓰게 해 주지 않는다. swap disk도 크기가 정해져 있다.
++
++예를 들어 page fault가 반복해서 나고, eviction도 반복해서 일어난다고 하자. `anon_swap_out()`이 매번 새 slot만 잡고, `anon_swap_in()`이 slot을 돌려주지 않으면 언젠가 slot bitmap이 전부 used가 된다.
++
++그 순간 실제 RAM에는 이미 돌아온 page가 있어도, PintOS의 swap allocator는 "빈 slot이 없다"고 판단할 수 있다. 이것은 메모리 부족이 아니라 metadata 누수다.
++
++이 말은 즉, swap slot은 세 순간을 구분해야 한다.
++
++| 순간 | slot 상태 | 이유 |
++|---|---|---|
++| resident anonymous page | free 또는 없음 | bytes가 frame에 있음 |
++| swapped-out anonymous page | used | bytes가 swap disk에 있고 page metadata가 slot을 가리킴 |
++| swap-in 완료 직후 | free로 되돌림 | bytes가 새 frame으로 복원됐으므로 slot은 재사용 가능 |
++
++## 핵심 모델
++
++slot 생명주기는 네 단계로 보면 된다.
++
++```text
++1. anon_initializer()
++   page->anon.slot = invalid
++   page->anon.in_swap = false
++
++2. anon_swap_out(page)
++   slot = bitmap_scan_and_flip(..., false)
++   frame 4096B를 slot의 sector 8개에 씀
++   page->anon.slot = slot
++   page->anon.in_swap = true
++
++3. anon_swap_in(page, kva)
++   page->anon.slot의 sector 8개를 kva로 읽음
++   bitmap_reset(slot)
++   page->anon.slot = invalid
++   page->anon.in_swap = false
++
++4. anon_destroy(page)
++   if page->anon.in_swap:
++       bitmap_reset(page->anon.slot)
++```
++
++핵심은 `anon_swap_in()`과 `anon_destroy()`가 둘 다 slot을 free할 수 있다는 점이다. 단, 같은 slot을 두 번 free하지 않도록 `in_swap` 같은 상태 bit가 필요하다.
++
++## 예시 상황
++
++프로세스가 20MB anonymous 배열을 쓰고, 메모리는 10MB로 제한되어 있다고 하자. `swap-anon` 테스트가 이런 상황을 만든다.
++
++```text
++CHUNK_SIZE = 20MB
++PAGE_SIZE  = 4096B
++PAGE_COUNT = 5120 pages
++MEMORY     = 10MB
++SWAP_DISK  = 30MB
++```
++
++처음 page A가 쫓겨난다.
++
++```text
++page A VA      = 0x8049000
++page A frame   = F1
++allocated slot = 3
++slot 3 sectors = 24..31
++```
++
++이때 slot bitmap은 이렇게 바뀐다.
++
++```text
++before swap out:
++  slot[3] = 0  # free
++
++after swap out:
++  slot[3] = 1  # used
++  page A anon metadata = slot 3
++```
++
++나중에 유저 코드가 다시 `0x8049000`을 읽으면 page fault가 나고, PintOS는 SPT에서 page A를 찾는다.
++
++```text
++before swap in:
++  page A frame = NULL
++  page A anon metadata = slot 3
++  slot[3] = 1
++
++after swap in:
++  page A frame = F7
++  page A anon metadata = invalid
++  slot[3] = 0
++```
++
++디스크 파일 안의 sector 24..31 바이트가 즉시 지워져야 한다는 뜻은 아니다. PintOS가 slot bitmap에서 free라고 표시했으므로 다음 `anon_swap_out()`이 같은 slot을 덮어쓸 수 있다는 뜻이다.
++
++## Linux / Windows에서는
++
++Linux와 Windows 같은 실제 OS도 swap 또는 pagefile 공간을 계속 재사용한다.
++
++다만 실제 OS는 PintOS처럼 단순히 `slot 번호 하나`만 보지 않는다. swap entry, reference count, page frame metadata, page cache, compression, security policy가 함께 얽힌다. 특히 여러 mapping이 같은 backing을 참조하거나 COW와 섞이면 slot의 소유권은 더 복잡해진다.
++
++그래도 초보자가 먼저 잡아야 할 질문은 PintOS와 같다.
++
++```text
++이 backing store 위치는 지금 어떤 page의 유일한 복원 근거인가?
++그 page가 RAM으로 돌아왔거나 사라졌다면, 이 backing store 위치를 다시 쓸 수 있는가?
++```
++
++현실 OS는 성능, 보안, 동시성, crash recovery까지 고려한다. PintOS는 이 질문을 `struct anon_page`와 slot bitmap으로 작게 만든다.
++
++## PintOS에서는
++
++현재 저장소의 VM 코드는 아직 swap을 구현하지 않은 스켈레톤이다. 그래서 이 문서는 "이미 이렇게 동작한다"가 아니라, TODO를 채울 때 slot 상태를 어디서 바꿔야 하는지 설명한다.
++
++관련 파일은 다음이다.
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/anon.c`
++  - `vm_anon_init()`
++  - `anon_initializer()`
++  - `anon_swap_out()`
++  - `anon_swap_in()`
++  - `anon_destroy()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/anon.h`
++  - `struct anon_page`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++  - `vm_evict_frame()`
++  - `vm_do_claim_page()`
++  - `supplemental_page_table_kill()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/lib/kernel/bitmap.c`
++  - `bitmap_scan_and_flip()`
++  - `bitmap_reset()`
++
++`struct anon_page`는 현재 비어 있다.
++
++```c
++struct anon_page {
++};
++```
++
++따라서 구현자는 보통 이런 의미의 필드를 추가한다.
++
++```text
++struct anon_page
++  -> slot 번호
++  -> slot에 저장되어 있는지 여부
++```
++
++필드 이름은 구현 선택이다. 중요한 것은 resident page, swapped-out page, destroyed page의 상태 전이가 한 번씩만 일어나게 만드는 것이다.
++
++## QEMU에서는
++
++QEMU는 slot bitmap을 모른다.
++
++PintOS가 slot 3을 free로 바꿔도 QEMU disk image의 sector 24..31 바이트가 자동으로 지워지는 것은 아니다. QEMU는 그저 다음에 PintOS가 같은 sector에 `disk_write()`를 보내면 host disk image의 같은 offset을 덮어쓴다.
++
++```text
++PintOS VM metadata:
++  slot[3] = free
++
++QEMU block backend:
++  sector 24..31에는 이전 bytes가 남아 있을 수 있음
++  다음 write가 오면 같은 offset을 덮어씀
++```
++
++이 구분이 중요하다. slot을 free한다는 말은 디스크 바이트를 0으로 만든다는 뜻이 아니라, PintOS allocator가 그 공간을 다시 배정할 수 있다는 뜻이다.
++
++## 차이점
++
++| 질문 | Linux / Windows | PintOS | QEMU |
++|---|---|---|---|
++| slot을 누가 할당하나? | 커널 VM과 swap/pagefile allocator | `anon_swap_out()` 구현 | 모름 |
++| slot을 언제 해제하나? | page가 RAM으로 돌아오거나 backing 참조가 사라질 때 | `anon_swap_in()` 또는 `anon_destroy()` | 모름 |
++| free가 디스크 zero를 뜻하나? | 보안 정책에 따라 별도 처리 가능 | 보통 bitmap 상태 변경을 먼저 의미 | 기존 bytes는 남을 수 있음 |
++| double free를 누가 막나? | 커널 metadata와 lock/refcount | `in_swap` 상태와 bitmap 검사 | 모름 |
++| 관찰 지점 | kernel trace, vmstat, pagefile trace | PintOS GDB에서 `struct anon_page`와 bitmap | host GDB에서 sector write/read |
++
++## 코드 증거
++
++### 1. `anon.c`에는 세 함수 경계가 이미 나뉘어 있다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/anon.c`
++
++핵심 함수:
++
++```c
++static bool anon_swap_in (struct page *page, void *kva);
++static bool anon_swap_out (struct page *page);
++static void anon_destroy (struct page *page);
++```
++
++이 세 함수는 slot 생명주기를 나누기에 좋은 경계다.
++
++| 함수 | slot 관점의 책임 |
++|---|---|
++| `anon_swap_out()` | free slot을 used로 바꾸고 page metadata에 저장 |
++| `anon_swap_in()` | slot에서 frame으로 읽은 뒤 used를 free로 되돌림 |
++| `anon_destroy()` | page가 swap에 남은 채 죽으면 used를 free로 되돌림 |
++
++### 2. `vm_do_claim_page()`는 swap-in 호출 지점이다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`
++
++핵심 흐름:
++
++```c
++frame->page = page;
++page->frame = frame;
++
++/* TODO: Insert page table entry ... */
++
++return swap_in (page, frame->kva);
++```
++
++이 말은 즉, `swap_in(page, frame->kva)`가 성공한 뒤에는 page bytes가 frame에 있다. anonymous page가 swap slot을 가리키고 있었다면 이 시점 이후 slot을 free로 돌릴 근거가 생긴다.
++
++### 3. 프로세스 종료는 SPT kill로 들어온다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/process.c`
++
++핵심 흐름:
++
++```c
++#ifdef VM
++supplemental_page_table_kill (&curr->spt);
++#endif
++```
++
++그리고 `vm.c`의 `vm_dealloc_page()`는 type별 `destroy()`를 호출한다.
++
++```c
++destroy (page);
++free (page);
++```
++
++따라서 swapped-out anonymous page가 프로세스 종료 때 SPT에서 제거되면, `anon_destroy()`가 남은 slot을 회수해야 한다.
++
++### 4. bitmap helper는 free slot을 찾아 뒤집는 역할을 한다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/lib/kernel/bitmap.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/lib/kernel/bitmap.h`
++
++핵심 함수:
++
++```c
++size_t bitmap_scan_and_flip (struct bitmap *b, size_t start, size_t cnt, bool value);
++void bitmap_reset (struct bitmap *b, size_t idx);
++```
++
++`bitmap_scan_and_flip(b, 0, 1, false)`는 free bit 하나를 찾아 used로 바꿀 때 쓸 수 있다. `bitmap_reset(b, slot)`은 used slot을 free로 되돌리는 후보 함수다.
++
++### 5. VM swap 테스트는 slot 재사용 압력을 만든다
++
++파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/swap-anon.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/swap-iter.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/swap-fork.c`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/tests/vm/Make.tests`
++
++`swap-anon`은 10MB memory에서 20MB anonymous 배열을 page 단위로 건드린다. `swap-iter`는 anonymous page와 file-backed `mmap`을 섞는다. `swap-fork`는 child 10개를 실행해 page와 swap 자원 회수 압력을 키운다.
++
++테스트 설정도 swap disk 크기를 따로 준다.
++
++```makefile
++tests/vm/swap-anon.output: SWAP_DISK = 30
++tests/vm/swap-iter.output: SWAP_DISK = 50
++tests/vm/swap-fork.output: SWAP_DISK = 200
++```
++
++## 숫자와 메모리
++
++PintOS page는 4096B이고 disk sector는 512B다.
++
++```text
++PGSIZE           = 4096
++DISK_SECTOR_SIZE = 512
++sectors/page     = 4096 / 512 = 8
++```
++
++slot 3은 sector 24에서 시작한다.
++
++```text
++slot = 3
++base sector = slot * 8 = 24
++sector range = 24..31
++```
++
++`swap-anon`의 `SWAP_DISK = 30`은 `pintos-mkdisk`가 만드는 대략 30MB swap disk다. 이 도구는 cylinder 단위로 반올림해서 디스크를 만들기 때문에 정확히 30MiB가 아니라 근사값이다.
++
++`pintos-mkdisk` 계산을 그대로 쓰면 다음과 같다.
++
++```text
++cylinder bytes = 512 * 16 * 63 = 516096
++30MB argument  = ceil(30 * 2) cylinders = 60 cylinders
++total bytes    = 60 * 516096 = 30965760
++total sectors  = 30965760 / 512 = 60480
++swap slots     = 60480 / 8 = 7560
++```
++
++slot 하나를 leak하면 4096B짜리 보관함 하나를 잃는다. 7560개 slot이 모두 leak되면 disk image에는 빈 공간이 남아 보여도 PintOS bitmap 기준으로는 더 이상 anonymous page를 내보낼 곳이 없다.
++
++메모리 상태는 이렇게 보면 된다.
++
++```text
++struct anon_page 후보 필드:
++  slot    = 3
++  in_swap = true
++
++slot bitmap 일부:
++  index:  0 1 2 3 4 5
++  value:  0 0 1 1 0 0
++             ^ ^
++             | slot 3은 page A가 예약
++             slot 2는 다른 page가 예약
++```
++
++swap in 후에는 같은 page의 상태가 바뀐다.
++
++```text
++struct anon_page:
++  slot    = invalid
++  in_swap = false
++
++slot bitmap:
++  index:  0 1 2 3 4 5
++  value:  0 0 1 0 0 0
++```
++
++## 직접 확인
++
++필드 이름은 구현마다 다를 수 있다. 아래의 `slot`, `in_swap`, `swap_bitmap`은 의미를 나타내는 예시 이름이다.
++
++### 1. swap out에서 slot이 used로 바뀌는지 보기
++
++```gdb
++b anon_swap_out
++b bitmap_scan_and_flip
++b disk_write
++c
++p/x page->va
++p page->anon.slot
++p page->anon.in_swap
++p slot
++```
++
++확인할 것:
++
++```text
++bitmap_scan_and_flip()이 BITMAP_ERROR가 아닌 slot을 반환한다.
++page->anon.slot이 같은 값으로 저장된다.
++page->anon.in_swap이 true가 된다.
++```
++
++### 2. swap in에서 slot이 free로 돌아오는지 보기
++
++```gdb
++b anon_swap_in
++b bitmap_reset
++b disk_read
++c
++p page->anon.slot
++p page->anon.in_swap
++x/16xb kva
++```
++
++확인할 것:
++
++```text
++disk_read()가 sector 8개를 읽은 뒤 bitmap_reset(slot)이 호출된다.
++slot이 invalid로 바뀌고 in_swap이 false가 된다.
++```
++
++### 3. exit 경로에서 남은 slot이 회수되는지 보기
++
++```gdb
++b supplemental_page_table_kill
++b vm_dealloc_page
++b anon_destroy
++b bitmap_reset
++c
++p page->operations->type
++p page->anon.in_swap
++p page->anon.slot
++```
++
++확인할 것:
++
++```text
++swapped-out anonymous page만 anon_destroy()에서 slot을 reset한다.
++resident page는 없는 slot을 reset하지 않는다.
++같은 page에 대해 bitmap_reset(slot)이 두 번 호출되지 않는다.
++```
++
++### 4. 테스트로 압력 넣기
++
++```text
++cd /Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos
++make -C build check TESTS=tests/vm/swap-anon
++make -C build check TESTS=tests/vm/swap-iter
++make -C build check TESTS=tests/vm/swap-fork
++```
++
++현재 저장소의 VM 구현은 아직 TODO가 많다. 그래서 이 명령은 지금 통과 보장용이 아니라, swap 구현 후 slot 누수와 내용 보존을 함께 보는 회귀 확인용이다.
++
++## 흔한 버그 체크리스트
++
++| 버그 | 겉으로 보이는 증상 | 의심할 지점 |
++|---|---|---|
++| swap in 후 slot을 free하지 않음 | 시간이 지나면 free slot이 없어짐 | `anon_swap_in()` 뒤 bitmap 상태 |
++| destroy에서 swapped-out slot을 free하지 않음 | child 반복 실행 후 slot 누수 | `supplemental_page_table_kill()` -> `anon_destroy()` |
++| resident page destroy에서 slot을 reset함 | 엉뚱한 slot double free | `in_swap` 상태 bit |
++| swap out 실패를 무시함 | page 내용 손실 또는 잘못된 frame 재사용 | `bitmap_scan_and_flip()` 반환값 |
++| slot은 free했지만 page metadata를 지우지 않음 | 나중에 같은 slot을 잘못 읽음 | `page->anon.slot = invalid` 처리 |
++
++## 정리
++
++- swap slot은 디스크 sector 자체가 아니라 PintOS가 관리하는 예약 상태다.
++- `anon_swap_out()`은 free slot을 used로 만들고, page metadata에 slot을 저장해야 한다.
++- `anon_swap_in()`은 slot에서 frame으로 bytes를 복원한 뒤 slot을 free로 돌려야 한다.
++- `anon_destroy()`는 프로세스 종료 때 아직 swapped-out인 anonymous page의 slot을 회수해야 한다.
++- QEMU는 slot free/used를 모르고 sector read/write만 처리한다. 디스크 bytes가 남아 있어도 PintOS bitmap에서 free면 재사용 가능한 slot이다.
++
++## 다음 링크
++
++- [[swap-lab]]: anonymous page 한 장이 sector 8개로 나뉘는 기본 실험
++- [[anonymous-page-swap-slot-knowledge]]: SPT와 `struct anon_page`가 slot 정보를 나누어 기억하는 이유
++- [[swap-disk-ide-qemu-trace]]: slot 번호가 QEMU IDE/block backend offset으로 내려가는 흐름
++- [[frame-eviction-trace]]: `anon_swap_out()`이 호출되는 앞 단계
++- [[supplemental-page-table-knowledge]]: swapped-out page가 여전히 합법한 VA로 남는 이유
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index fc9fd05..7c99c53 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -105,6 +105,8 @@ related_to:
+   - [[mmap-dirty-writeback-qemu-trace]]
+ - 3.6단계: disk sector가 QEMU block backend offset으로 내려가는 법
+   - [[disk-sector-qemu-block-backend-knowledge]]
++- 3.7단계: swap slot을 언제 다시 비우는지 확인하는 법
++  - [[swap-slot-lifecycle-lab]]
+ - 4단계: 주차별 과제로 연결
+   - [[week-1-threads-map]]
+   - [[week-2-user-programs-map]]
+@@ -473,6 +475,7 @@ related_to:
+     - [[supplemental-page-table-knowledge]]: fault address가 원래 어떤 backing 정보를 가진 페이지인지 찾는 표
+     - [[cow-write-protect-fault-lab]]: `PF_P=1`, `PF_W=1` write-protect fault를 COW frame copy로 살리는 기준
+     - [[anonymous-page-swap-slot-knowledge]]: SPT와 `struct anon_page`가 swap slot 복원 정보를 나누어 기억하는 기준
++    - [[swap-slot-lifecycle-lab]]: swap out, swap in, process exit에서 slot bitmap을 언제 할당/해제하는지 확인
+     - [[mmap-file-backed-page-knowledge]]: 파일 byte가 user VA page로 보이고 dirty page가 write-back되는 흐름
+     - [[mmap-invalid-argument-matrix-lab]]: fd, 주소, 길이, offset, kernel range를 page 등록 전에 탈락시키는 기준
+     - [[file-backed-page-metadata-knowledge]]: `struct file_page`가 기억해야 할 file, offset, read/zero bytes 판단 기준
+@@ -487,6 +490,7 @@ related_to:
+     - [[frame-eviction-trace]]: 빈 frame이 없을 때 victim page를 내보내고 frame을 재사용하는 지점
+     - [[mmap-syscall-handler-trace]]: `SYS_MMAP` register 인자를 검증하고 `do_mmap()`으로 넘기는 지점
+     - [[mmap-dirty-writeback-qemu-trace]]: dirty file-backed page가 `file_write_at()`과 QEMU block write로 내려가는 지점
++    - [[swap-slot-lifecycle-lab]]: swapped-out anonymous page의 slot 예약이 swap in 또는 destroy에서 해제되는 지점
+   - 실험
+     - [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]]
+     - [[pml4-get-page-kernel-va-lab]]: 유저 VA가 커널이 읽을 수 있는 kernel VA로 바뀌는 계산을 GDB로 확인
+@@ -497,6 +501,7 @@ related_to:
+     - [[mmap-overlap-validation-lab]]: `mmap-overlap`/`mmap-over-*` 테스트로 SPT range 점유 검사를 확인
+     - [[mmap-readonly-protection-lab]]: `mmap-ro`에서 lazy read-only page의 첫 write를 SPT metadata와 `PTE_W`로 막는 기준
+     - [[swap-lab]]: 4KB anonymous page가 512B disk sector 8개로 보존되는 실험
++    - [[swap-slot-lifecycle-lab]]: slot bitmap이 used/free로 바뀌는 순간을 GDB로 확인
+   - PintOS 코드
+     - `pintos/userprog/exception.c`
+     - `pintos/vm/vm.c`
+@@ -840,9 +845,11 @@ related_to:
+   - 증명하는 것
+     - swap slot은 PintOS VM metadata이고 QEMU는 그 의미를 모른다.
+     - anonymous page가 RAM에서 내려간 뒤에도 SPT와 `struct anon_page`가 복원할 slot을 기억해야 한다.
++    - swap in 또는 process exit에서 slot을 free하지 않으면 swap bitmap이 누수된다.
+     - QEMU IDE 모델은 guest sector 번호를 block backend byte offset으로 변환한다.
+   - 연결 문서
+     - [[anonymous-page-swap-slot-knowledge]]
++    - [[swap-slot-lifecycle-lab]]
+     - [[swap-lab]]
+     - [[disk-sector-qemu-block-backend-knowledge]]
+     - [[swap-disk-ide-qemu-trace]]
+@@ -1235,9 +1242,12 @@ related_to:
+   - 확인
+     - swap disk가 `disk_get(1, 1)`로 잡히는지
+     - page 하나가 연속 sector 8개로 기록되는지
++    - swap in 뒤 slot bitmap이 free로 돌아오는지
++    - process exit 때 swapped-out page의 slot이 회수되는지
+     - QEMU에서 `sector_num << BDRV_SECTOR_BITS`가 기대 offset으로 계산되는지
+   - 연결 문서
+     - [[swap-lab]]
++    - [[swap-slot-lifecycle-lab]]
+     - [[disk-sector-qemu-block-backend-knowledge]]
+     - [[swap-disk-ide-qemu-trace]]
+ - mmap lazy page 확인
+@@ -1311,6 +1321,7 @@ related_to:
+   - [[thread-priority-preemption-lab]]
+   - [[priority-donation-chain-lab]]
+   - [[swap-lab]]
++  - [[swap-slot-lifecycle-lab]]
+   - [[stack-growth-boundary-lab]]
+   - [[cow-write-protect-fault-lab]]
+   - [[mmap-readonly-protection-lab]]
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index b119438..dea7267 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -74,6 +74,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[stack-growth-page-fault-knowledge]]: `CR2`, 유저 `RSP`, `USER_STACK`으로 스택 성장 fault를 살릴지 판단하는 기준
+ - [[stack-growth-boundary-lab]]: `pt-grow-*` 테스트로 정상 성장과 비정상 접근 경계를 확인
+ - [[anonymous-page-swap-slot-knowledge]]: anonymous page가 RAM에서 내려간 뒤 복원할 swap slot을 어디에 저장할지 정하는 기준
++- [[swap-slot-lifecycle-lab]]: swap out, swap in, process exit에서 slot bitmap을 언제 used/free로 바꾸는지 확인
+ - [[mmap-file-backed-page-knowledge]]: 파일 바이트가 유저 가상 주소의 page로 보이는 과정
+ - [[file-backed-page-metadata-knowledge]]: `struct file_page`에 file offset, read bytes, zero bytes가 필요한 이유
+ - [[mmap-invalid-argument-matrix-lab]]: `mmap()`이 fd, 주소, 길이, offset, kernel range 오류를 page 등록 전에 거절하는 기준
+@@ -93,6 +94,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[mmap-munmap-range-trace]]: `do_munmap(addr)`가 mapping 범위를 찾아 dirty page와 PTE/SPT를 정리하는 흐름
+ - [[mmap-dirty-writeback-qemu-trace]]: mmap으로 수정한 dirty file-backed page가 PintOS file write와 QEMU block I/O로 내려가는 흐름
+ - [[swap-disk-ide-qemu-trace]]: swap slot의 sector write가 QEMU IDE/block backend offset으로 내려가는 흐름
++- [[swap-slot-lifecycle-lab]]: slot 예약이 swap in 또는 destroy에서 회수되는 흐름
+ 
+ ## 실험
+ 
+@@ -105,3 +107,4 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[mmap-overlap-validation-lab]]: `mmap-overlap`, `mmap-over-code/data/stk` 테스트로 mapping range 점유 검사를 확인
+ - [[mmap-readonly-protection-lab]]: `mmap-ro` 테스트로 lazy read-only page의 write fault를 분해
+ - [[swap-lab]]: anonymous page가 swap disk slot으로 나갔다 돌아오는 흐름
++- [[swap-slot-lifecycle-lab]]: slot bitmap 누수와 double free를 GDB로 확인하는 실험
+diff --git a/notes/os/anonymous-page-swap-slot-knowledge.md b/notes/os/anonymous-page-swap-slot-knowledge.md
+index ea9162f..264f67e 100644
+--- a/notes/os/anonymous-page-swap-slot-knowledge.md
++++ b/notes/os/anonymous-page-swap-slot-knowledge.md
+@@ -24,6 +24,7 @@ related_to:
+   - "[[concept-to-code-map]]"
+   - "[[week-3-4-virtual-memory-map]]"
+   - "[[swap-lab]]"
++  - "[[swap-slot-lifecycle-lab]]"
+   - "[[swap-disk-ide-qemu-trace]]"
+   - "[[supplemental-page-table-knowledge]]"
+   - "[[frame-eviction-trace]]"
+@@ -477,6 +478,7 @@ PintOS GDB stub은 guest register와 guest memory를 보여 준다. QEMU 내부
+ ## 다음 링크
+ 
+ - [[swap-lab]]: anonymous page 1장이 sector 8개로 나뉘는 실험
++- [[swap-slot-lifecycle-lab]]: swap in과 destroy에서 slot 예약을 언제 해제해야 하는지 확인
+ - [[swap-disk-ide-qemu-trace]]: slot에서 QEMU IDE/block backend까지 내려가는 호출 흐름
+ - [[frame-eviction-trace]]: 어떤 page를 RAM에서 내보낼지 고르는 앞 단계
+ - [[supplemental-page-table-knowledge]]: page fault에서 합법한 page를 찾는 표
+diff --git a/traces/os/frame-eviction-trace.md b/traces/os/frame-eviction-trace.md
+index a7df398..3dbe640 100644
+--- a/traces/os/frame-eviction-trace.md
++++ b/traces/os/frame-eviction-trace.md
+@@ -410,3 +410,4 @@ QEMU는 이 정책을 모르고, guest physical memory와 x86 page-table 하드
+ - [[mmap-file-backed-page-knowledge]]: file-backed page는 eviction 때 어디로 writeback되는가
+ - [[mmap-dirty-writeback-qemu-trace]]: dirty file-backed page가 sector write로 내려가는 더 구체적인 흐름
+ - [[swap-lab]]: anonymous page를 swap slot과 연결해 보는 실험
++- [[swap-slot-lifecycle-lab]]: eviction 뒤 slot이 swap in 또는 destroy에서 회수되는지 확인
+diff --git a/traces/os/swap-disk-ide-qemu-trace.md b/traces/os/swap-disk-ide-qemu-trace.md
+index 6124eef..798dbd3 100644
+--- a/traces/os/swap-disk-ide-qemu-trace.md
++++ b/traces/os/swap-disk-ide-qemu-trace.md
+@@ -24,6 +24,7 @@ related_to:
+   - "[[concept-to-code-map]]"
+   - "[[week-3-4-virtual-memory-map]]"
+   - "[[anonymous-page-swap-slot-knowledge]]"
++  - "[[swap-slot-lifecycle-lab]]"
+   - "[[swap-lab]]"
+   - "[[frame-eviction-trace]]"
+   - "[[guest-physical-memory-qemu-knowledge]]"
+@@ -445,6 +446,7 @@ qiov size  = 512
+ 
+ - [[swap-lab]]: anonymous page가 slot으로 나갔다 돌아오는 전체 실험
+ - [[anonymous-page-swap-slot-knowledge]]: page fault 때 같은 slot을 다시 찾기 위한 metadata 기준
++- [[swap-slot-lifecycle-lab]]: slot bitmap의 used/free 전환이 QEMU sector bytes와 별개임을 확인
+ - [[frame-eviction-trace]]: swap out이 호출되는 앞 단계
+ - [[disk-sector-qemu-block-backend-knowledge]]: sector 번호와 QEMU block backend offset 계산만 따로 보기
+ - [[guest-physical-memory-qemu-knowledge]]: guest RAM backing과 disk backing을 구분하는 법
