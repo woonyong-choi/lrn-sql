@@ -2,7 +2,7 @@ diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
 index 0000000..0000000 100644
 --- a/maps/os/concept-to-code-map.md
 +++ b/maps/os/concept-to-code-map.md
-@@ -218,9 +218,10 @@
+@@ -218,10 +218,11 @@
  - Q3. 유저 프로그램은 어떻게 커널 기능을 요청하는가?
    - 먼저 볼 문서
      - [[elf-loader-knowledge]]
@@ -12,30 +12,31 @@ index 0000000..0000000 100644
      - [[process-wait-exit-trace]]
      - [[file-descriptor-knowledge]]
      - [[fd-table-fork-duplication-knowledge]]
+     - [[spt-copy-fork-trace]]
      - [[week-2-user-programs-map]]
 diff --git a/maps/os/week-2-user-programs-map.md b/maps/os/week-2-user-programs-map.md
 index 0000000..0000000 100644
 --- a/maps/os/week-2-user-programs-map.md
 +++ b/maps/os/week-2-user-programs-map.md
-@@ -32,8 +32,9 @@
+@@ -32,9 +32,10 @@
  ## 먼저 볼 것
  
  - [[elf-loader-knowledge]]
 +- [[executable-write-deny-knowledge]]
  - [[argument-passing-lab]]
- - [[syscall-end-to-end]]
+ - [[syscall-end-to-end]]: `write(1, buffer, size)`의 register, handler, stdout 반환값 흐름
  - [[syscall-entry-stack-switch-trace]]
  - [[file-descriptor-knowledge]]
+ - [[spt-copy-fork-trace]]
  - [[cpu-register-execution]]
-@@ -41,7 +42,8 @@
+@@ -44,6 +45,7 @@
  ## 핵심 개념
  
  - [[elf-loader-knowledge]]: 실행 파일의 program header가 유저 가상 page mapping으로 바뀌는 지점
 +- [[executable-write-deny-knowledge]]: 실행 중인 ELF 파일을 같은 inode의 write로 망가뜨리지 않게 막는 방식
  - [[cpu-register-execution]]: `RAX/RDI/RSI/RDX`가 syscall 요청서가 되고 `struct intr_frame`에 저장되는 방식
  - [[syscall-entry-stack-switch-trace]]: `syscall` 명령 뒤 유저 스택에서 커널 스택으로 옮겨가고 register snapshot이 만들어지는 순간
- - [[file-descriptor-knowledge]]: fd 숫자가 “무엇을 가리키는지”부터 잡기
- - [[fd-table-fork-duplication-knowledge]]: `fork()`가 fd table과 열린 파일 위치를 어떻게 물려주는지 확인
+ - [[user-pointer-safe-copy-knowledge]]: 커널이 유저 포인터를 직접 믿지 않고 안전하게 복사/검증해야 하는 이유
 diff --git a/notes/os/elf-loader-knowledge.md b/notes/os/elf-loader-knowledge.md
 index 0000000..0000000 100644
 --- a/notes/os/elf-loader-knowledge.md
@@ -69,21 +70,17 @@ new file mode 100644
 index 0000000..0000000
 --- /dev/null
 +++ b/notes/os/executable-write-deny-knowledge.md
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,433 @@
 +---
 +type: Knowledge
-+status: Draft
-+week:
-+  - user-programs
-+systems:
-+  - Linux
-+  - Windows
-+  - PintOS
-+  - QEMU
 +tags:
 +  - domain:os
 +  - domain:pintos
 +  - domain:qemu
++  - system:linux
++  - system:windows
++  - system:pintos
++  - system:qemu
 +  - week:user-programs
 +  - layer:user
 +  - layer:kernel
@@ -93,6 +90,7 @@ index 0000000..0000000
 +  - topic:process
 +  - topic:filesystem
 +  - topic:gdb
++  - status:draft
 +related_to:
 +  - "[[concept-to-code-map]]"
 +  - "[[week-2-user-programs-map]]"
