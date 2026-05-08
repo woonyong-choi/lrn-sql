@@ -1,0 +1,669 @@
+diff --git a/maps/os/concept-to-code-map.md b/maps/os/concept-to-code-map.md
+index 11638a1..0740f07 100644
+--- a/maps/os/concept-to-code-map.md
++++ b/maps/os/concept-to-code-map.md
+@@ -90,6 +90,8 @@ related_to:
+   - [[process-fork-initialization-handshake-trace]]
+ - 2.7단계: `fork()`가 주소 공간의 page 의미를 물려주는 법
+   - [[spt-copy-fork-trace]]
++- 2.7.1단계: `exec()`와 `exit()`에서 VM 주소 공간을 정리하는 법
++  - [[vm-process-cleanup-spt-kill-trace]]
+ - 2.8단계: `fork()` 뒤 첫 write가 COW page copy로 바뀌는 법
+   - [[cow-write-protect-fault-lab]]
+ - 3단계: 주소가 바이트로 바뀌는 법
+@@ -304,6 +306,7 @@ related_to:
+     - [[tlb-cr3-address-space-switch-knowledge]]
+     - [[supplemental-page-table-knowledge]]
+     - [[spt-copy-fork-trace]]
++    - [[vm-process-cleanup-spt-kill-trace]]
+     - [[stack-growth-page-fault-knowledge]]
+     - [[stack-growth-boundary-lab]]
+     - [[anonymous-page-swap-slot-knowledge]]
+@@ -465,6 +468,8 @@ related_to:
+     - supplemental page table은 왜 page table만으로 부족해서 필요한가?
+     - `fork()` 때 supplemental page table은 왜 page table과 별도로 복사해야 하는가?
+       - [[spt-copy-fork-trace]]
++    - `exec()`와 `exit()`는 SPT page, frame, swap slot, mmap metadata를 어떤 순서로 정리해야 하는가?
++      - [[vm-process-cleanup-spt-kill-trace]]
+     - COW fork 뒤 첫 write는 왜 not-present가 아니라 protection fault로 들어오는가?
+       - [[cow-write-protect-fault-lab]]
+     - 스택 성장 fault는 왜 `rsp - 8`은 살리고 `rsp - 4096`은 죽여야 하는가?
+@@ -508,6 +513,7 @@ related_to:
+     - [[vm-try-handle-fault-decision-trace]]: `vm_try_handle_fault()`가 lazy page, stack growth, invalid access를 나누는 지점
+     - [[vm-do-claim-page-trace]]: 살리기로 한 page에 frame, PTE, page type별 bytes를 붙이는 지점
+     - [[spt-copy-fork-trace]]: 부모 주소 공간의 lazy/resident/swapped page 의미를 자식 SPT로 복제하는 지점
++    - [[vm-process-cleanup-spt-kill-trace]]: `process_cleanup()`이 SPT page를 type별 destroy 경로로 내려보내는 지점
+     - [[swap-fork-process-isolation-lab]]: `swap-fork`에서 fork/exec와 child별 anon slot 소유권을 분리하는 지점
+     - [[cow-write-protect-fault-lab]]: COW 공유 frame이 child의 첫 write에서 새 frame으로 갈라지는 지점
+     - [[frame-eviction-trace]]: 빈 frame이 없을 때 victim page를 내보내고 frame을 재사용하는 지점
+diff --git a/maps/os/pintos-process-visual-map.md b/maps/os/pintos-process-visual-map.md
+index 66f9b5c..c323b8b 100644
+--- a/maps/os/pintos-process-visual-map.md
++++ b/maps/os/pintos-process-visual-map.md
+@@ -87,6 +87,7 @@ _width: wide
+ - [[fd-table-fork-duplication-knowledge]]
+ - [[fork-fd-table-gap-lab]]
+ - [[spt-copy-fork-trace]]
++- [[vm-process-cleanup-spt-kill-trace]]
+ - [[syscall-end-to-end]]
+ 
+ ## 한 장으로 보는 흐름
+@@ -143,6 +144,7 @@ flowchart TD
+ | `fd_table 복제` | [[fd-table-fork-duplication-knowledge]], [[fork-fd-table-gap-lab]] | fd table copy 구현 |
+ | `process_wait(pid)` | [[process-wait-exit-trace]] | `process_wait()` |
+ | `process_exit()` | [[process-wait-exit-trace]] | `process_exit()` |
++| `process_cleanup()` | [[vm-process-cleanup-spt-kill-trace]] | `process_cleanup()`, `supplemental_page_table_kill()` |
+ | `exit_status 기록` | [[process-wait-exit-trace]] | `syscall.c`, `process.c` |
+ | `orphaned = true` | [[process-orphan-reparent-trace]] | 자식 상태 레코드 reparent 처리 |
+ | `list_remove() / free()` | [[process-wait-exit-trace]], [[process-orphan-reparent-trace]] | wait/reap 또는 orphan cleanup |
+@@ -163,6 +165,7 @@ flowchart TD
+ - [[process-orphan-reparent-trace]]
+ - [[process-fork-initialization-handshake-trace]]
+ - [[spt-copy-fork-trace]]
++- [[vm-process-cleanup-spt-kill-trace]]
+ 
+ ## 실험 지도
+ 
+diff --git a/maps/os/pintos-vm-visual-map.md b/maps/os/pintos-vm-visual-map.md
+index f86ff01..d5c940a 100644
+--- a/maps/os/pintos-vm-visual-map.md
++++ b/maps/os/pintos-vm-visual-map.md
+@@ -99,6 +99,7 @@ related_to:
+ - [[lazy-loading-segment-trace]]
+ - [[vm-try-handle-fault-decision-trace]]
+ - [[vm-do-claim-page-trace]]
++- [[vm-process-cleanup-spt-kill-trace]]
+ - [[page-fault-instruction-retry-knowledge]]
+ - [[stack-growth-page-fault-knowledge]]
+ - [[swap-fork-process-isolation-lab]]
+@@ -155,6 +156,7 @@ flowchart LR
+ | 코드 로딩 과정 | [[lazy-loading-segment-trace]], [[elf-loader-knowledge]] | `load_segment()`, `lazy_load_segment()` |
+ | 주소 참조 과정 | [[page-fault-trace]], [[vm-try-handle-fault-decision-trace]] | `page_fault()`, `vm_try_handle_fault()` |
+ | page claim | [[vm-do-claim-page-trace]] | `vm_do_claim_page()`, `vm_get_frame()` |
++| process cleanup | [[vm-process-cleanup-spt-kill-trace]] | `process_cleanup()`, `supplemental_page_table_kill()` |
+ | stack growth | [[stack-growth-page-fault-knowledge]], [[stack-growth-boundary-lab]] | `vm_stack_growth()`, `setup_stack()` |
+ | UNINIT -> ANON / FILE | [[lazy-loading-segment-trace]], [[anonymous-page-swap-slot-knowledge]], [[file-backed-page-metadata-knowledge]] | `uninit_initialize()`, `anon_initializer()`, `file_backed_initializer()` |
+ | 바이트 관찰 | [[바이트-버퍼와-캐스팅-실험|바이트 버퍼와 캐스팅 실험]] | GDB `x`, `p`, casting |
+@@ -173,6 +175,7 @@ flowchart LR
+ - [[page-fault-trace]]
+ - [[vm-try-handle-fault-decision-trace]]
+ - [[vm-do-claim-page-trace]]
++- [[vm-process-cleanup-spt-kill-trace]]
+ - [[frame-eviction-trace]]
+ - [[swap-disk-ide-qemu-trace]]
+ 
+diff --git a/maps/os/week-2-user-programs-map.md b/maps/os/week-2-user-programs-map.md
+index e02c3bd..c1fe8d4 100644
+--- a/maps/os/week-2-user-programs-map.md
++++ b/maps/os/week-2-user-programs-map.md
+@@ -43,6 +43,7 @@ PintOS 2주차 User Programs 학습에서 유저 모드, ELF 로딩, 시스템 
+ - [[syscall-entry-stack-switch-trace]]
+ - [[file-descriptor-knowledge]]
+ - [[spt-copy-fork-trace]]
++- [[vm-process-cleanup-spt-kill-trace]]
+ - [[cpu-register-execution]]
+ 
+ ## 핵심 개념
+@@ -63,6 +64,7 @@ PintOS 2주차 User Programs 학습에서 유저 모드, ELF 로딩, 시스템 
+ - [[fd-table-fork-duplication-knowledge]]: `fork()`가 fd table과 열린 파일 위치를 어떻게 물려주는지 확인
+ - [[fork-fd-table-gap-lab]]: 중간 fd를 닫은 뒤 `fork()`가 더 큰 fd를 복제하는지 확인
+ - [[spt-copy-fork-trace]]: VM 이후 `fork()`가 주소 공간의 page 의미를 어떻게 물려줘야 하는지 확인
++- [[vm-process-cleanup-spt-kill-trace]]: `exec()`와 `exit()`에서 기존 VM 주소 공간을 정리하는 순서
+ 
+ ## 흐름 추적
+ 
+@@ -76,6 +78,7 @@ PintOS 2주차 User Programs 학습에서 유저 모드, ELF 로딩, 시스템 
+ - [[process-orphan-reparent-trace]]: `reparent_or_reap_children()`와 `finish_self_status()`가 orphan record를 정리하는 흐름
+ - [[process-fork-initialization-handshake-trace]]: `process_fork()`가 `__do_fork()`의 성공/실패 결과를 기다리는 흐름
+ - [[spt-copy-fork-trace]]: `__do_fork()`에서 SPT copy와 page table copy 경로가 갈라지는 흐름
++- [[vm-process-cleanup-spt-kill-trace]]: `process_cleanup()`이 SPT page들을 type별 destroy 경로로 내려보내는 흐름
+ 
+ ## 실험
+ 
+diff --git a/maps/os/week-3-4-virtual-memory-map.md b/maps/os/week-3-4-virtual-memory-map.md
+index 3a59498..664133d 100644
+--- a/maps/os/week-3-4-virtual-memory-map.md
++++ b/maps/os/week-3-4-virtual-memory-map.md
+@@ -48,6 +48,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[tlb-cr3-address-space-switch-knowledge]]
+ - [[supplemental-page-table-knowledge]]
+ - [[spt-copy-fork-trace]]
++- [[vm-process-cleanup-spt-kill-trace]]
+ - [[cow-write-protect-fault-lab]]
+ - [[stack-growth-page-fault-knowledge]]
+ - [[stack-growth-boundary-lab]]
+@@ -78,6 +79,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[tlb-cr3-address-space-switch-knowledge]]: CR3가 page table root를 고르고 TLB가 최근 VA -> PA 번역을 캐시하는 방식
+ - [[supplemental-page-table-knowledge]]: page table만으로는 기억할 수 없는 "원래 합법한 페이지" 정보
+ - [[spt-copy-fork-trace]]: `fork()`가 lazy/resident/swapped page 의미를 자식 SPT로 복제해야 하는 이유
++- [[vm-process-cleanup-spt-kill-trace]]: `exec()`와 `exit()`에서 SPT page, frame, swap slot, mmap metadata를 정리하는 순서
+ - [[cow-write-protect-fault-lab]]: `fork()` 직후 공유 frame을 `PTE_W=0`으로 보호하고 첫 write에서 복사하는 기준
+ - [[stack-growth-page-fault-knowledge]]: `CR2`, 유저 `RSP`, `USER_STACK`으로 스택 성장 fault를 살릴지 판단하는 기준
+ - [[stack-growth-boundary-lab]]: `pt-grow-*` 테스트로 정상 성장과 비정상 접근 경계를 확인
+@@ -97,6 +99,7 @@ PintOS 3-4주차 VM 학습에서 주소 변환, 페이지 테이블, 프레임,
+ - [[vm-try-handle-fault-decision-trace]]: `vm_try_handle_fault()`가 lazy page, stack growth, invalid access를 가르는 흐름
+ - [[vm-do-claim-page-trace]]: 살리기로 한 page가 실제 frame과 page table mapping을 얻는 흐름
+ - [[spt-copy-fork-trace]]: `__do_fork()`에서 `supplemental_page_table_copy()`가 주소 공간 의미를 복제하는 흐름
++- [[vm-process-cleanup-spt-kill-trace]]: `process_cleanup()`에서 SPT의 모든 page를 type별 destroy 경로로 정리하는 흐름
+ - [[swap-fork-process-isolation-lab]]: `swap-fork`에서 fork/exec 주소 공간 교체와 child별 swap slot 소유권을 분리하는 흐름
+ - [[cow-write-protect-fault-lab]]: COW write-protect fault가 child 전용 frame copy로 바뀌는 흐름
+ - [[frame-eviction-trace]]: 빈 frame이 없을 때 victim page를 내보내고 frame을 재사용하는 흐름
+diff --git a/notes/os/pintos-vm-implementation-lecture.md b/notes/os/pintos-vm-implementation-lecture.md
+index 2b88a8d..f22ec5b 100644
+--- a/notes/os/pintos-vm-implementation-lecture.md
++++ b/notes/os/pintos-vm-implementation-lecture.md
+@@ -27,6 +27,7 @@ related_to:
+   - "[[pintos-vm-object-model-knowledge]]"
+   - "[[lazy-loading-segment-trace]]"
+   - "[[swap-fork-process-isolation-lab]]"
++  - "[[vm-process-cleanup-spt-kill-trace]]"
+ _width: wide
+ _organized: true
+ ---
+@@ -63,6 +64,7 @@ PintOS VM을 구현하기 전에 가장 먼저 생기는 질문은 보통 이것
+ - [[#7단계 swap은 무엇을 저장하는가|7단계 swap은 무엇을 저장하는가]]
+ - [[#8단계 mmap은 파일을 어떻게 메모리처럼 보이게 하는가|8단계 mmap은 파일을 어떻게 메모리처럼 보이게 하는가]]
+ - [[#9단계 fork는 주소 공간의 무엇을 복사하는가|9단계 fork는 주소 공간의 무엇을 복사하는가]]
++- [[#10단계 process cleanup은 무엇을 회수해야 하는가|10단계 process cleanup은 무엇을 회수해야 하는가]]
+ - [[#Linux Windows PintOS QEMU 차이|Linux Windows PintOS QEMU 차이]]
+ - [[#숫자와 메모리로 보는 예시|숫자와 메모리로 보는 예시]]
+ - [[#GDB로 확인할 질문|GDB로 확인할 질문]]
+@@ -370,6 +372,24 @@ VM 이후 `fork()`는 단순히 register만 복사해서는 안 된다.
+ - [[fd-table-fork-duplication-knowledge]]
+ - [[pintos-process-visual-map#fork 생성 흐름|process fork 시각 지도]]
+ 
++## 10단계 process cleanup은 무엇을 회수해야 하는가
++
++VM을 구현한 뒤에는 `process_exit()`과 `process_exec()`가 단순히 page table만 버리면 안 된다.
++
++정리해야 할 질문:
++
++- SPT 안의 모든 `struct page`를 순회하는가?
++- resident page의 frame과 PTE는 어떻게 정리하는가?
++- swapped-out anonymous page의 slot은 누가 free하는가?
++- dirty file-backed page는 exit 경로에서도 write-back되는가?
++- 아직 첫 접근이 없던 `UNINIT` lazy page의 aux와 file reference는 해제되는가?
++
++관련 링크:
++
++- [[vm-process-cleanup-spt-kill-trace]]
++- [[mmap-munmap-range-trace]]
++- [[anonymous-page-swap-slot-knowledge]]
++
+ ## Linux Windows PintOS QEMU 차이
+ 
+ | 질문                        | Linux / Windows                 | PintOS                                    | QEMU                        |
+@@ -523,6 +543,10 @@ x/32xb frame->kva
+ - [[fd-table-fork-duplication-knowledge|fd table 복사와 주소 공간 복사는 무엇이 다른가?]]
+ - [[swap-fork-process-isolation-lab|fork/exec로 만든 여러 child의 anonymous swap 상태는 왜 서로 섞이면 안 되는가?]]
+ 
++### teardown 질문
++
++- [[vm-process-cleanup-spt-kill-trace|process exit과 exec cleanup은 SPT page들을 어떤 순서로 destroy해야 하는가?]]
++
+ ## 구현 체크리스트
+ 
+ 구현 시작 전에는 아래 질문에 스스로 답할 수 있어야 한다.
+@@ -537,7 +561,7 @@ x/32xb frame->kva
+ - `pml4_set_page()` 실패 시 frame/page 상태를 정리하는가?
+ - eviction 시 victim의 PTE를 제거하는가?
+ - dirty file-backed page만 write-back하는가?
+-- process exit 때 SPT, frame, swap slot, mmap metadata가 정리되는가?
++- [[vm-process-cleanup-spt-kill-trace|process exit 때 SPT, frame, swap slot, mmap metadata가 정리되는가?]]
+ - fork 뒤 부모와 자식의 page 의미가 서로 꼬이지 않는가?
+ - fork 뒤 exec한 child의 옛 SPT와 새 anonymous swap metadata가 서로 섞이지 않는가?
+ 
+@@ -549,6 +573,7 @@ x/32xb frame->kva
+ - [[lazy-loading-segment-trace]]
+ - [[vm-try-handle-fault-decision-trace]]
+ - [[vm-do-claim-page-trace]]
++- [[vm-process-cleanup-spt-kill-trace]]
+ - [[frame-eviction-trace]]
+ - [[mmap-file-backed-page-knowledge]]
+ - [[swap-fork-process-isolation-lab]]
+diff --git a/traces/os/vm-process-cleanup-spt-kill-trace.md b/traces/os/vm-process-cleanup-spt-kill-trace.md
+new file mode 100644
+index 0000000..4d04b0e
+--- /dev/null
++++ b/traces/os/vm-process-cleanup-spt-kill-trace.md
+@@ -0,0 +1,440 @@
++---
++type: Trace
++status: Draft
++week:
++  - vm
++systems:
++  - Linux
++  - Windows
++  - PintOS
++  - QEMU
++tags:
++  - domain:os
++  - domain:pintos
++  - domain:qemu
++  - week:vm
++  - week:user-programs
++  - layer:user
++  - layer:kernel
++  - layer:memory
++  - layer:device
++  - topic:process
++  - topic:page-table
++  - topic:swap
++  - topic:mmap
++  - topic:gdb
++related_to:
++  - "[[concept-to-code-map]]"
++  - "[[week-3-4-virtual-memory-map]]"
++  - "[[pintos-vm-visual-map]]"
++  - "[[pintos-process-visual-map]]"
++  - "[[pintos-vm-implementation-lecture]]"
++  - "[[supplemental-page-table-knowledge]]"
++  - "[[anonymous-page-swap-slot-knowledge]]"
++  - "[[mmap-munmap-range-trace]]"
++  - "[[spt-copy-fork-trace]]"
++---
++
++# process cleanup은 SPT page들을 어떤 순서로 해제하나
++
++## 작은 질문
++
++[[pintos-vm-implementation-lecture]]의 구현 체크리스트에는 이런 질문이 있다.
++
++> process exit 때 SPT, frame, swap slot, mmap metadata가 정리되는가?
++
++처음에는 `process_exit()`이 fd만 닫고 끝나는 것처럼 보이기 쉽다. 하지만 VM을 구현한 뒤에는 프로세스가 끝날 때 주소 공간의 의미도 같이 사라져야 한다.
++
++이 Trace는 `process_exit()` 또는 `process_exec()`가 `process_cleanup()`으로 들어간 뒤, [[supplemental-page-table-knowledge|SPT]] 안의 page들이 type별 destroy 경로로 내려가는 흐름을 따라간다.
++
++## 꼬리 질문
++
++- 왜 `pml4_destroy()`만으로 VM page 정리가 끝나지 않을까?
++- 실제 OS에서는 process address space teardown이 무엇을 회수할까?
++- PintOS에서는 `supplemental_page_table_kill()`이 어떤 page들을 순회해야 할까?
++- `UNINIT`, `ANON`, `FILE` page의 destroy 책임은 어떻게 다를까?
++- QEMU는 process cleanup이나 SPT kill을 알고 있을까?
++- swapped-out anonymous page가 process exit으로 사라지면 slot은 언제 free되어야 할까?
++- dirty file-backed mmap page는 exit 경로에서 어디로 write-back되어야 할까?
++- GDB로 어디를 보면 page가 한 번만 destroy되는지 확인할 수 있을까?
++
++## 목차
++
++- [[vm-process-cleanup-spt-kill-trace#왜 필요한가|왜 필요한가]]
++- [[vm-process-cleanup-spt-kill-trace#핵심 모델|핵심 모델]]
++- [[vm-process-cleanup-spt-kill-trace#예시 상황|예시 상황]]
++- [[vm-process-cleanup-spt-kill-trace#Linux / Windows에서는|Linux / Windows에서는]]
++- [[vm-process-cleanup-spt-kill-trace#PintOS에서는|PintOS에서는]]
++- [[vm-process-cleanup-spt-kill-trace#QEMU에서는|QEMU에서는]]
++- [[vm-process-cleanup-spt-kill-trace#차이점|차이점]]
++- [[vm-process-cleanup-spt-kill-trace#코드 증거|코드 증거]]
++- [[vm-process-cleanup-spt-kill-trace#숫자와 메모리|숫자와 메모리]]
++- [[vm-process-cleanup-spt-kill-trace#직접 확인|직접 확인]]
++- [[vm-process-cleanup-spt-kill-trace#정리|정리]]
++- [[vm-process-cleanup-spt-kill-trace#다음 링크|다음 링크]]
++
++## 왜 필요한가
++
++VM 이후의 주소 공간은 단순한 page table이 아니다.
++
++PML4는 CPU가 걷는 hardware page table이고, SPT는 PintOS가 "이 유저 VA는 원래 어떤 page인가"를 기억하는 커널 metadata다.
++
++```text
++PML4:
++  현재 resident page의 VA -> frame mapping
++
++SPT:
++  resident page
++  아직 첫 접근이 없는 lazy page
++  swap disk로 내려간 anonymous page
++  mmap file offset과 dirty write-back 의미
++```
++
++이 말은 즉, `pml4_destroy()`는 page table page들을 해제할 수 있지만, SPT가 들고 있는 backing 의미까지 자동으로 정리하지 않는다.
++
++process teardown에서 SPT 정리가 빠지면 이런 버그가 생긴다.
++
++| 빠진 정리 | 결과 |
++|---|---|
++| resident frame 해제 | user pool frame 누수 |
++| swapped-out anon slot free | swap slot 누수 |
++| dirty mmap write-back | 파일 수정 내용 손실 |
++| uninit lazy aux 해제 | file reference 또는 aux metadata 누수 |
++| SPT entry 제거 | 종료한 process의 page metadata가 남음 |
++
++## 핵심 모델
++
++process cleanup의 VM 부분은 이렇게 읽으면 된다.
++
++```text
++process_exit()
++  -> close_open_files()
++  -> process_cleanup()
++       -> supplemental_page_table_kill(&curr->spt)
++            -> SPT의 모든 page를 순회
++            -> page type별 destroy(page)
++            -> struct page free
++       -> pml4_activate(NULL)
++       -> pml4_destroy(old_pml4)
++```
++
++`process_exec()`도 같은 경로를 쓴다.
++
++```text
++process_exec(new_program)
++  -> process_cleanup()
++       기존 주소 공간 제거
++  -> load(new_program)
++       새 ELF, 새 stack, 새 SPT page 등록
++```
++
++핵심은 `supplemental_page_table_kill()`이 `pml4_destroy()`보다 먼저 와야 한다는 점이다. page destructor가 현재 page의 frame, dirty bit, PTE 상태를 확인해야 할 수 있기 때문이다.
++
++## 예시 상황
++
++한 프로세스가 다음 page들을 갖고 있다고 하자.
++
++| VA | 상태 | 정리해야 할 것 |
++|---|---|---|
++| `0x400000` | lazy code page, 아직 접근 안 함 | lazy aux, reopened file reference |
++| `0x401000` | resident anonymous page | frame, PTE, page metadata |
++| `0x402000` | swapped-out anonymous page | swap slot, page metadata |
++| `0x403000` | dirty mmap file page | file write-back, frame/PTE, file metadata |
++
++프로세스가 종료되면 유저 VA들은 더 이상 의미가 없다. 하지만 cleanup이 해야 할 일은 page 상태마다 다르다.
++
++```text
++lazy page:
++  frame이 없으므로 palloc_free_page(frame)는 하지 않음
++  aux와 file reference를 정리
++
++resident anon page:
++  PTE 제거 또는 pml4_destroy 전 상태 정리
++  frame을 user pool로 반환
++
++swapped-out anon page:
++  frame은 없음
++  page->anon.slot이 가리키는 bitmap bit를 free로 되돌림
++
++dirty file page:
++  dirty 여부 확인
++  file_write_at(file, kva, read_bytes, offset)
++  file reference 정리
++```
++
++정리의 목표는 "종료한 process의 주소 공간을 다시 fault로 살릴 수 없게 하는 것"이 아니라, 그 주소 공간이 잡고 있던 커널 자원을 정확히 한 번씩 회수하는 것이다.
++
++## Linux / Windows에서는
++
++Linux에서는 `exit()`나 `execve()`가 성공할 때 기존 `mm_struct`와 VMA, page table, file-backed mapping, anonymous page, swap entry 같은 자원을 정리한다. 실제 구현은 reference count, reverse mapping, page cache, TLB shootdown, file write-back 정책과 얽힌다.
++
++Windows도 process address space를 구성하는 VAD, section object, prototype PTE, working set, pagefile-backed private page 같은 자원을 정리한다. Unix식 `fork()` 모델과는 다르지만, process가 소유한 private address space metadata를 teardown해야 한다는 점은 같다.
++
++현실 OS는 PintOS보다 훨씬 복잡하다. 여러 CPU가 같은 process를 실행할 수 있고, mapping이 공유될 수 있으며, write-back과 page cache 정책도 포함된다. PintOS는 이 복잡도를 `supplemental_page_table_kill()`과 page operation table로 축소해 연습하게 한다.
++
++## PintOS에서는
++
++PintOS에서 cleanup 경로는 두 진입점에서 시작한다.
++
++| 진입점 | 의미 |
++|---|---|
++| `process_exit()` | process가 완전히 끝남 |
++| `process_exec()` | 같은 thread가 기존 주소 공간을 버리고 새 프로그램으로 바뀜 |
++
++두 함수 모두 `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/process.c`의 `process_cleanup()`으로 들어간다.
++
++VM이 켜져 있으면 `process_cleanup()`은 먼저 `supplemental_page_table_kill(&curr->spt)`를 호출한다. 그 뒤 `curr->pml4 = NULL`, `pml4_activate(NULL)`, `pml4_destroy(pml4)` 순서로 page table 자체를 파괴한다.
++
++현재 저장소의 VM 코드는 skeleton이다. `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/vm.c`의 `supplemental_page_table_kill()`에는 아직 TODO만 있다.
++
++그래서 구현자가 채워야 할 큰 흐름은 다음이다.
++
++```text
++supplemental_page_table_kill(spt)
++  -> SPT 내부 hash/list의 모든 page 순회
++  -> 각 page에 대해 vm_dealloc_page(page)
++       -> destroy(page)
++            -> uninit_destroy / anon_destroy / file_backed_destroy
++       -> free(page)
++  -> SPT container 자체 정리
++```
++
++SPT를 hash table로 구현했다면 `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/lib/kernel/hash.c`의 `hash_destroy(h, destructor)` 패턴을 쓸 수 있다. destructor는 각 hash element를 받아 `struct page`로 되돌린 뒤 `vm_dealloc_page(page)`를 호출하는 식이 된다.
++
++## QEMU에서는
++
++QEMU는 PintOS process도, SPT도, `struct page`도 모른다.
++
++QEMU가 제공하는 것은 더 낮은 층이다.
++
++- CPU가 page table walk를 하다가 실패하면 #PF를 만든다.
++- PintOS가 disk sector read/write를 요청하면 IDE/block backend로 처리한다.
++- GDB stub을 통해 guest register와 memory를 관찰하게 해 준다.
++
++예를 들어 dirty mmap page를 exit 때 파일로 write-back하면 PintOS 내부에서는 `file_write_at()` 계열 호출이 일어나고, 더 아래에서는 disk sector write가 발생할 수 있다. QEMU의 `hw/ide/core.c`는 `ide_sector_write()`에서 sector 번호를 얻고, `blk_aio_pwritev()`에 `sector_num << BDRV_SECTOR_BITS` byte offset을 넘긴다.
++
++하지만 QEMU는 이것이 "process exit 때문에 dirty mmap page를 되돌리는 write-back"인지 모른다. QEMU 입장에서는 guest가 특정 sector에 write를 보낸 것이다.
++
++## 차이점
++
++| 질문 | Linux / Windows | PintOS | QEMU |
++|---|---|---|---|
++| 주소 공간 teardown은 누가 하나? | 실제 커널 VM subsystem | `process_cleanup()`과 `supplemental_page_table_kill()` | 모름 |
++| page별 backing 의미는 어디 있나? | VMA/PTE/page metadata/pagefile 구조 | SPT와 `struct page` union | 모름 |
++| dirty mmap write-back은 누가 결정하나? | VM/VFS/page cache 정책 | `file_backed_destroy()` 또는 munmap 공통 정리 | sector write만 수행 |
++| swapped-out anon slot free는 누가 하나? | swap subsystem | `anon_destroy()` | 모름 |
++| PML4/page table 해제는 무엇을 의미하나? | hardware translation 구조 해제 | `pml4_destroy()` | guest memory write 효과만 재현 |
++
++## 코드 증거
++
++### 1. exit과 exec는 둘 다 `process_cleanup()`을 지난다
++
++`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/userprog/process.c`
++
++```c
++process_exec(...)
++  -> process_cleanup()
++  -> load(...)
++
++process_exit()
++  -> close_open_files(...)
++  -> process_cleanup()
++```
++
++`exec()`에서 cleanup이 먼저 나오는 이유는 새 ELF를 로드하기 전에 기존 주소 공간을 버려야 하기 때문이다.
++
++### 2. VM cleanup은 PML4 destroy보다 먼저 호출된다
++
++같은 파일의 `process_cleanup()`은 VM 빌드에서 먼저 SPT를 kill한다.
++
++```c
++#ifdef VM
++supplemental_page_table_kill (&curr->spt);
++#endif
++
++curr->pml4 = NULL;
++pml4_activate (NULL);
++pml4_destroy (pml4);
++```
++
++이 순서는 중요하다. page별 destroy가 PTE dirty bit나 frame 연결을 봐야 한다면 PML4가 먼저 사라지면 판단 근거가 줄어든다.
++
++### 3. `destroy(page)`는 page operation table로 분기한다
++
++`/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/include/vm/vm.h`
++
++```c
++struct page_operations {
++    bool (*swap_in) (struct page *, void *);
++    bool (*swap_out) (struct page *);
++    void (*destroy) (struct page *);
++    enum vm_type type;
++};
++
++#define destroy(page) \
++    if ((page)->operations->destroy) (page)->operations->destroy (page)
++```
++
++따라서 SPT kill은 page type을 직접 `switch`로 모두 알아도 되지만, 기본 설계는 page가 가진 operation table로 정리 책임을 위임하는 쪽이다.
++
++### 4. type별 destroy 자리는 이미 나뉘어 있다
++
++관련 파일:
++
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/uninit.c`
++  - `uninit_destroy()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/anon.c`
++  - `anon_destroy()`
++- `/Users/woonyong/workspace/Krafton-Jungle/SW_AI-W09-pintos/pintos/vm/file.c`
++  - `file_backed_destroy()`
++
++이 함수들은 현재 TODO다. 그래서 VM 구현에서는 "page를 free한다"와 "page가 가진 외부 자원을 정리한다"를 분리해서 채워야 한다.
++
++### 5. QEMU는 disk sector write만 본다
++
++`/Users/woonyong/workspace/Krafton-Jungle/QEMU/hw/ide/core.c`의 `ide_sector_write()`는 sector 번호를 byte offset으로 바꿔 block backend에 넘긴다.
++
++```c
++s->pio_aiocb = blk_aio_pwritev(s->blk,
++                               sector_num << BDRV_SECTOR_BITS,
++                               &s->qiov, 0,
++                               ide_sector_write_cb, s);
++```
++
++`BDRV_SECTOR_BITS`는 `/Users/woonyong/workspace/Krafton-Jungle/QEMU/include/block/block-common.h`에서 9로 정의된다. 즉 sector 하나는 `1 << 9 = 512B`다.
++
++## 숫자와 메모리
++
++### 1. process cleanup 전후 page 수 감각
++
++예를 들어 SPT에 page 4개가 있다고 하자.
++
++```text
++SPT before cleanup:
++  0x400000 -> UNINIT lazy code
++  0x401000 -> ANON resident frame F1
++  0x402000 -> ANON swapped slot 3
++  0x403000 -> FILE dirty mmap frame F2
++
++SPT after cleanup:
++  empty
++```
++
++정리 대상은 frame 개수와 다르다.
++
++```text
++SPT pages = 4
++resident frames = 2
++swap slots held = 1
++dirty file-backed pages = 1
++```
++
++그래서 cleanup은 "PTE가 있는 page만" 보면 안 된다. 아직 resident가 아닌 page도 SPT에는 남아 있고, 그 page가 swap slot이나 lazy aux를 잡고 있을 수 있다.
++
++### 2. swapped-out page의 slot 계산
++
++```text
++page VA = 0x402000
++slot    = 3
++PGSIZE  = 4096
++sector  = 512
++sectors_per_page = 4096 / 512 = 8
++```
++
++slot 3이 차지하는 sector:
++
++```text
++base sector = 3 * 8 = 24
++range       = 24..31
++```
++
++process exit에서 이 page가 RAM으로 돌아오지 않고 사라진다면, `anon_destroy()`는 slot 3을 free로 되돌려야 한다. disk bytes를 0으로 지우는 것이 핵심이 아니라, slot allocator가 다시 slot 3을 줄 수 있게 만드는 것이 핵심이다.
++
++### 3. dirty file-backed page의 write-back 범위
++
++```text
++page VA    = 0x403000
++file offset = 8192
++read_bytes  = 3000
++zero_bytes  = 1096
++dirty       = true
++```
++
++이 page는 4096B frame을 갖지만, 파일에 되돌릴 수 있는 범위는 보통 `read_bytes`만큼이다.
++
++```text
++write-back:
++  file offset 8192부터 3000B
++
++write-back하면 안 되는 부분:
++  frame offset 3000..4095의 zero fill 영역
++```
++
++## 직접 확인
++
++구현 후에는 아래 breakpoint로 cleanup 경로를 본다.
++
++```gdb
++b process_exit
++b process_exec
++b process_cleanup
++b supplemental_page_table_kill
++b vm_dealloc_page
++b uninit_destroy
++b anon_destroy
++b file_backed_destroy
++```
++
++확인할 값:
++
++```gdb
++p thread_current()->pml4
++p &thread_current()->spt
++p page->va
++p page->operations->type
++p page->frame
++p/x page->va
++```
++
++swap을 구현한 뒤에는 swapped-out page cleanup에서 slot 상태를 본다.
++
++```gdb
++b anon_destroy
++p page->anon
++p swap_bitmap
++```
++
++mmap을 구현한 뒤에는 dirty file-backed page가 exit 경로에서 write-back되는지 본다.
++
++```gdb
++b file_backed_destroy
++b file_write_at
++p page->file
++p page->frame
++```
++
++테스트는 아래 계열이 cleanup 버그를 드러내기 쉽다.
++
++```text
++tests/vm/mmap-exit
++tests/vm/swap-anon
++tests/vm/swap-fork
++tests/vm/swap-iter
++```
++
++## 정리
++
++- `pml4_destroy()`는 hardware page table 구조를 해제하지만, SPT가 기억한 VM backing 의미를 대신 정리하지 않는다.
++- `supplemental_page_table_kill()`은 process exit과 exec cleanup에서 SPT의 모든 page를 순회해야 한다.
++- page별 실제 정리는 `destroy(page)`를 통해 `uninit_destroy()`, `anon_destroy()`, `file_backed_destroy()`로 내려간다.
++- swapped-out anonymous page는 frame이 없어도 swap slot을 회수해야 한다.
++- dirty file-backed page는 process exit에서도 `munmap()`과 같은 write-back 의미를 가져야 한다.
++- QEMU는 이 정책을 모르고, page fault와 disk sector I/O 같은 하드웨어 효과만 제공한다.
++
++## 다음 링크
++
++- [[pintos-vm-implementation-lecture#구현 체크리스트|VM 구현 체크리스트]]
++- [[supplemental-page-table-knowledge]]: SPT가 page table과 따로 필요한 이유
++- [[anonymous-page-swap-slot-knowledge]]: anonymous page가 swap slot을 기억하는 위치
++- [[mmap-munmap-range-trace]]: `munmap()`과 process exit의 file-backed 정리 의미
++- [[spt-copy-fork-trace]]: `fork()`/`exec()` 경계에서 SPT copy와 cleanup이 만나는 지점
