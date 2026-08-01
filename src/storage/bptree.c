@@ -320,6 +320,106 @@ bool bptree_search(pager_t* pager, uint64_t key, row_ref_t* out_ref) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ *  범위 스캔 (Range Scan) — rlatch 리프 커플링
+ *
+ *  하한 키가 있으면 그 키가 속한 리프까지 rlatch coupling으로 하강하고,
+ *  없으면 가장 왼쪽 리프까지 leftmost_child를 따라 내려간다.
+ *  그 뒤 next_leaf_page_id(오른쪽 형제 포인터)를 따라 오름차순으로 순회하며,
+ *  상한을 넘어서면 즉시 중단한다.
+ *
+ *  리프 이동 시 다음 리프의 rlatch를 먼저 잡고 현재 리프를 해제하는
+ *  leaf-chain latch coupling으로, 순회 중 리프가 병합/해제되어도 안전하다.
+ *
+ *  시간 복잡도: O(log N + 반환 행 수) — 힙 전체 스캔 O(N)과 대비된다.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* 가장 왼쪽 리프까지 rlatch coupling으로 하강한다 */
+static uint8_t* find_leftmost_leaf_rlatch(pager_t* pager, uint32_t* out_pid) {
+retry:;
+  uint32_t pid = root_id(pager);
+  uint8_t* page = pager_get_page_rlatch(pager, pid);
+  if (!page) {
+    *out_pid = pid;
+    return NULL;
+  }
+  if (pid != root_id(pager)) {
+    pager_unlatch_r(pager, pid);
+    goto retry;
+  }
+  while (1) {
+    uint32_t ptype;
+    memcpy(&ptype, page, sizeof(uint32_t));
+    if (ptype == PAGE_TYPE_LEAF) {
+      *out_pid = pid;
+      return page;
+    }
+    internal_page_header_t iph;
+    memcpy(&iph, page, sizeof(iph));
+    uint32_t child_pid = iph.leftmost_child_page_id;
+    uint8_t* child_page = pager_get_page_rlatch(pager, child_pid);
+    pager_unlatch_r(pager, pid);
+    pid = child_pid;
+    page = child_page;
+  }
+}
+
+void bptree_range_scan(pager_t* pager,
+                       bool has_lo, uint64_t lo, bool lo_inclusive,
+                       bool has_hi, uint64_t hi, bool hi_inclusive,
+                       bptree_range_cb cb, void* ctx) {
+  uint32_t pid;
+  uint8_t* page = has_lo ? find_leaf_rlatch(pager, lo, &pid)
+                         : find_leftmost_leaf_rlatch(pager, &pid);
+  if (!page) return;
+
+  leaf_page_header_t lph;
+  memcpy(&lph, page, sizeof(lph));
+  leaf_entry_t* entries = leaf_entries(page);
+
+  /* 첫 리프 내 시작 위치: lo 이상인 첫 엔트리 */
+  uint32_t idx = 0;
+  if (has_lo) {
+    idx = leaf_find(entries, lph.key_count, lo);
+    if (!lo_inclusive) {
+      /* id > lo: lo와 같은 키는 건너뛴다 */
+      while (idx < lph.key_count && entries[idx].key == lo) idx++;
+    }
+  }
+
+  while (1) {
+    for (; idx < lph.key_count; idx++) {
+      uint64_t k = entries[idx].key;
+      if (has_hi) {
+        bool over = hi_inclusive ? (k > hi) : (k >= hi);
+        if (over) {
+          pager_unlatch_r(pager, pid);
+          return;
+        }
+      }
+      if (!cb(k, entries[idx].row_ref, ctx)) {
+        pager_unlatch_r(pager, pid);
+        return;
+      }
+    }
+
+    /* 오른쪽 형제 리프로 이동 (다음 리프를 먼저 잡고 현재를 해제) */
+    uint32_t next = lph.next_leaf_page_id;
+    if (next == 0) {
+      pager_unlatch_r(pager, pid);
+      return;
+    }
+    uint8_t* npage = pager_get_page_rlatch(pager, next);
+    pager_unlatch_r(pager, pid);
+    if (!npage) return;
+    pid = next;
+    page = npage;
+    memcpy(&lph, page, sizeof(lph));
+    entries = leaf_entries(page);
+    idx = 0;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  *  삽입 (Insert) — wlatch coupling + safe-node 최적화
  *
  *  삽입 흐름:
