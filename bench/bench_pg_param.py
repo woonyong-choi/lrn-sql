@@ -8,24 +8,28 @@ Parameterized PostgreSQL benchmark driver (psycopg2, single connection).
   MiniDB "after" uses id >= a LIMIT 1000, which returns the identical dense
   block of rows via its own B+tree range scan.
 - fsync is whatever the server is currently set to (printed at start).
-- Env vars: PG_N, PG_REPS_INSERT, PG_REPS_READ, PG_DO_INSERT (0/1)
 
-Usage: PG_N=10000 python3 bench_pg_param.py <label>
+Usage (인자 전부 생략 가능):
+  python3 bench/bench_pg_param.py                    # 100k 행
+  python3 bench/bench_pg_param.py --rows 1000000     # 1M 행
+  python3 bench/bench_pg_param.py --rows 1000000 --skip-insert   # 읽기만
 """
-import os, statistics, sys, time, random
+import argparse
+import os
+import random
+import statistics
+import sys
+import time
+
 import psycopg2
 
-DSN = "host=127.0.0.1 dbname=bench user=bench password=bench"
+DSN = os.environ.get("PG_DSN",
+                     "host=127.0.0.1 dbname=bench user=bench password=bench")
 RANGE_WIDTH = 1000
 N_POINT = 1000
 N_RANGE = 100
 N_FULL = 10
 SEED = 42
-
-N = int(os.environ.get("PG_N", "10000"))
-REPS_INSERT = int(os.environ.get("PG_REPS_INSERT", "3"))
-REPS_READ = int(os.environ.get("PG_REPS_READ", "3"))
-DO_INSERT = os.environ.get("PG_DO_INSERT", "1") == "1"
 
 
 def gen_values(n):
@@ -50,10 +54,20 @@ def timed(fn):
 
 
 def main():
-    label = sys.argv[1] if len(sys.argv) > 1 else "default"
-    values = gen_values(N)
-    point_ids = gen_point_ids(N)
-    range_starts = gen_range_starts(N)
+    ap = argparse.ArgumentParser(description="PostgreSQL parameterized benchmark")
+    ap.add_argument("--rows", type=int, default=100_000,
+                    help="테이블 행 수 (기본 100000)")
+    ap.add_argument("--label", default="pg", help="출력 라벨")
+    ap.add_argument("--reps-insert", type=int, default=3)
+    ap.add_argument("--reps-read", type=int, default=3)
+    ap.add_argument("--skip-insert", action="store_true",
+                    help="INSERT 측정 생략 (테이블이 비어 있으면 1회 적재만)")
+    args = ap.parse_args()
+
+    n, label = args.rows, args.label
+    values = gen_values(n)
+    point_ids = gen_point_ids(n)
+    range_starts = gen_range_starts(n)
 
     conn = psycopg2.connect(DSN)
     conn.autocommit = True
@@ -61,7 +75,8 @@ def main():
     cur.execute("SHOW server_version"); ver = cur.fetchone()[0]
     cur.execute("SHOW fsync"); fsync = cur.fetchone()[0]
     cur.execute("SHOW synchronous_commit"); sc = cur.fetchone()[0]
-    print(f"[PG {label}] version={ver} fsync={fsync} synchronous_commit={sc} N={N}", flush=True)
+    print(f"[PG {label}] version={ver} fsync={fsync} "
+          f"synchronous_commit={sc} N={n}", flush=True)
 
     def do_insert():
         for i, v in enumerate(values, start=1):
@@ -69,49 +84,59 @@ def main():
 
     def do_point():
         for pid in point_ids:
-            cur.execute("SELECT * FROM bench WHERE id = %s", (pid,)); cur.fetchall()
+            cur.execute("SELECT * FROM bench WHERE id = %s", (pid,))
+            cur.fetchall()
 
     def do_range():
         for a in range_starts:
             cur.execute("SELECT * FROM bench WHERE id BETWEEN %s AND %s",
-                        (a, a + RANGE_WIDTH - 1)); cur.fetchall()
+                        (a, a + RANGE_WIDTH - 1))
+            cur.fetchall()
 
     def do_full():
         for _ in range(N_FULL):
-            cur.execute("SELECT * FROM bench"); cur.fetchall()
+            cur.execute("SELECT * FROM bench")
+            cur.fetchall()
 
     ins = []
-    if DO_INSERT:
-        for rep in range(REPS_INSERT):
+    if not args.skip_insert:
+        for rep in range(args.reps_insert):
             cur.execute("DROP TABLE IF EXISTS bench")
             cur.execute("CREATE TABLE bench (id BIGINT PRIMARY KEY, value BIGINT)")
             t = timed(do_insert)
             ins.append(t)
             print(f"[PG {label}] insert rep {rep}: {t*1000:.1f}ms", flush=True)
     else:
-        # ensure table exists and is populated once
-        cur.execute("SELECT count(*) FROM bench")
-        if cur.fetchone()[0] != N:
+        cur.execute("""SELECT count(*) FROM information_schema.tables
+                       WHERE table_name = 'bench'""")
+        have = cur.fetchone()[0] == 1
+        if have:
+            cur.execute("SELECT count(*) FROM bench")
+            have = cur.fetchone()[0] == n
+        if not have:
             cur.execute("DROP TABLE IF EXISTS bench")
             cur.execute("CREATE TABLE bench (id BIGINT PRIMARY KEY, value BIGINT)")
             do_insert()
 
     reads = {"point": [], "range": [], "full": []}
-    for rep in range(REPS_READ):
+    for rep in range(args.reps_read):
         reads["point"].append(timed(do_point))
         reads["range"].append(timed(do_range))
         reads["full"].append(timed(do_full))
         print(f"[PG {label}] read rep {rep}: " +
-              " ".join(f"{k}={reads[k][-1]*1000:.1f}ms" for k in reads), flush=True)
+              " ".join(f"{k}={reads[k][-1]*1000:.1f}ms" for k in reads),
+              flush=True)
 
-    print(f"\n== PostgreSQL [{label}] N={N} fsync={fsync} ==", flush=True)
+    print(f"\n== PostgreSQL [{label}] N={n} fsync={fsync} ==", flush=True)
     if ins:
         med = statistics.median(ins)
-        print(f"insert   median={med*1000:.1f} ms  ops/sec={N/med:.1f}", flush=True)
+        print(f"insert   median={med*1000:.1f} ms  ops/sec={n/med:.1f}",
+              flush=True)
     ops = {"point": N_POINT, "range": N_RANGE, "full": N_FULL}
     for k, nn in ops.items():
         med = statistics.median(reads[k])
-        print(f"{k:8s} median={med*1000:.2f} ms  ops/sec={nn/med:.1f}", flush=True)
+        print(f"{k:8s} median={med*1000:.2f} ms  ops/sec={nn/med:.1f}",
+              flush=True)
 
     conn.close()
 

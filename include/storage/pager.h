@@ -52,6 +52,11 @@ typedef struct {
     uint32_t    page_size;           /* 페이지 크기 (바이트) */
     db_header_t header;              /* DB 헤더 (page 0의 인메모리 사본) */
     uint32_t    last_heap_page_id;   /* 마지막 힙 페이지 ID (순차 INSERT 최적화용 캐시) */
+    bool        heap_may_have_free_slots; /* 힙 어딘가에 재활용 가능한 FREE 슬롯이
+                                           * 있을 수 있는지 (보수적 힌트).
+                                           * false면 INSERT가 힙 체인 재탐색을 생략한다.
+                                           * 스레드 경합 시 최악의 경우 불필요한 탐색
+                                           * 1회 또는 재활용 1회 지연만 발생 (정합성 무관) */
     frame_t     frames[MAX_FRAMES];  /* 페이지 프레임 배열 */
     int         frame_buckets[FRAME_HASH_BUCKETS]; /* page_id -> frame_idx 해시 인덱스 */
     uint64_t    tick;                /* 전역 틱 카운터 (LRU 추적용) */

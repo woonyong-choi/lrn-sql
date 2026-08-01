@@ -37,6 +37,8 @@
 #include "storage/pager.h"
 #include "storage/bptree.h"
 #include "server/server.h"
+#include "server/lock_table.h"
+#include "db.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -291,6 +293,16 @@ int main(int argc, char **argv)
         }
 
         exec_result_t res = execute(&pager, &stmt);
+
+        /*
+         * Strict 2PL — 문장 종료 시 보유 lock 전부 해제 (autocommit).
+         * 서버 경로(db.c)는 db_execute()가 해제해 주지만, REPL은 execute()를
+         * 직접 부르므로 여기서 해제하지 않으면 lock 테이블에 엔트리가
+         * 문장 수만큼 누적되어 lock_acquire 의 체인 탐색이 O(N^2)이 된다
+         * (1M 행 INSERT 실측으로 발견, docs/benchmark-postgres.md 참고).
+         */
+        lock_release_all(db_get_lock_table());
+
         if (res.out_buf != NULL) {
             printf("%s", res.out_buf);
             free(res.out_buf);

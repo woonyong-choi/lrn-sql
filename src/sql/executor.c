@@ -1535,6 +1535,7 @@ static exec_result_t exec_drop_table(pager_t *pager, statement_t *stmt)
     hdr->root_index_page_id = new_root;
     memset(hdr->columns, 0, sizeof(hdr->columns));
     pager->last_heap_page_id = new_heap;
+    pager->heap_may_have_free_slots = false; /* 새 빈 힙 체인으로 교체됨 */
     pager->header_dirty = true;
 
     snprintf(res.message, sizeof(res.message),

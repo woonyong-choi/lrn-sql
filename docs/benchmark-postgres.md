@@ -19,7 +19,7 @@
 | 트랜잭션/내구성 | 문장 단위 실행. **WAL 없음** — dirty 페이지는 캐시 축출·종료 시에만 디스크로 | autocommit=true, `synchronous_commit=on`, `fsync=on`(주) / `fsync=off`(병기) |
 | 동시성 | 단일 프로세스 순차 (경합 없음) | 단일 커넥션 순차 |
 | 데이터 | 단일 테이블. `value BIGINT` + 자동 `id BIGINT`. id는 1..N 연속 | `id BIGINT PRIMARY KEY, value BIGINT`. 동일 값·동일 시드(SEED=42) |
-| 규모 | 10,000행 / 100,000행 두 가지 | 동일 |
+| 규모 | 10,000행 / 100,000행 (+ 1,000,000행 — §9 두 번째 루프) | 동일 |
 | 반복 | 시나리오별 3회 중앙값 (PG fsync=on의 100k INSERT만 1회 — 문장별 WAL fsync로 137초 소요) | 동일 |
 
 **MiniDB 측정 방식**: 시나리오별로 REPL 프로세스를 새로 띄워 전체 벽시계 시간을
@@ -233,9 +233,9 @@ Point 100k의 230k→193k 차이는 회귀가 아니라 노이즈다: 순수 시
 - `include/storage/bptree.h`, `src/storage/bptree.c`
 - `src/sql/executor.c`
 
-### 벤치 스크립트
-- `/tmp/minidb-bench/bench_minidb_param.py` — MiniDB 드라이버(바이너리·규모 인자)
-- `/tmp/minidb-bench/bench_pg_param.py` — PostgreSQL 드라이버(env: `PG_N`, `PG_REPS_INSERT`, `PG_REPS_READ`)
+### 벤치 스크립트 (인자 전부 생략 가능, 바이너리 자동 빌드)
+- `bench/bench_minidb_param.py` — MiniDB 드라이버 (`--rows N --label after|before --reps R`)
+- `bench/bench_pg_param.py` — PostgreSQL 드라이버 (`--rows N --reps-insert I --reps-read R --skip-insert`)
 
 ### 재현 명령
 ```bash
@@ -250,21 +250,22 @@ src/server/lock_table.c src/db.c src/main.c"
 cc -O2 -Wall -Iinclude -o build-o2/minidb-after  $SRCS -lpthread   # 개선 후 (INDEX_RANGE)
 cc -O2 -Wall -DMINIDB_DISABLE_INDEX_RANGE -Iinclude -o build-o2/minidb-before $SRCS -lpthread  # 개선 전 (힙 스캔)
 
-# 2) MiniDB 재측정 (10k, 100k)
-cd /tmp/minidb-bench
-python3 bench_minidb_param.py /tmp/minidb/build-o2/minidb-before "before" 10000
-python3 bench_minidb_param.py /tmp/minidb/build-o2/minidb-after  "after"  10000
-python3 bench_minidb_param.py /tmp/minidb/build-o2/minidb-before "before" 100000
-python3 bench_minidb_param.py /tmp/minidb/build-o2/minidb-after  "after"  100000
+# 2) MiniDB 재측정 (인자 생략 시 after · 100k · 3회, 바이너리는 자동 빌드)
+python3 bench/bench_minidb_param.py --label before --rows 10000
+python3 bench/bench_minidb_param.py --label after  --rows 10000
+python3 bench/bench_minidb_param.py --label before --rows 100000
+python3 bench/bench_minidb_param.py --label after  --rows 100000
+python3 bench/bench_minidb_param.py --rows 1000000                 # 1M 행 (아래 9절)
 
 # 3) PostgreSQL (bench 롤/DB: user=bench pw=bench db=bench, 127.0.0.1)
 PGBIN=/usr/lib/postgresql/16/bin
 su postgres -c "$PGBIN/psql -c \"ALTER SYSTEM SET fsync=off;\" -c \"SELECT pg_reload_conf();\""
-PG_N=10000  python3 bench_pg_param.py fsync_off
-PG_N=100000 python3 bench_pg_param.py fsync_off
+python3 bench/bench_pg_param.py --rows 10000
+python3 bench/bench_pg_param.py --rows 100000
+python3 bench/bench_pg_param.py --rows 1000000 --reps-insert 1     # 1M 행
 su postgres -c "$PGBIN/psql -c \"ALTER SYSTEM SET fsync=on;\"  -c \"SELECT pg_reload_conf();\""
-PG_N=10000  PG_REPS_INSERT=3 PG_REPS_READ=1 python3 bench_pg_param.py fsync_on
-PG_N=100000 PG_REPS_INSERT=1 PG_REPS_READ=1 python3 bench_pg_param.py fsync_on
+python3 bench/bench_pg_param.py --rows 10000  --reps-read 1
+python3 bench/bench_pg_param.py --rows 100000 --reps-insert 1 --reps-read 1
 ```
 
 ---
@@ -294,3 +295,86 @@ PG EXPLAIN (range):  Index Scan using bench_pkey  Index Cond ((id>=5000) AND (id
 ASAN/UBSAN 스모크(범위/점/BETWEEN/ORDER BY/COUNT/UPDATE/DELETE 혼합): runtime error 0
 정확성 교차검증: INDEX_RANGE vs TABLE_SCAN 출력 byte-identical (id>=9990 → 11행 일치)
 ```
+
+---
+
+## 9. 규모를 키우니 다른 곳이 무너졌다 — 1,000,000행, 두 번째 루프
+
+"시료가 작다"는 지적으로 규모를 1M 행으로 올려 재측정했다. Range 는 버텼고, **INSERT 가 무너졌다.**
+
+### 9.1 1M 행 첫 측정 (개선 전 코드, median of 3)
+
+```
+MiniDB  insert     2,751 ops/sec   ← 10k 에서는 ~40만이었다 (144배 하락)
+MiniDB  point    191,309 ops/sec
+MiniDB  range      2,943 ops/sec   (인덱스 범위 스캔 — 규모 둔감 유지)
+MiniDB  full         3.0 ops/sec
+```
+
+삽입 시간이 규모에 선형이 아니었다: 50k → 0.25s, 100k → 0.96s, 200k → 4.73s.
+**행 수가 2배가 되면 시간이 4배** — O(N²)의 서명이다.
+
+### 9.2 진단 — gdb 스택 샘플링으로 결함 2건 특정
+
+실행 중인 삽입 프로세스에 gdb 를 붙여 스택을 샘플링했다.
+
+**결함 1 — 힙 체인 전체 재탐색 (`find_heap_page`)**
+꼬리 페이지가 가득 찰 때마다(약 90행마다) 삭제 슬롯 재활용을 위해 힙 체인
+**전체를 처음부터 다시 걷는다.** DELETE 가 한 번도 없었는데도. 페이지 수 P 에
+대해 총비용 O(P²) — 1M 행 ≈ 12,700페이지에서 약 8천만 번의 페이지 접근.
+
+**결함 2 — REPL 경로의 lock 미해제 (`main.c`)**
+서버 경로(`db.c`)는 문장 종료 시 `lock_release_all()` 을 부르지만, REPL 은
+`execute()` 를 직접 호출하며 **해제를 빠뜨렸다.** 문장마다 X-lock 엔트리가
+lock 테이블에 영구 누적 → 해시 버킷 256개에 N개 엔트리가 쌓여 `lock_acquire`
+의 체인 탐색이 문장당 O(N/256), 총 O(N²). 스택 샘플 4회 중 4회가 이 체인
+탐색 위에 있었다.
+
+### 9.3 개선
+
+1. **빈 슬롯 힌트** — `heap_may_have_free_slots` 플래그를 pager 에 추가.
+   DELETE 시 켜지고, 전체 탐색이 허탕이면 꺼지고, DB 를 열 때 기존 체인
+   순회(원래 하던 꼬리 복원)에서 정확한 값으로 복원한다. 삭제가 없는 순차
+   INSERT 는 재탐색을 아예 하지 않는다. (`-DMINIDB_DISABLE_FREE_HINT` 로 이전
+   동작 재현 가능)
+2. **REPL Strict 2PL 준수** — `main.c` 의 문장 실행 직후 `lock_release_all()`
+   호출. 서버 경로와 동일한 autocommit 의미론.
+
+검증: sanitizer(-Werror) 빌드 통과, ASAN/UBSAN 스모크(INSERT · UPDATE ·
+DELETE · 슬롯 재활용 · 재열기 · INDEX_RANGE) 런타임 오류 0.
+
+### 9.4 재측정 (1M 행, median of 3)
+
+```
+                    MiniDB 개선 전   MiniDB 개선 후   PostgreSQL (fsync=off)
+insert  ops/sec          2,751          591,429          10,919
+point   ops/sec        191,309          178,964           9,001
+range   ops/sec          2,943            3,218           1,630
+full    ops/sec            3.0              3.0             2.1
+
+range 힙 스캔(인덱스 범위 비활성 빌드): 73.9 ops/sec (2회 실측)
+  → 인덱스 범위 스캔 3,218 대비 44배 격차. 100k(630 vs 3,292)보다 더 벌어짐.
+삽입 스케일 곡선(개선 후): 50k 531k/s · 200k 593k/s · 1M 582k/s — 선형 회복.
+```
+
+### 9.5 정직한 평가
+
+- **성과인 것**: 규모 확장이 드러낸 O(N²) 결함 2건을 스택 샘플링으로 특정하고
+  고쳐 삽입을 선형으로 되돌린 것(2,751 → 591,429 ops/sec, 215배). 그리고
+  인덱스 범위 스캔의 규모 둔감성이 1M 에서도 유지됨을 확인한 것(3,218 vs
+  힙 스캔 73.9).
+- **성과가 아닌 것**: 개선 후 INSERT 가 PG 의 54배라는 숫자. 5절과 같은 이유
+  (WAL·MVCC·TCP 부재)로 성과 목록에 넣지 않는다.
+- **측정 한계**: PG 1M INSERT 는 1회 측정(91.6s — 시간 제약. 10k 에서 3회
+  편차는 ±6%였다). PG fsync=on 1M INSERT 는 회당 20분 이상이라 측정하지
+  않았다(10k/100k 실측 738/730 ops/sec 로 규모 둔감함을 확인).
+- 1M 에서도 DB 파일 ≈ 52MB 로 여전히 캐시 상주 규모다. "디스크가 병목인
+  대용량" 비교는 아니다.
+
+### 9.6 바뀐 소스 (2차 개선)
+
+- `include/storage/pager.h` — `heap_may_have_free_slots` 필드
+- `src/storage/pager.c` — 생성/열기 시 힌트 초기화·복원
+- `src/storage/table.c` — `find_heap_page` 힌트 게이트, `heap_delete` 힌트 설정
+- `src/sql/executor.c` — DROP TABLE 시 힌트 리셋
+- `src/main.c` — REPL 문장 종료 시 `lock_release_all()`

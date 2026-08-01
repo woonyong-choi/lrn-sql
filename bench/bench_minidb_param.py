@@ -9,20 +9,53 @@ measured and a no-op baseline (open DB + .exit) is subtracted.
 
 Range scenario:  SELECT * FROM bench WHERE id >= a LIMIT 1000
   - "before" binary (-DMINIDB_DISABLE_INDEX_RANGE): heap scan + early stop
-  - "after"  binary (default):                      B+tree index range scan
+  - "after"  binary (default build):                B+tree index range scan
   Same rows returned in the same (ascending-id) order; only the access path
   differs, so this is an apples-to-apples algorithm comparison.
 
-Usage: python3 bench_minidb_param.py <binary> <label> <N_ROWS>
+Usage (인자 전부 생략 가능, 바이너리는 자동 빌드):
+  python3 bench/bench_minidb_param.py                     # after, 100k 행
+  python3 bench/bench_minidb_param.py --rows 1000000      # after, 1M 행
+  python3 bench/bench_minidb_param.py --label before --rows 1000000
+  python3 bench/bench_minidb_param.py --binary ./mybin --label custom
 """
-import os, statistics, subprocess, sys, tempfile, time, random
+import argparse
+import os
+import random
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
 
-REPS = 3
 RANGE_WIDTH = 1000
 N_POINT = 1000
 N_RANGE = 100
 N_FULL = 10
 SEED = 42
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRCS = ["storage/pager.c", "storage/schema.c", "storage/table.c",
+        "storage/bptree.c", "sql/parser.c", "sql/planner.c", "sql/executor.c",
+        "server/http.c", "server/server.c", "server/lock_table.c",
+        "db.c", "main.c"]
+
+
+def ensure_binary(label):
+    """build-o2/minidb-<label> 을 찾고, 없으면 sanitizer 없이 -O2 로 빌드한다."""
+    binary = os.path.join(REPO, "build-o2", f"minidb-{label}")
+    if os.path.exists(binary):
+        return binary
+    os.makedirs(os.path.dirname(binary), exist_ok=True)
+    cmd = ["cc", "-O2", "-Wall", "-I" + os.path.join(REPO, "include")]
+    if label == "before":
+        cmd.append("-DMINIDB_DISABLE_INDEX_RANGE")
+    cmd += ["-o", binary]
+    cmd += [os.path.join(REPO, "src", f) for f in SRCS]
+    cmd += ["-lpthread"]
+    print("building:", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+    return binary
 
 
 def gen_values(n):
@@ -74,12 +107,24 @@ def run_phase(binary, db, sql_file):
 
 
 def main():
-    binary, label, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    ap = argparse.ArgumentParser(description="MiniDB parameterized benchmark")
+    ap.add_argument("--rows", type=int, default=100_000,
+                    help="테이블 행 수 (기본 100000)")
+    ap.add_argument("--label", default="after", choices=["after", "before"],
+                    help="after=인덱스 범위 스캔(기본 빌드) / before=힙 스캔")
+    ap.add_argument("--binary", default=None,
+                    help="직접 지정할 바이너리 경로 (생략하면 자동 빌드)")
+    ap.add_argument("--reps", type=int, default=3, help="반복 횟수 (기본 3)")
+    args = ap.parse_args()
+
+    binary = args.binary or ensure_binary(args.label)
+    label, n, reps = args.label, args.rows, args.reps
+
     workdir = tempfile.mkdtemp(prefix="minidb-bench-")
     files = make_sql_files(workdir, n)
     results = {k: [] for k in ("baseline", "insert", "point", "range", "full")}
 
-    for rep in range(REPS):
+    for rep in range(reps):
         db = os.path.join(workdir, f"bench_rep{rep}.db")
         if os.path.exists(db):
             os.remove(db)
@@ -93,11 +138,14 @@ def main():
 
     base = statistics.median(results["baseline"])
     ops = {"insert": n, "point": N_POINT, "range": N_RANGE, "full": N_FULL}
-    print(f"\n== MiniDB [{label}] N={n} (median of {REPS}, baseline={base*1000:.1f}ms subtracted) ==")
+    print(f"\n== MiniDB [{label}] N={n} (median of {reps}, "
+          f"baseline={base*1000:.1f}ms subtracted) ==")
     for k, nn in ops.items():
         med = statistics.median(results[k]) - base
         line = (f"{k:8s} net_median={med*1000:.2f} ms  ops/sec={nn/med:.1f}"
-                if med > 0 else f"{k:8s} net<=0 ({med*1000:.3f}ms) raw={sorted(round(x*1000,2) for x in results[k])}")
+                if med > 0 else
+                f"{k:8s} net<=0 ({med*1000:.3f}ms) "
+                f"raw={sorted(round(x*1000, 2) for x in results[k])}")
         print(line, flush=True)
 
 
