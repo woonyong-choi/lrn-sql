@@ -61,6 +61,43 @@ static int parse_where(const char *p, statement_t *stmt)
 
     p = skip_ws(p);
 
+    /* ── BETWEEN a AND b ── (id 컬럼에 한해 범위 스캔으로 처리) */
+    if (strcasecmp_n(p, "BETWEEN", 7) == 0 && isspace((unsigned char)p[7])) {
+        bool is_id = (strcasecmp_n(stmt->pred_field, "id", 2) == 0
+                      && strlen(stmt->pred_field) == 2);
+        if (!is_id) {
+            return -1;  /* 현재 BETWEEN은 id 컬럼만 지원 */
+        }
+        p = skip_ws(p + 7);
+
+        /* 하한 값 */
+        char lo_buf[64];
+        int j = 0;
+        while (*p && !isspace((unsigned char)*p) && j < 63) lo_buf[j++] = *p++;
+        lo_buf[j] = '\0';
+
+        p = skip_ws(p);
+        if (strcasecmp_n(p, "AND", 3) != 0) return -1;
+        p = skip_ws(p + 3);
+
+        /* 상한 값 */
+        char hi_buf[64];
+        j = 0;
+        while (*p && !isspace((unsigned char)*p) && *p != ';' && j < 63)
+            hi_buf[j++] = *p++;
+        hi_buf[j] = '\0';
+
+        stmt->predicate_kind = PREDICATE_ID_RANGE;
+        stmt->range_lo = (uint64_t)atoll(lo_buf);
+        stmt->range_hi = (uint64_t)atoll(hi_buf);
+        stmt->has_lo = true;
+        stmt->has_hi = true;
+        stmt->lo_inclusive = true;
+        stmt->hi_inclusive = true;
+        strncpy(stmt->pred_field, "id", 31);
+        return 0;
+    }
+
     /* 연산자 파싱 */
     if (*p == '!' && *(p+1) == '=') {
         stmt->pred_op = OP_NE; p += 2;
@@ -96,10 +133,23 @@ static int parse_where(const char *p, statement_t *stmt)
     stmt->pred_value[i] = '\0';
 
     /* 조건 분류 */
-    if (strcasecmp_n(stmt->pred_field, "id", 2) == 0
-        && strlen(stmt->pred_field) == 2 && stmt->pred_op == OP_EQ) {
+    bool is_id = (strcasecmp_n(stmt->pred_field, "id", 2) == 0
+                  && strlen(stmt->pred_field) == 2);
+    if (is_id && stmt->pred_op == OP_EQ) {
         stmt->predicate_kind = PREDICATE_ID_EQ;
         stmt->pred_id = (uint64_t)atoll(stmt->pred_value);
+    } else if (is_id && (stmt->pred_op == OP_GE || stmt->pred_op == OP_GT
+                         || stmt->pred_op == OP_LE || stmt->pred_op == OP_LT)) {
+        /* id 범위 조건 → B+tree 범위 스캔 대상 */
+        stmt->predicate_kind = PREDICATE_ID_RANGE;
+        uint64_t v = (uint64_t)atoll(stmt->pred_value);
+        switch (stmt->pred_op) {
+            case OP_GE: stmt->range_lo = v; stmt->has_lo = true; stmt->lo_inclusive = true;  break;
+            case OP_GT: stmt->range_lo = v; stmt->has_lo = true; stmt->lo_inclusive = false; break;
+            case OP_LE: stmt->range_hi = v; stmt->has_hi = true; stmt->hi_inclusive = true;  break;
+            case OP_LT: stmt->range_hi = v; stmt->has_hi = true; stmt->hi_inclusive = false; break;
+            default: break;
+        }
     } else if (stmt->pred_op == OP_EQ) {
         stmt->predicate_kind = PREDICATE_FIELD_EQ;
     } else {
@@ -431,6 +481,13 @@ int parse(const char *input, statement_t *stmt)
         memcpy(stmt->pred_value, inner.pred_value, 256);
         stmt->pred_id = inner.pred_id;
         stmt->predicate_kind = inner.predicate_kind;
+        stmt->range_lo = inner.range_lo;
+        stmt->range_hi = inner.range_hi;
+        stmt->has_lo = inner.has_lo;
+        stmt->has_hi = inner.has_hi;
+        stmt->lo_inclusive = inner.lo_inclusive;
+        stmt->hi_inclusive = inner.hi_inclusive;
+        stmt->has_limit = inner.has_limit;
         return 0;
     }
 
