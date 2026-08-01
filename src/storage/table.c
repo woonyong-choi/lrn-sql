@@ -112,6 +112,21 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
         }
     }
 
+    /*
+     * 빈 슬롯 재활용 탐색 (전체 체인 순회, O(페이지 수)).
+     *
+     * 이 탐색은 "삭제된 슬롯 재활용"만을 위한 것이므로, DELETE가 발생한
+     * 적이 없으면(힌트 false) 건너뛴다. 힌트 없이 매번 순회하면 꼬리
+     * 페이지가 가득 찰 때마다 전체 체인을 다시 걷게 되어 순차 INSERT가
+     * 페이지 수 P에 대해 O(P^2)로 붕괴한다 (1M 행 실측: 359초 → 이 힌트
+     * 도입 후 재측정, docs/benchmark-postgres.md 참고).
+     */
+#ifndef MINIDB_DISABLE_FREE_HINT
+    if (!pager->heap_may_have_free_slots) {
+        return 0; /* 삭제된 적 없음 → 재활용할 슬롯도 없음 */
+    }
+#endif
+
     uint32_t pid = pager->header.first_heap_page_id;
     while (pid != 0) {
         uint8_t *page = pager_get_page_rlatch(pager, pid);
@@ -126,6 +141,11 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
 
         pid = hph.next_heap_page_id;
     }
+
+#ifndef MINIDB_DISABLE_FREE_HINT
+    /* 체인 전체에 빈 슬롯이 없음이 확인됨 → 다음 DELETE 전까지 탐색 생략 */
+    pager->heap_may_have_free_slots = false;
+#endif
     return 0; /* 적합한 페이지 없음 */
 }
 
@@ -402,6 +422,9 @@ int heap_delete(pager_t *pager, row_ref_t ref)
     memcpy(page, &hph, sizeof(hph));
     pager_mark_dirty(pager, ref.page_id);
     pager_unlatch_w(pager, ref.page_id);
+
+    /* 재활용 가능한 슬롯이 생겼음을 INSERT 경로에 알린다 */
+    pager->heap_may_have_free_slots = true;
     return 0;
 }
 
