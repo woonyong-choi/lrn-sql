@@ -399,6 +399,22 @@ static bool match_predicate(const db_header_t *hdr, const row_value_t *values,
     if (stmt->predicate_kind == PREDICATE_ID_EQ) {
         return values[0].bigint_val == (int64_t)stmt->pred_id;
     }
+    /* PREDICATE_ID_RANGE: 인덱스 범위 스캔 경로에서 처리되지만,
+     * ORDER BY/DELETE/UPDATE 등 table scan fallback 시 여기서 경계를 검사한다. */
+    if (stmt->predicate_kind == PREDICATE_ID_RANGE) {
+        int64_t id = values[0].bigint_val;
+        if (stmt->has_lo) {
+            if (stmt->lo_inclusive ? (id < (int64_t)stmt->range_lo)
+                                   : (id <= (int64_t)stmt->range_lo))
+                return false;
+        }
+        if (stmt->has_hi) {
+            if (stmt->hi_inclusive ? (id > (int64_t)stmt->range_hi)
+                                   : (id >= (int64_t)stmt->range_hi))
+                return false;
+        }
+        return true;
+    }
 
     compare_op_t op = (stmt->predicate_kind == PREDICATE_FIELD_EQ) ? OP_EQ : stmt->pred_op;
 
@@ -512,6 +528,138 @@ static exec_result_t exec_index_lookup(pager_t *pager, statement_t *stmt)
     buf_transfer(&buf, &res);
 
     snprintf(res.message, sizeof(res.message), "1행 조회 (INDEX_LOOKUP)");
+    return res;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  SELECT — INDEX_RANGE (B+ tree 범위 스캔)
+ *
+ *  예시: SELECT * FROM bench WHERE id >= 5000 LIMIT 1000
+ *        SELECT * FROM bench WHERE id BETWEEN 5000 AND 5999
+ *
+ *  실행 과정:
+ *    1. bptree_range_scan()으로 하한 키가 있는 리프까지 O(log N) 하강 후,
+ *       리프 형제 포인터를 따라 순차 순회하며 (key, row_ref)를 수집.
+ *       LIMIT에 도달하면 조기 종료.
+ *    2. 수집된 row_ref들을 힙에서 읽어 출력.
+ *
+ *  힙 전체 스캔(O(N))과 달리, 시작 키 위치로 직접 하강하므로
+ *  데이터 규모가 커져도 반환 행 수에만 비례한다: O(log N + 반환 행).
+ *
+ *  래치 순서 안전성: 1단계(리프 순회)에서는 B+tree 리프 rlatch만,
+ *  2단계(힙 fetch)에서는 힙 rlatch만 잡는다. 두 래치를 동시에 잡지 않는다.
+ * ══════════════════════════════════════════════════════════════════════ */
+typedef struct {
+    row_ref_t *refs;
+    uint32_t   count;
+    uint32_t   cap;
+    uint32_t   limit;   /* 0 = 무제한 */
+    bool       alloc_failed;
+} range_collect_t;
+
+static bool range_collect_cb(uint64_t key, row_ref_t ref, void *ctx)
+{
+    (void)key;
+    range_collect_t *rc = (range_collect_t *)ctx;
+
+    if (rc->count >= rc->cap) {
+        uint32_t ncap = rc->cap ? rc->cap * 2 : 256;
+        row_ref_t *tmp = (row_ref_t *)realloc(rc->refs, ncap * sizeof(row_ref_t));
+        if (tmp == NULL) {
+            rc->alloc_failed = true;
+            return false;
+        }
+        rc->refs = tmp;
+        rc->cap = ncap;
+    }
+    rc->refs[rc->count++] = ref;
+
+    if (rc->limit != 0 && rc->count >= rc->limit) {
+        return false;  /* LIMIT 도달 → 조기 종료 */
+    }
+    return true;
+}
+
+static exec_result_t exec_index_range_scan(pager_t *pager, statement_t *stmt)
+{
+    exec_result_t res = {0, "", NULL, 0};
+    db_header_t *hdr = &pager->header;
+
+    if (stmt->has_limit && stmt->limit_count == 0) {
+        snprintf(res.message, sizeof(res.message), "0행 조회 (INDEX_RANGE)");
+        return res;
+    }
+
+    /* 1단계: B+tree 리프 순회로 조건에 맞는 row_ref 수집 */
+    range_collect_t rc = {
+        .refs = NULL, .count = 0, .cap = 0,
+        .limit = stmt->has_limit ? stmt->limit_count : 0,
+        .alloc_failed = false
+    };
+    bptree_range_scan(pager,
+                      stmt->has_lo, stmt->range_lo, stmt->lo_inclusive,
+                      stmt->has_hi, stmt->range_hi, stmt->hi_inclusive,
+                      range_collect_cb, &rc);
+    if (rc.alloc_failed) {
+        free(rc.refs);
+        res.status = -1;
+        snprintf(res.message, sizeof(res.message),
+                 "오류: INDEX_RANGE 대상 수집 중 메모리 할당에 실패했습니다");
+        return res;
+    }
+
+    /* 2단계: 수집된 row_ref를 힙에서 읽어 출력.
+     *
+     * B+tree는 id 오름차순으로 ref를 주고, id 순서는 힙 삽입(=페이지) 순서와
+     * 같으므로 연속된 ref는 대개 같은 힙 페이지를 가리킨다. 같은 페이지가
+     * 연속되는 동안에는 읽기 래치를 유지·재사용하여 페이지당 한 번만 로드한다
+     * (행마다 재-pin 하던 것을 페이지 단위로 낮춤). 이 단계에서는 힙 rlatch만
+     * 잡으므로 B+tree 래치와 겹치지 않는다. */
+    out_buf_t buf;
+    buf_init(&buf);
+    uint32_t out = 0;
+    uint32_t cur_pid = 0;
+    uint8_t *cur_page = NULL;
+    for (uint32_t i = 0; i < rc.count; i++) {
+        row_ref_t ref = rc.refs[i];
+        if (cur_page == NULL || ref.page_id != cur_pid) {
+            if (cur_page != NULL) {
+                pager_unlatch_r(pager, cur_pid);
+            }
+            cur_page = pager_get_page_rlatch(pager, ref.page_id);
+            cur_pid = ref.page_id;
+            if (cur_page == NULL) {
+                continue;
+            }
+        }
+
+        slot_t slot;
+        size_t slot_off = sizeof(heap_page_header_t) + ref.slot_id * sizeof(slot_t);
+        memcpy(&slot, cur_page + slot_off, sizeof(slot));
+        if (slot.status != SLOT_ALIVE) {
+            continue;  /* 톰스톤 등으로 사라진 행은 건너뜀 */
+        }
+
+        row_value_t values[MAX_COLUMNS];
+        row_deserialize(hdr, cur_page + slot.offset, values);
+
+        if (out == 0) {
+            append_header(&buf, hdr);
+        }
+        append_row(&buf, hdr, values);
+        out++;
+    }
+    if (cur_page != NULL) {
+        pager_unlatch_r(pager, cur_pid);
+    }
+    free(rc.refs);
+
+    if (out > 0) {
+        buf_transfer(&buf, &res);
+    } else {
+        buf_free(&buf);
+    }
+    snprintf(res.message, sizeof(res.message), "%u행 조회 (INDEX_RANGE)", out);
     return res;
 }
 
@@ -1419,6 +1567,21 @@ static exec_result_t exec_explain(pager_t *pager, statement_t *stmt)
     if (plan.access_path == ACCESS_PATH_INDEX_LOOKUP) {
         buf_append(&buf, "  Index: B+ Tree (id)\n");
         buf_append(&buf, "  Target: id = %" PRIu64 "\n", stmt->pred_id);
+    } else if (plan.access_path == ACCESS_PATH_INDEX_RANGE) {
+        buf_append(&buf, "  Index: B+ Tree (id)\n");
+        buf_append(&buf, "  Range: ");
+        if (stmt->has_lo) {
+            buf_append(&buf, "id %s %" PRIu64,
+                       stmt->lo_inclusive ? ">=" : ">", stmt->range_lo);
+        }
+        if (stmt->has_lo && stmt->has_hi) {
+            buf_append(&buf, " AND ");
+        }
+        if (stmt->has_hi) {
+            buf_append(&buf, "id %s %" PRIu64,
+                       stmt->hi_inclusive ? "<=" : "<", stmt->range_hi);
+        }
+        buf_append(&buf, "\n  Scan: B+tree leaf traversal (O(log N + rows))\n");
     } else if (plan.access_path == ACCESS_PATH_INDEX_DELETE) {
         buf_append(&buf, "  Index: B+ Tree (id)\n");
         buf_append(&buf, "  Delete: id = %" PRIu64 "\n", stmt->pred_id);
@@ -1473,6 +1636,8 @@ exec_result_t execute(pager_t *pager, statement_t *stmt)
             return exec_insert(pager, stmt);
         case ACCESS_PATH_INDEX_LOOKUP:
             return exec_index_lookup(pager, stmt);
+        case ACCESS_PATH_INDEX_RANGE:
+            return exec_index_range_scan(pager, stmt);
         case ACCESS_PATH_TABLE_SCAN:
             if (stmt->type == STMT_DELETE) {
                 return exec_delete_scan(pager, stmt);

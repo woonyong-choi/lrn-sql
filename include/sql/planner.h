@@ -13,6 +13,7 @@
 typedef enum {
     ACCESS_PATH_TABLE_SCAN,    /* 힙 전체 스캔 */
     ACCESS_PATH_INDEX_LOOKUP,  /* B+ tree 인덱스로 단건 조회 */
+    ACCESS_PATH_INDEX_RANGE,   /* B+ tree 인덱스로 범위 스캔 (id 범위 술어) */
     ACCESS_PATH_INDEX_DELETE,  /* B+ tree 인덱스로 단건 삭제 */
     ACCESS_PATH_INSERT,        /* 힙 삽입 + 인덱스 등록 */
     ACCESS_PATH_INDEX_UPDATE,  /* B+ tree 인덱스로 단건 UPDATE */

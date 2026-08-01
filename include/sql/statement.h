@@ -26,7 +26,8 @@ typedef enum {
     PREDICATE_NONE,
     PREDICATE_ID_EQ,
     PREDICATE_FIELD_EQ,
-    PREDICATE_FIELD_CMP   /* >, <, >=, <=, != */
+    PREDICATE_FIELD_CMP,  /* >, <, >=, <=, != */
+    PREDICATE_ID_RANGE    /* id 범위: id >= a / id > a / id <= b / id < b / id BETWEEN a AND b */
 } predicate_kind_t;
 
 /* 비교 연산자 */
@@ -64,6 +65,21 @@ typedef struct {
     char              pred_field[32];
     char              pred_value[256];
     uint64_t          pred_id;
+
+    /* WHERE id 범위 (PREDICATE_ID_RANGE) — B+tree 범위 스캔용 경계
+     * 하한/상한은 각각 존재 여부(has_*)와 포함 여부(*_inclusive)를 갖는다.
+     *   id >= a          → has_lo, lo_inclusive
+     *   id >  a          → has_lo
+     *   id <= b          → has_hi, hi_inclusive
+     *   id <  b          → has_hi
+     *   id BETWEEN a b   → has_lo+lo_inclusive, has_hi+hi_inclusive
+     */
+    uint64_t          range_lo;
+    uint64_t          range_hi;
+    bool              has_lo;
+    bool              has_hi;
+    bool              lo_inclusive;
+    bool              hi_inclusive;
 
     /* CREATE TABLE */
     column_def_t      col_defs[MAX_COLUMNS];
