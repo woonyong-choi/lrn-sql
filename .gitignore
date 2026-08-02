@@ -4,5 +4,6 @@ build/
 build_mac/
 build_release/
 build_nosan/
+__pycache__/
 *.db
 .vscode/c_cpp_properties.json
