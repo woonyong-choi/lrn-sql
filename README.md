@@ -1,12 +1,27 @@
 # MiniDB
 
+## 한눈에
+
+| 구분 | 내용 |
+|---|---|
+| 무엇 | C11 로 만든 디스크 기반 SQL 엔진. parse, plan, execute, B+Tree/heap, pager 가 한 저장소에 있다 |
+| 왜 | SQL 한 건이 디스크까지 내려가는 전체 경로를 직접 이어 보기 위해 |
+| 내 몫 | 팀 프로젝트의 개인 보존 미러. 이 미러 main 기준 148 커밋 중 106 이 내 커밋이고, 파일 단위 경계는 git blame 으로 확인한다 |
+| 스택 | C11 · pthread · Make |
+| 검증된 사실 | 테스트 224/224 재실행 (아래 표). PostgreSQL 대조 벤치는 [docs/benchmark-postgres.md](docs/benchmark-postgres.md) |
+| 한계 | 교육용. 단일 테이블 중심, WAL 복구와 트랜잭션 격리 없음 |
+
+**같은 사람의 다른 저장소** · 이력서 허브: <https://woonyong-kr.github.io>
+[Kyro(k8s-ops)](https://github.com/woonyong-kr/k8s-ops) · [MiniDB](https://github.com/woonyong-kr/minidb) · [PintOS](https://github.com/woonyong-kr/pintos) · [dx_framework](https://github.com/woonyong-kr/dx_framework) · [dx_content_interface](https://github.com/woonyong-kr/dx_content_interface)
+
+
 > 크래프톤 정글 12기 팀 프로젝트의 개인 보존용 미러다. 원본은 [Jungle-12-303/wk08_1](https://github.com/Jungle-12-303/wk08_1)이며, 개인 기여는 커밋 저자(`woonyong.kr@gmail.com`)와 파일별 `git blame`으로 확인할 수 있다.
 
 ## 무엇을 푸는가
 
 - C11로 단일 `.db` 파일에 row와 index를 페이지 단위로 저장하는 작은 SQL 엔진을 구현합니다.
 - SQL parse부터 실행 계획, B+Tree 또는 heap 접근, pager cache와 디스크 I/O까지 한 요청의 전체 경로를 연결합니다.
-- `SW_AI-W07-SQL`의 이전 단계 구현을 확장한 팀 프로젝트이며 Git 이력 기준 전체 143개 커밋 중 본인 커밋은 101개입니다.
+- `SW_AI-W07-SQL`의 이전 단계 구현을 확장한 팀 프로젝트이며 Git 이력 기준(이 미러 main) 전체 148개 커밋 중 본인 커밋은 106개입니다. `git shortlog -sn` 으로 확인할 수 있습니다.
 
 ## 어디를 보면 되는가
 
