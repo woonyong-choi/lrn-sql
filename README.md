@@ -1,5 +1,7 @@
 # MiniDB
 
+> 크래프톤 정글 12기 팀 프로젝트의 개인 보존용 미러다. 원본은 [Jungle-12-303/wk08_1](https://github.com/Jungle-12-303/wk08_1)이며, 개인 기여는 커밋 저자(`woonyong.kr@gmail.com`)와 파일별 `git blame`으로 확인할 수 있다.
+
 ## 무엇을 푸는가
 
 - C11로 단일 `.db` 파일에 row와 index를 페이지 단위로 저장하는 작은 SQL 엔진을 구현합니다.
