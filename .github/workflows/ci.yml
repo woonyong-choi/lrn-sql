@@ -16,7 +16,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build and test with ASAN and UBSAN
         env:
           ASAN_OPTIONS: detect_leaks=1
