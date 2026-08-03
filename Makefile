@@ -1,8 +1,14 @@
 CC      = gcc
 WARNFLAGS = -Wall -Wextra -Werror
 INCLUDES = -Iinclude
-CFLAGS  = $(WARNFLAGS) -g $(INCLUDES) -fsanitize=address,undefined
-LDFLAGS = -fsanitize=address,undefined -lpthread
+SANITIZE ?= address,undefined
+
+ifneq ($(strip $(SANITIZE)),)
+SANITIZE_FLAGS = -fsanitize=$(SANITIZE)
+endif
+
+CFLAGS  = $(WARNFLAGS) -g $(INCLUDES) $(SANITIZE_FLAGS)
+LDFLAGS = $(SANITIZE_FLAGS) -lpthread
 
 SRC_DIR   = src
 BUILD_DIR = build
