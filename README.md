@@ -8,11 +8,12 @@
 | 왜 | SQL 한 건이 디스크까지 내려가는 전체 경로를 직접 이어 보기 위해 |
 | 내 몫 | 팀 프로젝트의 개인 보존 미러. 이 미러 main 기준 148 커밋 중 106 이 내 커밋이고, 파일 단위 경계는 git blame 으로 확인한다 |
 | 스택 | C11 · pthread · Make |
+| 핵심 개선 | 100만 행에서 범위 조회 **73.9 → 3,218 ops/s(44배)**, INSERT **2,751 → 591,429 ops/s(215배)**. 조건과 한계는 [PostgreSQL 대조 벤치](docs/benchmark-postgres.md)에 기록 |
 | 검증된 사실 | 테스트 224/224 재실행 (아래 표). PostgreSQL 대조 벤치는 [docs/benchmark-postgres.md](docs/benchmark-postgres.md) |
 | 한계 | 교육용. 단일 테이블 중심, WAL 복구와 트랜잭션 격리 없음 |
 
 **같은 사람의 다른 저장소** · 이력서 허브: <https://woonyong-kr.github.io>
-[Kyro(k8s-ops)](https://github.com/woonyong-kr/k8s-ops) · [MiniDB](https://github.com/woonyong-kr/minidb) · [PintOS](https://github.com/woonyong-kr/pintos) · [dx_framework](https://github.com/woonyong-kr/dx_framework) · [dx_content_interface](https://github.com/woonyong-kr/dx_content_interface)
+[Kyro(k8s-ops)](https://github.com/woonyong-kr/k8s-ops) · [MiniDB](https://github.com/woonyong-kr/minidb) · [PintOS](https://github.com/woonyong-kr/pintos) · [dx_framework](https://github.com/woonyong-kr/dx_framework)
 
 
 > 크래프톤 정글 12기 팀 프로젝트의 개인 보존용 미러다. 원본은 [Jungle-12-303/wk08_1](https://github.com/Jungle-12-303/wk08_1)이며, 개인 기여는 커밋 저자(`woonyong.kr@gmail.com`)와 파일별 `git blame`으로 확인할 수 있다.
@@ -59,7 +60,15 @@ make
 make test-all
 ```
 
-이번 macOS 환경의 기본 `make test-all`은 컴파일 후 AddressSanitizer 초기화 내부에서 8분 이상 진행되지 않아 중단했으며, 테스트 통과로 계산하지 않았습니다. 같은 소스를 sanitizer 없이 `/tmp`의 별도 빌드 디렉터리에 컴파일한 뒤 테스트 바이너리를 직접 재실행한 결과는 다음과 같습니다.
+기본 빌드는 ASAN/UBSAN을 켠다. macOS에서 sanitizer 초기화가 멈추는 경우에는
+동일한 Makefile에서 sanitizer만 끄고 기능 테스트를 재실행한다.
+
+```bash
+make clean
+make SANITIZE= test-all
+```
+
+이번 macOS 환경의 기본 `make test-all`은 컴파일 후 AddressSanitizer 초기화 내부에서 진행되지 않아 중단했으며, 테스트 통과로 계산하지 않았다. `make SANITIZE= test-all`로 동일한 소스와 테스트에서 sanitizer만 제외해 재실행한 결과는 다음과 같다.
 
 | 재실행한 바이너리 | 이번 실행 결과 |
 | --- | ---: |
