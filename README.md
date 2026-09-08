@@ -1,4 +1,4 @@
-# MiniDB
+# lrn-sql
 
 ## 한눈에
 
@@ -13,7 +13,7 @@
 | 한계 | 교육용. 단일 테이블 중심, WAL 복구와 트랜잭션 격리 없음 |
 
 **같은 사람의 다른 저장소** · 이력서 허브: <https://woonyong-kr.github.io>
-[Kyro(k8s-ops)](https://github.com/woonyong-kr/k8s-ops) · [MiniDB](https://github.com/woonyong-kr/minidb) · [PintOS](https://github.com/woonyong-kr/pintos) · [dx_framework](https://github.com/woonyong-kr/dx_framework)
+[Kyro(k8s-ops)](https://github.com/woonyong-kr/k8s-ops) · [SQL](https://github.com/woonyong-kr/lrn-sql) · [PintOS](https://github.com/woonyong-kr/lrn-pintos) · [dx_framework](https://github.com/woonyong-kr/dx_framework)
 
 
 > 크래프톤 정글 12기 팀 프로젝트의 개인 보존용 미러다. 원본은 [Jungle-12-303/wk08_1](https://github.com/Jungle-12-303/wk08_1)이며, 개인 기여는 커밋 저자(`woonyong.kr@gmail.com`)와 파일별 `git blame`으로 확인할 수 있다.
