@@ -20,11 +20,15 @@ SQL 한 문장을 파싱해 실행 계획을 세우고, Slotted Page·B+Tree·Bu
 | Range 질의 (100k 행, ops/sec) | 630 | **3,292** | ×5.2 |
 | `id >= 5000 LIMIT 1000` 페이지 로드 | 36 loads / 3.89 ms | **16 loads / ~2.0 ms** | — |
 
+![전/후 벤치마크 막대 그래프: 1M행 INSERT와 Range 질의 처리량](docs/figure.png)
+
+위 그림은 이 저장소에서 다시 측정한 결과입니다(`bench/rerun_before_after.sh`, Apple M4, -O2, 1M행 median of 3). INSERT는 10,788 → 615,601 ops/sec(x57), Range는 인덱스 비활성 131 → 4,381 ops/sec(x33)입니다. 표의 원 측정(x215, x44)과 절대값·배수가 다른 것은 실행 환경 차이이며, "개선 전" INSERT는 수정 커밋 `993d4d8`의 직전 코드로 잰 값입니다.
+
 정직하게 덧붙이면, 개선 후 수치가 PostgreSQL(1M INSERT fsync=off 10,919 ops/sec)보다 높은 것은 성능 우위가 아닙니다. 이 엔진은 **WAL이 없어** dirty 페이지를 캐시 축출·종료 시에만 디스크로 내리므로 내구성 조건이 다릅니다. 같은 조건의 성능 비교로 읽으면 안 됩니다.[^bench]
 
 ## 구동모습
 
-REPL에서 테이블을 만들고, 행을 넣고, 같은 질의가 `TABLE_SCAN`과 `INDEX_LOOKUP`으로 갈라지는 것을 `EXPLAIN`으로 확인하는 과정입니다.
+테이블 생성 → INSERT 1,000건 → 건수 확인과 범위 SELECT를 파이프 입력으로 실행한 실제 출력입니다. INSERT 1,000건 전체에 0.010s(`time`), 범위 SELECT는 `INDEX_RANGE` 경로로 0.02ms(`.debug` 출력)가 걸렸습니다. 데모 빌드는 sanitizer 없는 -O2(`SANITIZE=`)이며 재현은 `bash scripts/demo_repl.sh`입니다.
 
 ![lrn-sql 구동 GIF](docs/demo.gif)
 
