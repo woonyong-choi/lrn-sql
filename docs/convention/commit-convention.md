@@ -296,13 +296,13 @@ git commit --amend -m "수정된 메시지"  # 마지막 커밋 메시지 수정
 ## 안티패턴
 
 ```
-❌ main에 직접 커밋
-❌ .env, API 키 커밋
-❌ 1000줄 이상의 거대한 PR
-❌ "update", "fix", "수정" 같은 모호한 커밋 메시지
-❌ 공개 브랜치에 force push
-❌ 장기 feature 브랜치 (몇 주 이상)
-❌ dist/, node_modules/ 커밋
+[X] main에 직접 커밋
+[X] .env, API 키 커밋
+[X] 1000줄 이상의 거대한 PR
+[X] "update", "fix", "수정" 같은 모호한 커밋 메시지
+[X] 공개 브랜치에 force push
+[X] 장기 feature 브랜치 (몇 주 이상)
+[X] dist/, node_modules/ 커밋
 ```
 
 ---

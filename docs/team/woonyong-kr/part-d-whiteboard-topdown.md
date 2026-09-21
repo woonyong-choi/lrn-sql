@@ -161,7 +161,7 @@ VM 레이아웃 (x86_64 userland, PIE)
 
     task_struct (PID=1234)
      │
-     ├─ files ─▶ files_struct            ★ 프로세스별 FDT
+     ├─ files ─▶ files_struct            * 프로세스별 FDT
      │           ├─ count  = 1 (참조)
      │           ├─ fdt    ─▶ fdtable
      │           │           ├─ max_fds = 64
@@ -226,13 +226,13 @@ bit 6                   O_CREAT            000100         0x40
 bit 7                   O_EXCL             000200         0x80
 bit 8                   O_NOCTTY           000400         0x100
 bit 9                   O_TRUNC            001000         0x200
-bit 10                  O_APPEND           002000         0x400   ★ log 파일에 자주
-bit 11                  O_NONBLOCK         004000         0x800   ★ 소켓에 자주
+bit 10                  O_APPEND           002000         0x400   * log 파일에 자주
+bit 11                  O_NONBLOCK         004000         0x800   * 소켓에 자주
 bit 12                  O_DSYNC            010000         0x1000
 bit 15                  O_LARGEFILE        0100000        0x8000
 bit 16                  O_DIRECTORY        0200000        0x10000
 bit 17                  O_NOFOLLOW         0400000        0x20000
-bit 19                  O_CLOEXEC          02000000       0x80000 ★ execve 시 자동 close
+bit 19                  O_CLOEXEC          02000000       0x80000 * execve 시 자동 close
 
 예시) tiny 가 소켓을 열 때
   flags = O_RDWR | O_NONBLOCK | O_CLOEXEC
@@ -499,15 +499,15 @@ PID=1  systemd                 (fork 없이 커널이 직접 execve 한 최초)
   │
   ├─ PID=90   agetty /dev/tty1
   │    └─ PID=120  login       (성공 시 execve)
-  │         └─ PID=500  bash   ★ 여기부터 pts/0 을 0/1/2 로 물려줌
-  │              └─ PID=1234  ./tiny 8080    ★ Part A/B/C 의 서버
-  │                   └─ PID=1300  /cgi-bin/adder  ★ Part C 의 CGI
+  │         └─ PID=500  bash   * 여기부터 pts/0 을 0/1/2 로 물려줌
+  │              └─ PID=1234  ./tiny 8080    * Part A/B/C 의 서버
+  │                   └─ PID=1300  /cgi-bin/adder  * Part C 의 CGI
   │
   ├─ PID=200  sshd              (원격 로그인용)
   │    └─ PID=400  sshd (세션)
   │         └─ PID=450  bash    (원격 셸)
   │
-  ├─ PID=300  systemd --user    ★ subreaper 켜진 경우 많음
+  ├─ PID=300  systemd --user    * subreaper 켜진 경우 많음
   │    └─ PID=310  gnome-shell
   │         ├─ PID=600  chrome  (크롬)
   │         └─ PID=700  firefox (엣지/파이어폭스)
@@ -538,8 +538,8 @@ PID=1  systemd                 (fork 없이 커널이 직접 execve 한 최초)
 
 자식 PID=1234 직후
 ───────────────────────────────
-  files_struct(count=1) ★ 부모와 다른 struct
-   └─ fdtable        ★ 부모와 다른 struct
+  files_struct(count=1) * 부모와 다른 struct
+   └─ fdtable        * 부모와 다른 struct
       ├─ fd_array[0] ─▶ struct file (pts/0)   f_count=6  (부모 3 + 자식 3)
       ├─ fd_array[1] ─▶        "
       ├─ fd_array[2] ─▶        "
@@ -572,9 +572,9 @@ PID=1  systemd                 (fork 없이 커널이 직접 execve 한 최초)
 시각 T4: 자식이 execve("/cgi-bin/adder", argv, envp)
   커널이 close_on_exec 비트맵을 훑음:
     bit 0: 0 → 그대로
-    bit 1: 0 → 그대로   ★ dup2 된 connfd 가 자식 stdout 으로 살아남음
+    bit 1: 0 → 그대로   * dup2 된 connfd 가 자식 stdout 으로 살아남음
     bit 2: 0 → 그대로
-    bit 3: 1 → close!   ★ listenfd 는 닫힘 (CGI 프로세스가 가져가면 안 되니까)
+    bit 3: 1 → close!   * listenfd 는 닫힘 (CGI 프로세스가 가져가면 안 되니까)
     bit 4: 0 → 그대로  (connfd 원본, 하지만 자식은 이걸 안 씀)
 
 시각 T5: adder.c 가 printf
@@ -607,7 +607,7 @@ PID=1  systemd                 (fork 없이 커널이 직접 execve 한 최초)
                                     tcp_close      (TCP)    udp_destroy_sock (UDP)
                                          │                         │
                                          ▼                         ▼
-                                    FIN 전송            ★ 즉시 sock 해제
+                                    FIN 전송            * 즉시 sock 해제
                                     FIN_WAIT_1
                                     └─ FIN_WAIT_2
                                          └─ TIME_WAIT  (2×MSL = 60s)
@@ -1021,7 +1021,7 @@ int main(void) {
         n2 = atoi(arg2);
     }
 
-    /* 본문을 먼저 만든다  ★ 핵심 */
+    /* 본문을 먼저 만든다  * 핵심 */
     sprintf(content, "Welcome to add.com: ");
     sprintf(content + strlen(content),
             "THE Internet addition portal.\r\n<p>");
@@ -1045,7 +1045,7 @@ int main(void) {
 
         높은 주소
         ┌─────────────────────────────┐
-        │ envp 영역                    │ ★ tiny 가 setenv 한 환경변수들
+        │ envp 영역                    │ * tiny 가 setenv 한 환경변수들
         │   QUERY_STRING=15&27          │
         │   CONTENT_LENGTH=...          │
         │   REQUEST_METHOD=GET          │
@@ -1057,7 +1057,7 @@ int main(void) {
         │ main 의 스택 프레임          │
         │   char arg1[MAXLINE]          │  ┐
         │   char arg2[MAXLINE]          │  │ 지역 배열 (스택)
-        │   char content[MAXLINE]  ★   │  ┘
+        │   char content[MAXLINE]  *   │  ┘
         │     [0] = 'W'                 │
         │     [1] = 'e'                 │
         │     [2] = 'l'                 │
@@ -1083,20 +1083,20 @@ printf("%s", content) 가 실제로 하는 일
 ### content 에 `=` 로 문자열을 넣지 못하는 이유
 
 ```text
-C 선언문:  char content[MAXLINE] = "Welcome";   ★ 초기화, OK
+C 선언문:  char content[MAXLINE] = "Welcome";   * 초기화, OK
   의미: 스택에 MAXLINE 바이트 공간을 잡고, 맨 앞에 'W','e','l','c','o','m','e','\0' 를 복사.
 
 C 대입문:  char content[MAXLINE];
-           content = "Welcome";                ★ 컴파일 에러
+           content = "Welcome";                * 컴파일 에러
   의미: "배열 이름 content" 는 "decay" 되면 주소 상수 &content[0] 인데,
         이건 modifiable lvalue 가 아님. 대입의 왼쪽에 올 수 없다.
 
 반면 포인터:
            char *content;
-           content = "Welcome";                ★ OK, "Welcome" 은 .rodata 의 주소
+           content = "Welcome";                * OK, "Welcome" 은 .rodata 의 주소
 
 하지만 이 경우:
-           content[0] = 'H';                   ★ 런타임 세그폴트
+           content[0] = 'H';                   * 런타임 세그폴트
   의미: "Welcome" 은 .rodata 페이지 (PTE R/W=0) 라서 쓰면 #PF 후 SIGSEGV.
 ```
 
@@ -1332,7 +1332,7 @@ fdtable 최종 상태:
   [0] ─▶ pts/0
   [1] ─▶ pts/0
   [2] ─▶ pts/0
-  [3] ─▶ struct file (listen sock)   ★ O_CLOEXEC on
+  [3] ─▶ struct file (listen sock)   * O_CLOEXEC on
   open_fds      = 0b0000_1111
   close_on_exec = 0b0000_1000
                         │
@@ -1354,13 +1354,13 @@ int connfd = accept(listenfd, NULL, NULL);
   1) listenfd 의 sock 에서 accept queue pop → 이미 ESTABLISHED 된 새 sock
   2) alloc_fd() → bit 4 할당, 새 struct file 생성
      f_flags = O_RDWR  (기본)
-     close_on_exec 비트 4 = 0   ★ 기본으로 전파 안 함
+     close_on_exec 비트 4 = 0   * 기본으로 전파 안 함
   3) connfd=4 유저 반환
 
 fdtable:
   [0..2] 유지
   [3] listen sock (여전히 살아있음)
-  [4] connected sock  ★ 새로 태어남
+  [4] connected sock  * 새로 태어남
   open_fds      = 0b0001_1111
   close_on_exec = 0b0000_1000
 ```
@@ -1389,10 +1389,10 @@ adder 자식(PID=1300) 초기 상태 (execve 전):
     [0] ─▶ pts/0
     [1] ─▶ pts/0          ← 아직 dup2 안 함
     [2] ─▶ pts/0
-    [3] ─▶ listen sock    ★ 복제됨
-    [4] ─▶ connected sock ★ 복제됨
+    [3] ─▶ listen sock    * 복제됨
+    [4] ─▶ connected sock * 복제됨
     open_fds      = 0b0001_1111
-    close_on_exec = 0b0000_1000   ★ bit 3 (listen) 만 CLOEXEC
+    close_on_exec = 0b0000_1000   * bit 3 (listen) 만 CLOEXEC
                                    bit 4 (conn) 는 꺼져있음
 
   각 struct file 의 f_count 는 +1
@@ -1420,11 +1420,11 @@ dup2(4, 1) 직전 자식 fdtable:
 
 dup2(4, 1) 직후 자식 fdtable:
   [0] ─▶ pts/0          (f_count=5)
-  [1] ─▶ conn_sock      ★ stdout 이 소켓이 됨 (f_count=3)
+  [1] ─▶ conn_sock      * stdout 이 소켓이 됨 (f_count=3)
   [2] ─▶ pts/0
   [3] ─▶ listen sock    (CLOEXEC 켜짐)
   [4] ─▶ conn_sock      (복사본)
-  close_on_exec = 0b0000_1000   ★ bit 1 꺼져 있음
+  close_on_exec = 0b0000_1000   * bit 1 꺼져 있음
 ```
 
 만약 `Close(fd)` (==`close(4)`) 를 dup2 뒤에 호출하면:
@@ -1443,10 +1443,10 @@ execve 시 커널이 하는 일:
 
   A) close_on_exec 스캔:
      bit 3 (listen sock) = 1 → close(3)
-       listen_sock f_count: 2 → 1   ★ 부모 tiny 에서만 살아있음
+       listen_sock f_count: 2 → 1   * 부모 tiny 에서만 살아있음
        open_fds bit 3 = 0
 
-     bit 1 (stdout) = 0 → 유지        ★ 여기가 결정적!
+     bit 1 (stdout) = 0 → 유지        * 여기가 결정적!
      bit 4 (conn original) = 0 → 유지
      → 자식 adder 의 fdtable:
         [0] ─▶ pts/0     (1)
@@ -1618,7 +1618,7 @@ fd 는 이미 없지만 struct sock 은 살아있다.
 
 시간 0.02s:  상대의 FIN 수신
              ACK 전송
-             sk_state = TIME_WAIT   ★
+             sk_state = TIME_WAIT   *
              struct tcp_timewait_sock 으로 전환
                (더 가벼운 구조, 메모리 절약)
 
@@ -1675,7 +1675,7 @@ bash(500)
   │        │  fork ─┐
   │        │        ▼
   │        │      child(1300, was tiny)
-  │        │        │  dup2(4, 1)    ★ stdout=소켓
+  │        │        │  dup2(4, 1)    * stdout=소켓
   │        │        │  execve("adder")
   │        │        │   - close_on_exec: bit 3 on → close listen fd
   │        │        │   - mm 교체: tiny VM 전부 폐기
@@ -1683,7 +1683,7 @@ bash(500)
   │        │        │
   │        │      adder(1300)
   │        │        │  QUERY_STRING 파싱 (getenv)
-  │        │        │  sprintf(content, ...)  ★ 스택 page fault 발생
+  │        │        │  sprintf(content, ...)  * 스택 page fault 발생
   │        │        │  printf("Content-length: ...")
   │        │        │  printf("%s", content)
   │        │        │  fflush → write(1, ...) → tcp_sendmsg
