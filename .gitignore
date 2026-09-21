@@ -10,3 +10,12 @@ __pycache__/
 
 # 빌드 산출물은 커밋하지 않는다
 build*/
+
+# AI 작업 중간 산출물·임시 파일·작업 로그
+.local/
+*handoff*.md
+scratch*
+tmp*
+notes/ai-*
+*.bak
+*-staging/
