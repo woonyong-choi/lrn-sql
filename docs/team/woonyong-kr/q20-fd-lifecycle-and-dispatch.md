@@ -259,7 +259,7 @@ glibc 2.7+ 에서는 `fopen(..., "re")` 의 `e` 가 O_CLOEXEC. 최근 코드는 
 struct file {
     struct path            f_path;
     struct inode          *f_inode;
-    const struct file_operations *f_op;   // ★ 함수 포인터 테이블
+    const struct file_operations *f_op;   // * 함수 포인터 테이블
     atomic_long_t          f_count;        // refcount
     unsigned int           f_flags;
     fmode_t                f_mode;
@@ -375,7 +375,7 @@ int inet_release(struct socket *sock)
         if (sock_flag(sk, SOCK_LINGER) && !(current->flags & PF_EXITING))
             timeout = sk->sk_lingertime;
 
-        sk->sk_prot->close(sk, timeout);  // ★ 여기서 프로토콜별 분기
+        sk->sk_prot->close(sk, timeout);  // * 여기서 프로토콜별 분기
         sock->sk = NULL;
     }
     return 0;
@@ -388,7 +388,7 @@ int inet_release(struct socket *sock)
 // net/ipv4/tcp_ipv4.c
 struct proto tcp_prot = {
     .name      = "TCP",
-    .close     = tcp_close,         // ★
+    .close     = tcp_close,         // *
     .connect   = tcp_v4_connect,
     .accept    = inet_csk_accept,
     .sendmsg   = tcp_sendmsg,
@@ -399,7 +399,7 @@ struct proto tcp_prot = {
 // net/ipv4/udp.c
 struct proto udp_prot = {
     .name      = "UDP",
-    .close     = udp_lib_close,     // ★ (실질적으로 sk_common_release)
+    .close     = udp_lib_close,     // * (실질적으로 sk_common_release)
     .connect   = udp_connect,
     .sendmsg   = udp_sendmsg,
     .recvmsg   = udp_recvmsg,
@@ -957,7 +957,7 @@ libc 버퍼를 쓰는 이유: **syscall 은 비싸다**. 한 바이트씩 write(
                         ▼
                  sys_execve                    ─→  do_execveat_common
                                                      ├ flush_old_exec
-                                                     ├ do_close_on_exec (★)
+                                                     ├ do_close_on_exec (*)
                                                      │   └ fdtable[3] 가 close_on_exec 이므로
                                                      │     close(3) 과 동일 처리
                                                      │     → struct file refcount--  (=1)

@@ -123,9 +123,9 @@ arr[i] = 5;
 node->data = 7;
 
 /* R-value: 대입 불가 — 컴파일 에러 */
-10 = x;           /* ❌ 리터럴은 L-value가 아니다 */
-a + b = c;        /* ❌ 산술 결과는 L-value가 아니다 */
-get_value() = 3;  /* ❌ 반환값은 L-value가 아니다 (포인터 반환 제외) */
+10 = x;           /* [X] 리터럴은 L-value가 아니다 */
+a + b = c;        /* [X] 산술 결과는 L-value가 아니다 */
+get_value() = 3;  /* [X] 반환값은 L-value가 아니다 (포인터 반환 제외) */
 ```
 
 ### 실수하기 쉬운 패턴
@@ -141,10 +141,10 @@ int *p = arr;
 
 /* const 변수는 L-value이지만 수정 불가 */
 const int MAX = 100;
-MAX = 200;             /* ❌ 컴파일 에러 — const L-value */
+MAX = 200;             /* [X] 컴파일 에러 — const L-value */
 
 /* 캐스트 결과는 R-value다 */
-(int)x = 5;            /* ❌ 캐스트 결과에 대입 불가 */
+(int)x = 5;            /* [X] 캐스트 결과에 대입 불가 */
 ```
 
 ---
@@ -177,7 +177,7 @@ if (MAX_SIZE != count)
 
 ```c
 /* 위험 — 대입과 비교 혼동 */
-if (x = 0) { ... }    /* ⚠️ 항상 false, -Wall이 경고함 */
+if (x = 0) { ... }    /* [!] 항상 false, -Wall이 경고함 */
 
 /* 의도적 대입은 괄호를 한 겹 더 씌운다 */
 if ((ptr = malloc(size)) != NULL) {

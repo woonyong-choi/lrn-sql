@@ -96,9 +96,9 @@ obj.attr = 42
 a, b = 1, 2           # 언패킹
 
 # 대입 불가 — SyntaxError
-10 = x                 # ❌ 리터럴
-a + b = c              # ❌ 연산 결과
-func() = 3             # ❌ 함수 반환값
+10 = x                 # [X] 리터럴
+a + b = c              # [X] 연산 결과
+func() = 3             # [X] 함수 반환값
 ```
 
 ### 실수하기 쉬운 패턴
@@ -109,7 +109,7 @@ first, *rest = [1, 2, 3, 4]   # first=1, rest=[2,3,4]
 
 # 슬라이스 대입 — 리스트만 가능, 튜플은 불가
 lst[1:3] = [10, 20]           # 좋음 — 리스트 슬라이스 대입
-# tup[1:3] = (10, 20)         # ❌ TypeError — 튜플은 immutable
+# tup[1:3] = (10, 20)         # [X] TypeError — 튜플은 immutable
 
 # walrus operator (:=) — 표현식 안에서 대입
 if (n := len(data)) > 10:     # n에 대입하면서 비교
@@ -117,7 +117,7 @@ if (n := len(data)) > 10:     # n에 대입하면서 비교
 
 # augmented assignment는 대입 가능 대상에만
 x += 1                        # 좋음
-# 10 += x                     # ❌ SyntaxError
+# 10 += x                     # [X] SyntaxError
 ```
 
 ---
@@ -526,7 +526,7 @@ testpaths = ["tests"]
 ## 안티패턴
 
 ```python
-# ❌ mutable default argument
+# [X] mutable default argument
 def append(item, lst=[]):       # 나쁨 — 리스트가 공유됨
     lst.append(item)
     return lst
@@ -537,10 +537,10 @@ def append(item, lst=None):    # 좋음
     lst.append(item)
     return lst
 
-# ❌ global 남용
+# [X] global 남용
 global_state = {}              # 모듈 레벨 상태 최소화, 필요하면 클래스로
 
-# ❌ 지나친 한 줄 표현
+# [X] 지나친 한 줄 표현
 result = [x for x in data if x > 0 and x % 2 == 0 and x < 100]  # 나쁨
 
 # 좋음 — 가독성 우선
@@ -551,11 +551,11 @@ result = [
     and x < 100
 ]
 
-# ❌ 빈 컬렉션을 == 로 비교
+# [X] 빈 컬렉션을 == 로 비교
 if lst == []:     # 나쁨
 if not lst:       # 좋음
 
-# ❌ isinstance 대신 type 비교
+# [X] isinstance 대신 type 비교
 if type(x) == int:    # 나쁨
 if isinstance(x, int):  # 좋음
 ```

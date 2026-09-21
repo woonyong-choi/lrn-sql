@@ -129,7 +129,7 @@ q01~q18 의 DFS 문서 전체를 **칠판 앞 90 분 세션**으로 압축했을
       | [1] stdout   |
       | [2] stderr   |
       | [3] a.txt    |
-      | [4] socket ★ |  <- 오늘 끝까지 쫓아갈 fd
+      | [4] socket * |  <- 오늘 끝까지 쫓아갈 fd
       +──────────────+
 ```
 
@@ -235,13 +235,13 @@ q01~q18 의 DFS 문서 전체를 **칠판 앞 90 분 세션**으로 압축했을
       |
       v
  [8] 드라이버      DMA descriptor 작성
-                   MMIO tail write  ★
+                   MMIO tail write  *
       |
       v
  [9] NIC 하드웨어  선로로 나감
 ```
 
-**★ 8 단계에서 멈춰서** 오른쪽에 `DMA` 와 `MMIO` 두 글자를 크게. **"이 두 글자가 두 번째 드릴다운 구역입니다."**
+*** 8 단계에서 멈춰서** 오른쪽에 `DMA` 와 `MMIO` 두 글자를 크게. **"이 두 글자가 두 번째 드릴다운 구역입니다."**
 
 대응 문서: [q08-host-network-pipeline.md](./q08-host-network-pipeline.md)
 
@@ -341,7 +341,7 @@ Scene 9 의 9 단 계단을 **화살표만 뒤집어서** 재활용. 빨간 펜�
     fd[1]=tty           fd[1]=tty
        |  fork             |
        v                   v  dup2(connfd, 1)
-    fd[1]=tty           fd[1]=connfd ★
+    fd[1]=tty           fd[1]=connfd *
                            |
                            v  execve("adder")
                         printf(...) -> 바로 소켓으로
