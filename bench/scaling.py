@@ -13,7 +13,7 @@
 
 세 가지 빌드를 같은 소스에서 뽑아 같은 워크로드로 잰다:
   after   현재 코드
-  prefix  수정 커밋 993d4d8 의 직전 코드 (INSERT O(N^2) 결함 2건이 살아 있음)
+  prefix  수정 커밋 e640fdd 의 직전 코드 (INSERT O(N^2) 결함 2건이 살아 있음)
   noindex 현재 코드 + -DMINIDB_DISABLE_INDEX_RANGE (Range 가 힙 스캔으로 감)
 
 사용:
@@ -35,7 +35,7 @@ SRCS = ["storage/pager.c", "storage/schema.c", "storage/table.c",
         "storage/bptree.c", "sql/parser.c", "sql/planner.c", "sql/executor.c",
         "server/http.c", "server/server.c", "server/lock_table.c",
         "db.c", "main.c"]
-PREFIX_COMMIT = "993d4d8"     # INSERT O(N^2) 결함 2건을 고친 커밋
+PREFIX_COMMIT = "e640fdd"     # INSERT O(N^2) 결함 2건을 고친 커밋
 RANGE_WIDTH = 1000
 N_RANGE = 100
 SEED = 42
@@ -190,13 +190,17 @@ def _panel(x0, y0, w, h, sizes, series, title, note):
 def write_svg(path, sizes, res):
     W, H = 960, 320
     body = []
+    ki_b = exponent(sizes, res["prefix"]["insert"])
+    ki_a = exponent(sizes, res["after"]["insert"])
+    kr_b = exponent(sizes, res["noindex"]["range"])
+    kr_a = exponent(sizes, res["after"]["range"])
     body += _panel(66, 52, 340, 196, sizes,
-                   [("개선 전 (O(N²))", BEFORE, res["prefix"]["insert"]),
-                    ("개선 후", AFTER, res["after"]["insert"])],
-                   "INSERT 전체 소요", "기울기가 가파를수록 규모에 취약하다 (양축 로그)")
+                   [(f"개선 전  O(N^{ki_b:.2f})", BEFORE, res["prefix"]["insert"]),
+                    (f"개선 후  O(N^{ki_a:.2f})", AFTER, res["after"]["insert"])],
+                   "INSERT 전체 소요", "양축 로그 — 기울기가 그대로 지수다")
     body += _panel(556, 52, 340, 196, sizes,
-                   [("힙 스캔", BEFORE, res["noindex"]["range"]),
-                    ("B+Tree 인덱스", AFTER, res["after"]["range"])],
+                   [(f"힙 스캔  O(N^{kr_b:.2f})", BEFORE, res["noindex"]["range"]),
+                    (f"B+Tree  O(N^{kr_a:.2f})", AFTER, res["after"]["range"])],
                    "Range 질의 100회 (각 1,000행)", "반환 행 수는 고정, 테이블만 커진다")
     body.append(f'<text x="66" y="{H - 12}" font-size="11" fill="{TEXT}">'
                 f'bench/scaling.py — 규모별 중앙값, 프로세스 기동 시간 차감, -O2</text>')
@@ -205,6 +209,22 @@ def write_svg(path, sizes, res):
            + "\n".join(body) + "\n</svg>\n")
     with open(path, "w") as f:
         f.write(svg)
+
+
+def exponent(sizes, times):
+    """log(시간) = k·log(N) + c 의 기울기 k (최소제곱).
+
+    쌍별 배가 계수는 한 번의 잡음에 통째로 흔들리지만, 전 구간을 한 직선으로
+    맞춘 기울기는 훨씬 덜 움직인다. k≈2 면 O(N^2), k≈1 이면 O(N) 이다.
+    """
+    import math
+    xs = [math.log(n) for n in sizes]
+    ys = [math.log(t) for t in times]
+    n = len(xs)
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    den = sum((x - mx) ** 2 for x in xs)
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den if den else 0.0
 
 
 def growth(series):
@@ -264,8 +284,14 @@ def main():
     lines.append("")
     lines.append("## INSERT — 힙 재탐색 힌트 (`heap_may_have_free_slots`)")
     lines.append("")
-    lines.append("`prefix` 는 수정 커밋 `993d4d8` 의 직전 코드다. N 이 2배가 될 때 "
+    lines.append("`prefix` 는 수정 커밋 `e640fdd` 의 직전 코드다. N 이 2배가 될 때 "
                  "시간이 약 4배가 되면 O(N^2), 약 2배면 O(N) 이다.")
+    lines.append("")
+    k_prefix = exponent(sizes, res["prefix"]["insert"])
+    k_after = exponent(sizes, res["after"]["insert"])
+    lines.append(f"**전 구간 기울기: 개선 전 O(N^{k_prefix:.2f}) → 개선 후 "
+                 f"O(N^{k_after:.2f}).** 쌍별 배가 계수는 한 번의 잡음에 흔들리지만, "
+                 "전 구간을 한 직선으로 맞춘 이 지수는 훨씬 덜 움직인다.")
     lines.append("")
     lines.append("| 행 수 | 개선 전 (prefix) | 배가 계수 | 개선 후 (after) | 배가 계수 |")
     lines.append("|---:|---:|---:|---:|---:|")
@@ -282,7 +308,12 @@ def main():
                  "고정이므로, 시간이 N 을 따라 늘면 접근 경로가 테이블 크기에 "
                  "비례한다는 뜻이다.")
     lines.append("")
-    lines.append(f"| 행 수 | 힙 스캔 (noindex) | 배가 계수 | 인덱스 (after) | 배가 계수 |")
+    kr_noidx = exponent(sizes, res["noindex"]["range"])
+    kr_after = exponent(sizes, res["after"]["range"])
+    lines.append(f"**전 구간 기울기: 힙 스캔 O(N^{kr_noidx:.2f}) → 인덱스 "
+                 f"O(N^{kr_after:.2f}).**")
+    lines.append("")
+    lines.append("| 행 수 | 힙 스캔 (noindex) | 배가 계수 | 인덱스 (after) | 배가 계수 |")
     lines.append("|---:|---:|---:|---:|---:|")
     for k, n in enumerate(sizes):
         lines.append(f"| {n:,} | {fmt(res['noindex']['range'][k])} | "
