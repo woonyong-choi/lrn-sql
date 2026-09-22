@@ -2,7 +2,7 @@
 
 SQL 한 문장을 파싱하고 실행 계획을 세워 디스크의 행을 읽고 쓰는 C11 데이터베이스입니다. Slotted Page, B+Tree, Buffer Pool과 행·범위 lock을 직접 구현합니다.
 
-[SQL 엔진 구현 Wiki](https://docs.woonyong.com/wiki/lrn-sql/) · [설계 문서](docs/README.md) · [CI](https://github.com/woonyong-kr/lrn-sql/actions)
+[SQL 엔진 구현 Wiki](https://docs.woonyong.com/wiki/lrn-sql/) · [설계 문서](docs/README.md) · [CI](https://github.com/woonyong-choi/lrn-sql/actions)
 
 크래프톤 정글 팀 과제에서 시작해 **최우녕이 개인 주도로 대부분 직접 구현**했습니다. [팀 원본](https://github.com/Jungle-12-303/wk08_1)과 이 저장소에 개발 이력이 남아 있으며, 기반 과제·팀 기여와 이후 변경은 커밋 저자와 diff로 구분합니다.
 
