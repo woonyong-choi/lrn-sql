@@ -141,6 +141,13 @@ make BUILD_DIR=build-nosan SANITIZE= all
 ./build-nosan/minidb demo.db
 ```
 
+CI(`.github/workflows/ci.yml`)는 Linux에서 `make test-all`을 ASAN·UBSAN으로 실행하며, 아래 회귀 검사를 포함합니다. sanitizer를 끈 빌드는 이 검사를 대신하지 않습니다.
+
+| 회귀 검사 (`make test-step3`) | 무엇을 잡는가 |
+| --- | --- |
+| `test_repl_insert_releases_locks` | REPL 경로 문장이 끝난 뒤 lock이 남는 회귀. `db_execute()`의 `lock_release_all()`이 빠지면 executor가 gap check에서 잡은 X lock이 해제되지 않고 누적된다 |
+| `test_sequential_insert_no_heap_rescan` | DELETE 없는 순차 INSERT가 힙 체인을 다시 걷는 회귀. free slot 힌트가 사라지면 꼬리 페이지가 찰 때마다 전체 체인을 재탐색해 O(P^2)로 붕괴한다 |
+
 설계 문서는 [`docs/README.md`](docs/README.md)를 참조합니다.
 
 ## 스펙

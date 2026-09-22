@@ -143,9 +143,16 @@ $(BUILD_DIR)/test_step2: tests/test_step2_concurrency.c $(OBJS)
 test-step2: $(BUILD_DIR)/test_step2
 	./$(BUILD_DIR)/test_step2
 
-test-all: test test-prop test-step0 test-step1 test-step2
+$(BUILD_DIR)/test_step3: tests/test_step3_regression.c $(OBJS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+test-step3: $(BUILD_DIR)/test_step3
+	./$(BUILD_DIR)/test_step3
+
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3
 
 clean:
-	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db
+	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
 
-.PHONY: all test test-prop test-step0 test-step1 test-step2 test-all run run-server gen bench bench-1m bench-http stress clean
+.PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
