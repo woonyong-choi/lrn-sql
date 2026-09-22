@@ -2,7 +2,7 @@
 
 프로젝트 문서를 정리하는 디렉터리입니다.
 
-- `convention/`: 프로젝트 규칙, 문서 작성 기준, Codex 스킬 등록 가이드
+- `convention/`: 프로젝트 규칙과 문서 작성 기준
 - `csapp-11/`: CSAPP 11장 네트워크 학습 계획, 키워드 트리, 자료 정리, SQL API 구현 연결 가이드
 - `sql/`: 지난 주 MiniDB와 이번 주 SQL API 서버 구현을 연결하는 문서
 - `question/`: 질문 예시 문서
@@ -14,7 +14,6 @@
 - `python-style.md`: Python 코딩 스타일 컨벤션
 - `project-structure.md`: 프로젝트 폴더 구조 컨벤션
 - `commit-convention.md`: Git 커밋/브랜치/PR 컨벤션
-- `codex-skill-guide.md`: 위 컨벤션 파일들을 Codex 스킬로 등록하고 사용하는 방법
 
 ## csapp-11/
 

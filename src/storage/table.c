@@ -149,6 +149,51 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
     return 0; /* 적합한 페이지 없음 */
 }
 
+/*
+ * alloc_heap_page - 새 힙 페이지를 만들어 힙 체인 끝에 잇고 그 page_id 를 준다.
+ *
+ * header_lock 으로 직렬화한다: 여러 스레드가 동시에 tail 을 늘리면
+ * last_heap_page_id 의 읽기→쓰기 사이에 레이스가 생겨 페이지가 체인에서
+ * 누락될 수 있다 (docs/sql/13-concurrency-issues.md §5 참조).
+ *
+ * Lock 순서는 header_lock → page wlatch 한 방향뿐이다. 삽입 경로는 wlatch 를
+ * 먼저 놓은 뒤 이 함수를 부르므로 역방향이 생기지 않아 데드락이 없다.
+ */
+static uint32_t alloc_heap_page(pager_t *pager)
+{
+    pthread_mutex_lock(&pager->header_lock);
+
+    uint32_t pid = pager_alloc_page(pager);
+    uint8_t *page = pager_get_page_wlatch(pager, pid);
+    heap_page_header_t hph = {
+        .page_type = PAGE_TYPE_HEAP,
+        .next_heap_page_id = 0,
+        .slot_count = 0,
+        .free_slot_head = SLOT_NONE,
+        .free_space_offset = 0,
+        .reserved = 0
+    };
+    memcpy(page, &hph, sizeof(hph));
+    pager_mark_dirty(pager, pid);
+    pager_unlatch_w(pager, pid);
+
+    /* 기존 tail 에 연결 */
+    uint32_t prev_pid = pager->last_heap_page_id;
+    if (prev_pid != 0) {
+        uint8_t *pp = pager_get_page_wlatch(pager, prev_pid);
+        heap_page_header_t ph;
+        memcpy(&ph, pp, sizeof(ph));
+        ph.next_heap_page_id = pid;
+        memcpy(pp, &ph, sizeof(ph));
+        pager_mark_dirty(pager, prev_pid);
+        pager_unlatch_w(pager, prev_pid);
+    }
+    pager->last_heap_page_id = pid;
+
+    pthread_mutex_unlock(&pager->header_lock);
+    return pid;
+}
+
 /* ══════════════════════════════════════════════════════════════════════
  *  INSERT
  * ══════════════════════════════════════════════════════════════════════ */
@@ -184,49 +229,7 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
     uint32_t pid = find_heap_page(pager, row_size);
 
     if (pid == 0) {
-        /*
-         * 새 힙 페이지 할당 + 체인 연결.
-         *
-         * header_lock으로 직렬화: 여러 스레드가 동시에 새 페이지를
-         * 할당하면 last_heap_page_id 읽기→쓰기 사이에 레이스가
-         * 발생하여 페이지가 체인에서 누락될 수 있다.
-         * (docs/sql/13-concurrency-issues.md §5 참조)
-         *
-         * Lock 순서: header_lock → page wlatch (단방향).
-         * 일반 삽입 경로는 wlatch를 해제한 뒤 header_lock을
-         * 획득하므로 역방향이 없어 데드락이 발생하지 않는다.
-         */
-        pthread_mutex_lock(&pager->header_lock);
-
-        pid = pager_alloc_page(pager);
-        uint8_t *page = pager_get_page_wlatch(pager, pid);
-
-        heap_page_header_t hph = {
-            .page_type = PAGE_TYPE_HEAP,
-            .next_heap_page_id = 0,
-            .slot_count = 0,
-            .free_slot_head = SLOT_NONE,
-            .free_space_offset = 0,
-            .reserved = 0
-        };
-        memcpy(page, &hph, sizeof(hph));
-        pager_mark_dirty(pager, pid);
-        pager_unlatch_w(pager, pid);
-
-        /* tail에 새 페이지 연결 */
-        uint32_t prev_pid = pager->last_heap_page_id;
-        if (prev_pid != 0) {
-            uint8_t *pp = pager_get_page_wlatch(pager, prev_pid);
-            heap_page_header_t ph;
-            memcpy(&ph, pp, sizeof(ph));
-            ph.next_heap_page_id = pid;
-            memcpy(pp, &ph, sizeof(ph));
-            pager_mark_dirty(pager, prev_pid);
-            pager_unlatch_w(pager, prev_pid);
-        }
-        pager->last_heap_page_id = pid;
-
-        pthread_mutex_unlock(&pager->header_lock);
+        pid = alloc_heap_page(pager);
     }
 
     /*
@@ -246,37 +249,8 @@ retry_insert:;
         uint16_t need = (uint16_t)(sizeof(slot_t) + row_size);
         if (available_space(pager, &hph) < need) {
             pager_unlatch_w(pager, pid);
-            /* 공간 부족 — 새 페이지 할당 후 재시도 */
-            pid = 0;
-            pthread_mutex_lock(&pager->header_lock);
-
-            pid = pager_alloc_page(pager);
-            uint8_t *np = pager_get_page_wlatch(pager, pid);
-            heap_page_header_t nhph = {
-                .page_type = PAGE_TYPE_HEAP,
-                .next_heap_page_id = 0,
-                .slot_count = 0,
-                .free_slot_head = SLOT_NONE,
-                .free_space_offset = 0,
-                .reserved = 0
-            };
-            memcpy(np, &nhph, sizeof(nhph));
-            pager_mark_dirty(pager, pid);
-            pager_unlatch_w(pager, pid);
-
-            uint32_t pp_id = pager->last_heap_page_id;
-            if (pp_id != 0) {
-                uint8_t *pp = pager_get_page_wlatch(pager, pp_id);
-                heap_page_header_t ph;
-                memcpy(&ph, pp, sizeof(ph));
-                ph.next_heap_page_id = pid;
-                memcpy(pp, &ph, sizeof(ph));
-                pager_mark_dirty(pager, pp_id);
-                pager_unlatch_w(pager, pp_id);
-            }
-            pager->last_heap_page_id = pid;
-
-            pthread_mutex_unlock(&pager->header_lock);
+            /* 공간 부족 — 새 페이지를 이어 붙이고 재시도 */
+            pid = alloc_heap_page(pager);
             goto retry_insert;
         }
     }
@@ -344,8 +318,8 @@ retry_insert:;
  *   3. slot.status가 ALIVE가 아니면 NULL 반환 (삭제된 행).
  *   4. ALIVE이면 page + slot.offset 위치의 포인터를 반환한다.
  *
- * 주의: 반환�� 포인터는 캐시 페이지 내부를 가리키며, 읽기 래치가 걸려 있다.
- *       사��� 후 반드시 pager_unlatch_r(pager, ref.page_id)을 호출해야 한다.
+ * 주의: 반환된 포인터는 캐시 페이지 내부를 가리키며, 읽기 래치가 걸려 있다.
+ *       사용 후 반드시 pager_unlatch_r(pager, ref.page_id)을 호출해야 한다.
  *       래치 해제 전에 데이터를 복사하거나 사용을 완료해야 한다.
  *
  * 예시: ref = {page_id=1, slot_id=2}
@@ -370,7 +344,7 @@ const uint8_t *heap_fetch(pager_t *pager, row_ref_t ref, uint16_t row_size)
         return NULL;
     }
 
-    /* 주의: 호출자가 사용 후 pager_unlatch_r(pager, ref.page_id)�� 호출해야 한다 */
+    /* 주의: 호출자가 사용 후 pager_unlatch_r(pager, ref.page_id)을 호출해야 한다 */
     return page + slot.offset;
 }
 

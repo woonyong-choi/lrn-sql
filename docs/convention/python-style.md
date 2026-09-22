@@ -5,7 +5,7 @@ description: Python 코딩 스타일 컨벤션. Python 코드를 작성·리뷰�
 
 # Python 코딩 스타일 컨벤션
 
-> 목적: 팀원 간 코드 스타일을 통일하고, AI 도구(Claude, Codex)가 코드를 생성할 때도 동일한 규칙을 따르게 한다.
+> 목적: 팀원 간 코드 스타일을 통일한다.
 > 기반: PEP 8 + Google Python Style Guide 발췌. 크래프톤 정글 환경에 맞춰 조정.
 
 ---
