@@ -3,7 +3,6 @@
  */
 
 #include "sql/planner.h"
-#include <string.h>
 #include <stdbool.h>
 
 /*
@@ -59,8 +58,15 @@ plan_t planner_create_plan(const statement_t *stmt)
             plan.access_path = ACCESS_PATH_DROP_TABLE;
             break;
         case STMT_EXPLAIN: {
-            statement_t inner;
-            memset(&inner, 0, sizeof(inner));
+            /*
+             * EXPLAIN 은 안쪽 문장이 "실제로" 타게 될 경로를 그대로 보여 줘야
+             * 한다. 여기서 inner 를 memset 한 뒤 type 과 predicate 만 채우면
+             * has_order_by·has_limit·select_count 가 전부 0 이 되어, 계획을
+             * 알려주는 것이 유일한 임무인 명령이 거짓을 말하게 된다.
+             * 파서가 안쪽 문장을 통째로 올려 두므로 type 만 바꿔 재귀한다.
+             * (중첩 EXPLAIN 은 파서가 막으므로 재귀는 한 단계에서 끝난다.)
+             */
+            statement_t inner = *stmt;
             inner.type = stmt->inner_type;
             inner.predicate_kind = stmt->inner_predicate;
             return planner_create_plan(&inner);
