@@ -18,8 +18,9 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
 
 /*
  * row_ref_t로 행을 조회한다.
- * 반환된 포인터는 캐시 페이지 내부를 가리키므로,
- * 사용 후 반드시 pager_unpin(pager, ref.page_id)을 호출해야 한다.
+ * 반환된 포인터는 캐시 페이지 내부를 가리키며 읽기 래치가 걸린 상태다.
+ * 사용 후 반드시 pager_unlatch_r(pager, ref.page_id)을 호출해야 한다
+ * (pager_unpin 만 부르면 래치가 풀리지 않아 이후 쓰기가 영구히 막힌다).
  */
 const uint8_t *heap_fetch(pager_t *pager, row_ref_t ref, uint16_t row_size);
 

@@ -2,9 +2,9 @@
  * test_step0_db_execute.c -- Step 0 테스트: db_execute 경계 함수 + out_buf 검증
  *
  * 검증 항목:
- *   1. db_execute()가 parse → execute를 올바���게 연결한다
+ *   1. db_execute()가 parse → execute를 올바르게 연결한다
  *   2. SELECT 결과가 out_buf에 담긴다 (printf가 아님)
- *   3. INSERT/DELETE/CREATE TABLE 결과 메시���가 정확하다
+ *   3. INSERT/DELETE/CREATE TABLE 결과 메시지가 정확하다
  *   4. 잘못된 SQL에 대해 status=-1을 반환한다
  *   5. out_buf 메모리 해제가 올바르다 (sanitizer clean)
  */
