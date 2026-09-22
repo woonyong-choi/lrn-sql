@@ -470,24 +470,25 @@ int parse(const char *input, statement_t *stmt)
         return parse_drop_table(skip_ws(p + 5), stmt);
     }
     if (strcasecmp_n(p, "EXPLAIN", 7) == 0) {
-        stmt->type = STMT_EXPLAIN;
         p = skip_ws(p + 7);
         statement_t inner;
         if (parse(p, &inner) != 0) return -1;
+        /* EXPLAIN EXPLAIN ... 은 의미가 없고, 중첩을 허용하면 계획 수립이
+         * 자기 자신을 무한히 호출한다. */
+        if (inner.type == STMT_EXPLAIN) return -1;
+
+        /*
+         * 안쪽 문장을 통째로 들고 간다.
+         *
+         * 예전에는 계획에 필요할 것 같은 필드만 골라 복사했는데, 그때
+         * select_count 와 has_order_by 가 빠져 있었다. 그 둘은 접근 경로를
+         * 바꾸는 조건이라, EXPLAIN 이 실행기와 다른 계획을 보고했다.
+         * 필드가 늘어날 때마다 같은 실수가 반복되므로 선별 복사를 버린다.
+         */
+        *stmt = inner;
+        stmt->type = STMT_EXPLAIN;
         stmt->inner_type = inner.type;
         stmt->inner_predicate = inner.predicate_kind;
-        memcpy(stmt->table_name, inner.table_name, 32);
-        memcpy(stmt->pred_field, inner.pred_field, 32);
-        memcpy(stmt->pred_value, inner.pred_value, 256);
-        stmt->pred_id = inner.pred_id;
-        stmt->predicate_kind = inner.predicate_kind;
-        stmt->range_lo = inner.range_lo;
-        stmt->range_hi = inner.range_hi;
-        stmt->has_lo = inner.has_lo;
-        stmt->has_hi = inner.has_hi;
-        stmt->lo_inclusive = inner.lo_inclusive;
-        stmt->hi_inclusive = inner.hi_inclusive;
-        stmt->has_limit = inner.has_limit;
         return 0;
     }
 

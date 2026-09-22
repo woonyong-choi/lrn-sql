@@ -12,6 +12,7 @@
  *   8. DROP TABLE
  *   9. EXPLAIN 확장 (UPDATE, DROP)
  *  10. INDEX_RANGE (id 범위 조회 · 경계 · LIMIT · 삭제 후)
+ *  11. EXPLAIN 과 실제 실행 경로 일치 (회귀)
  */
 
 #include <stdio.h>
@@ -536,6 +537,77 @@ static void test_index_range(void) {
     teardown_test_db(&pager, "index_range");
 }
 
+/* ════════════════════════════════════════════════════════════ */
+/*  12. EXPLAIN 이 실행기와 같은 계획을 보고하는가 (회귀)       */
+/*                                                             */
+/*  회귀 대상: EXPLAIN 이 안쪽 문장의 일부 필드만 복사하던 시절,*/
+/*  `EXPLAIN SELECT * FROM t WHERE id = 1 LIMIT 3` 은          */
+/*  INDEX_LOOKUP 을 찍었지만 같은 SELECT 는 TABLE_SCAN 으로     */
+/*  돌았다. 계획을 알려주는 것이 유일한 임무인 명령이 실행기와  */
+/*  갈라지면 EXPLAIN 으로 잰 모든 판단이 무효가 된다.           */
+/* ════════════════════════════════════════════════════════════ */
+static void test_explain_matches_execution(void) {
+    printf(CLR_YELLOW "\n[test_explain_matches_execution]" CLR_RESET "\n");
+    pager_t pager;
+    setup_test_db(&pager, "explain_exec");
+    populate_ids(&pager, 50);
+
+    /* 실행 결과 메시지에 실제 접근 경로가 찍히므로 그것을 정답으로 삼는다 */
+    static const char *queries[] = {
+        "SELECT * FROM t WHERE id = 1",
+        "SELECT * FROM t WHERE id = 1 LIMIT 3",
+        "SELECT * FROM t WHERE id >= 10",
+        "SELECT * FROM t WHERE id >= 10 LIMIT 5",
+        "SELECT * FROM t WHERE id >= 10 ORDER BY v",
+        "SELECT * FROM t WHERE id BETWEEN 5 AND 9 ORDER BY v DESC",
+        "SELECT COUNT(*) FROM t WHERE id = 1",
+        "SELECT COUNT(*) FROM t WHERE id >= 10",
+        "SELECT * FROM t WHERE v = 3",
+        "SELECT * FROM t",
+    };
+    static const char *paths[] = {
+        "INDEX_LOOKUP", "INDEX_RANGE", "TABLE_SCAN"
+    };
+
+    for (size_t i = 0; i < sizeof(queries) / sizeof(queries[0]); i++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql), "EXPLAIN %s", queries[i]);
+        exec_result_t e = db_execute(&pager, sql);
+        exec_result_t x = db_execute(&pager, queries[i]);
+
+        ASSERT_TRUE(e.out_buf != NULL, queries[i]);
+        ASSERT_EQ_INT(x.status, 0, queries[i]);
+
+        if (e.out_buf) {
+            /* EXPLAIN 이 말한 경로와 실행기가 쓴 경로가 같아야 한다.
+             * 실행 쪽 경로는 결과 메시지("N행 조회 (INDEX_RANGE)")에 있고,
+             * COUNT(*) 처럼 메시지에 경로가 없으면 그 항목은 건너뛴다. */
+            const char *said = NULL, *did = NULL;
+            for (size_t k = 0; k < sizeof(paths) / sizeof(paths[0]); k++) {
+                if (strstr(e.out_buf, paths[k])) said = paths[k];
+                if (strstr(x.message, paths[k])) did = paths[k];
+            }
+            ASSERT_TRUE(said != NULL, queries[i]);
+            if (said && did) {
+                ASSERT_TRUE(strcmp(said, did) == 0, queries[i]);
+                if (strcmp(said, did) != 0) {
+                    printf("        EXPLAIN=%s / 실행=%s  <- %s\n",
+                           said, did, queries[i]);
+                }
+            }
+            free(e.out_buf);
+        }
+        if (x.out_buf) free(x.out_buf);
+    }
+
+    /* 중첩 EXPLAIN 은 계획 수립이 자기 자신을 부르게 되므로 거부한다 */
+    exec_result_t r = db_execute(&pager, "EXPLAIN EXPLAIN SELECT * FROM t");
+    ASSERT_EQ_INT(r.status, -1, "중첩 EXPLAIN 은 구문 오류");
+    if (r.out_buf) free(r.out_buf);
+
+    teardown_test_db(&pager, "explain_exec");
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -551,6 +623,7 @@ int main(void)
     test_drop_table();
     test_explain_extended();
     test_index_range();
+    test_explain_matches_execution();
 
     printf("\n");
     printf("========================================\n");
