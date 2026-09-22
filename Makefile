@@ -101,6 +101,13 @@ $(BUILD_DIR)/test_step1: tests/test_step1_sql_ext.c $(OBJS)
 test-step1: $(BUILD_DIR)/test_step1
 	./$(BUILD_DIR)/test_step1
 
+$(BUILD_DIR)/test_prop: tests/test_bptree_property.c $(OBJS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+test-prop: $(BUILD_DIR)/test_prop
+	./$(BUILD_DIR)/test_prop
+
 $(BUILD_DIR)/test_step2: tests/test_step2_concurrency.c $(OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
@@ -108,9 +115,9 @@ $(BUILD_DIR)/test_step2: tests/test_step2_concurrency.c $(OBJS)
 test-step2: $(BUILD_DIR)/test_step2
 	./$(BUILD_DIR)/test_step2
 
-test-all: test test-step0 test-step1 test-step2
+test-all: test test-prop test-step0 test-step1 test-step2
 
 clean:
 	rm -rf $(BUILD_DIR) *.db __test__*.db
 
-.PHONY: all test test-step0 test-step1 test-step2 test-all run run-server gen bench stress clean
+.PHONY: all test test-prop test-step0 test-step1 test-step2 test-all run run-server gen bench stress clean

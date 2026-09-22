@@ -11,6 +11,7 @@
  *   7. ORDER BY + LIMIT 복합
  *   8. DROP TABLE
  *   9. EXPLAIN 확장 (UPDATE, DROP)
+ *  10. INDEX_RANGE (id 범위 조회 · 경계 · LIMIT · 삭제 후)
  */
 
 #include <stdio.h>
@@ -182,6 +183,9 @@ static void test_update_system_id_rejected(void) {
 
 /* ════════════════════════════════════════════════════════════ */
 /*  4. 비교 연산자 (>, <, >=, <=, !=)                          */
+/*                                                             */
+/*  다섯 연산자가 전부 같은 코드 경로(비교 필터 + TABLE_SCAN)를 */
+/*  타고 입력만 다르므로, 블록을 반복하지 않고 표로 돌린다.     */
 /* ════════════════════════════════════════════════════════════ */
 static void test_comparison_operators(void) {
     printf(CLR_YELLOW "\n[test_comparison_operators]" CLR_RESET "\n");
@@ -190,56 +194,37 @@ static void test_comparison_operators(void) {
     create_and_populate(&pager, 5);
     /* id=1 Alice 25, id=2 Bob 30, id=3 Charlie 20, id=4 Dave 35, id=5 Eve 28 */
 
-    exec_result_t r;
+    static const struct {
+        const char *sql;
+        const char *present[3];   /* NULL 로 끝나는 목록 */
+        const char *absent[3];
+    } cases[] = {
+        { "SELECT * FROM users WHERE age > 28",
+          { "Bob", "Dave", NULL }, { "Alice", "Charlie", NULL } },
+        { "SELECT * FROM users WHERE age < 26",
+          { "Alice", "Charlie", NULL }, { "Bob", "Dave", NULL } },
+        { "SELECT * FROM users WHERE age >= 30",
+          { "Bob", "Dave", NULL }, { "Alice", "Eve", NULL } },
+        { "SELECT * FROM users WHERE age <= 25",
+          { "Alice", "Charlie", NULL }, { "Bob", "Eve", NULL } },
+        { "SELECT * FROM users WHERE age != 25",
+          { "Bob", "Charlie", NULL }, { "Alice", NULL, NULL } },
+    };
 
-    /* age > 28 => Bob(30), Dave(35) */
-    r = db_execute(&pager, "SELECT * FROM users WHERE age > 28");
-    ASSERT_EQ_INT(r.status, 0, "SELECT age > 28");
-    if (r.out_buf) {
-        ASSERT_TRUE(strstr(r.out_buf, "Bob") != NULL, "Bob in age>28");
-        ASSERT_TRUE(strstr(r.out_buf, "Dave") != NULL, "Dave in age>28");
-        ASSERT_TRUE(strstr(r.out_buf, "Alice") == NULL, "Alice not in age>28");
-        ASSERT_TRUE(strstr(r.out_buf, "Charlie") == NULL, "Charlie not in age>28");
-        free(r.out_buf);
-    }
-
-    /* age < 26 => Alice(25), Charlie(20) */
-    r = db_execute(&pager, "SELECT * FROM users WHERE age < 26");
-    ASSERT_EQ_INT(r.status, 0, "SELECT age < 26");
-    if (r.out_buf) {
-        ASSERT_TRUE(strstr(r.out_buf, "Alice") != NULL, "Alice in age<26");
-        ASSERT_TRUE(strstr(r.out_buf, "Charlie") != NULL, "Charlie in age<26");
-        ASSERT_TRUE(strstr(r.out_buf, "Bob") == NULL, "Bob not in age<26");
-        free(r.out_buf);
-    }
-
-    /* age >= 30 => Bob(30), Dave(35) */
-    r = db_execute(&pager, "SELECT * FROM users WHERE age >= 30");
-    ASSERT_EQ_INT(r.status, 0, "SELECT age >= 30");
-    if (r.out_buf) {
-        ASSERT_TRUE(strstr(r.out_buf, "Bob") != NULL, "Bob in age>=30");
-        ASSERT_TRUE(strstr(r.out_buf, "Dave") != NULL, "Dave in age>=30");
-        ASSERT_TRUE(strstr(r.out_buf, "Alice") == NULL, "Alice not in age>=30");
-        free(r.out_buf);
-    }
-
-    /* age <= 25 => Alice(25), Charlie(20) */
-    r = db_execute(&pager, "SELECT * FROM users WHERE age <= 25");
-    ASSERT_EQ_INT(r.status, 0, "SELECT age <= 25");
-    if (r.out_buf) {
-        ASSERT_TRUE(strstr(r.out_buf, "Alice") != NULL, "Alice in age<=25");
-        ASSERT_TRUE(strstr(r.out_buf, "Charlie") != NULL, "Charlie in age<=25");
-        ASSERT_TRUE(strstr(r.out_buf, "Bob") == NULL, "Bob not in age<=25");
-        free(r.out_buf);
-    }
-
-    /* age != 25 => Bob(30), Charlie(20), Dave(35), Eve(28) */
-    r = db_execute(&pager, "SELECT * FROM users WHERE age != 25");
-    ASSERT_EQ_INT(r.status, 0, "SELECT age != 25");
-    if (r.out_buf) {
-        ASSERT_TRUE(strstr(r.out_buf, "Bob") != NULL, "Bob in age!=25");
-        ASSERT_TRUE(strstr(r.out_buf, "Alice") == NULL, "Alice not in age!=25");
-        free(r.out_buf);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        exec_result_t r = db_execute(&pager, cases[i].sql);
+        ASSERT_EQ_INT(r.status, 0, cases[i].sql);
+        if (r.out_buf) {
+            for (int j = 0; j < 3 && cases[i].present[j]; j++) {
+                ASSERT_TRUE(strstr(r.out_buf, cases[i].present[j]) != NULL,
+                            cases[i].sql);
+            }
+            for (int j = 0; j < 3 && cases[i].absent[j]; j++) {
+                ASSERT_TRUE(strstr(r.out_buf, cases[i].absent[j]) == NULL,
+                            cases[i].sql);
+            }
+            free(r.out_buf);
+        }
     }
 
     teardown_test_db(&pager, "cmp_ops");
@@ -458,6 +443,99 @@ static void test_explain_extended(void) {
 /* ════════════════════════════════════════════════════════════ */
 /*  메인                                                       */
 /* ════════════════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════════════════ */
+/*  11. INDEX_RANGE — id 범위 조회 (B+tree 리프 순회)          */
+/*                                                             */
+/*  이 저장소가 "범위 질의를 힙 스캔에서 인덱스 스캔으로 바꿨다"*/
+/*  고 주장하는 경로다. 계획이 실제로 INDEX_RANGE 인지, 그리고  */
+/*  그 경로가 내놓는 행이 힙 스캔과 같은지를 함께 본다.         */
+/* ════════════════════════════════════════════════════════════ */
+
+/* 출력 버퍼에서 데이터 행 수를 센다 (헤더 2줄 제외) */
+static int count_rows(const exec_result_t *r) {
+    if (r->out_buf == NULL) return 0;
+    int lines = 0;
+    for (size_t i = 0; i < r->out_len; i++) if (r->out_buf[i] == '\n') lines++;
+    return lines > 2 ? lines - 2 : 0;
+}
+
+static void populate_ids(pager_t *pager, int n) {
+    exec_result_t r = db_execute(pager, "CREATE TABLE t (name VARCHAR(16), v INT)");
+    assert(r.status == 0);
+    if (r.out_buf) free(r.out_buf);
+    for (int i = 1; i <= n; i++) {
+        char sql[128];
+        snprintf(sql, sizeof(sql), "INSERT INTO t VALUES ('r%d', %d)", i, i);
+        r = db_execute(pager, sql);
+        assert(r.status == 0);
+        if (r.out_buf) free(r.out_buf);
+    }
+}
+
+static void test_index_range(void) {
+    printf(CLR_YELLOW "\n[test_index_range]" CLR_RESET "\n");
+    pager_t pager;
+    setup_test_db(&pager, "index_range");
+    populate_ids(&pager, 200);   /* id = 1..200 */
+
+    exec_result_t r;
+
+    /* 계획이 정말 INDEX_RANGE 로 잡히는가 */
+    r = db_execute(&pager, "EXPLAIN SELECT * FROM t WHERE id BETWEEN 10 AND 20");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "INDEX_RANGE") != NULL,
+                "BETWEEN -> INDEX_RANGE 계획");
+    if (r.out_buf) free(r.out_buf);
+
+    r = db_execute(&pager, "EXPLAIN SELECT * FROM t WHERE id >= 10");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "INDEX_RANGE") != NULL,
+                "id >= N -> INDEX_RANGE 계획");
+    if (r.out_buf) free(r.out_buf);
+
+    /* 경계 포함/제외가 행 수에 그대로 나타나는가 */
+    static const struct { const char *sql; int expect; } cases[] = {
+        { "SELECT * FROM t WHERE id BETWEEN 10 AND 20",        11 },
+        { "SELECT * FROM t WHERE id >= 191",                   10 },
+        { "SELECT * FROM t WHERE id > 191",                     9 },
+        { "SELECT * FROM t WHERE id <= 5",                      5 },
+        { "SELECT * FROM t WHERE id < 5",                       4 },
+        { "SELECT * FROM t WHERE id BETWEEN 100 AND 100",       1 },
+        { "SELECT * FROM t WHERE id BETWEEN 201 AND 300",       0 },
+        { "SELECT * FROM t WHERE id BETWEEN 150 AND 120",       0 },
+        { "SELECT * FROM t WHERE id >= 1 LIMIT 7",              7 },
+        { "SELECT * FROM t WHERE id >= 1 LIMIT 0",              0 },
+        { "SELECT * FROM t WHERE id >= 195 LIMIT 100",          6 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        r = db_execute(&pager, cases[i].sql);
+        ASSERT_EQ_INT(r.status, 0, cases[i].sql);
+        ASSERT_EQ_INT(count_rows(&r), cases[i].expect, cases[i].sql);
+        if (r.out_buf) free(r.out_buf);
+    }
+
+    /* 인덱스 경로와 힙 스캔 경로가 같은 행을 같은 순서로 내는가.
+     * WHERE 없는 SELECT 는 힙 순서(=id 순서)로 전부 내므로, 범위 조회
+     * 결과가 그 앞부분과 글자 단위로 같아야 한다. */
+    r = db_execute(&pager, "SELECT * FROM t WHERE id BETWEEN 1 AND 30");
+    exec_result_t full = db_execute(&pager, "SELECT * FROM t LIMIT 30");
+    ASSERT_TRUE(r.out_buf && full.out_buf
+                && strcmp(r.out_buf, full.out_buf) == 0,
+                "INDEX_RANGE 결과가 힙 스캔(LIMIT 30) 결과와 동일");
+    if (r.out_buf) free(r.out_buf);
+    if (full.out_buf) free(full.out_buf);
+
+    /* 삭제된 행은 톰스톤이라 인덱스에서 빠지고 범위 결과에서도 빠져야 한다 */
+    r = db_execute(&pager, "DELETE FROM t WHERE id = 15");
+    ASSERT_EQ_INT(r.status, 0, "DELETE id=15");
+    if (r.out_buf) free(r.out_buf);
+    r = db_execute(&pager, "SELECT * FROM t WHERE id BETWEEN 10 AND 20");
+    ASSERT_EQ_INT(count_rows(&r), 10, "삭제 후 범위 결과 10행");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "r15") == NULL,
+                "삭제된 행이 범위 결과에 없다");
+    if (r.out_buf) free(r.out_buf);
+
+    teardown_test_db(&pager, "index_range");
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -472,6 +550,7 @@ int main(void)
     test_order_by_limit();
     test_drop_table();
     test_explain_extended();
+    test_index_range();
 
     printf("\n");
     printf("========================================\n");

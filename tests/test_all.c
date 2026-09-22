@@ -102,7 +102,8 @@ static void test_pager(void) {
     {
         pager_t p;
         setup_db(&p);
-        ASSERT(p.header.page_size > 0, "page_size > 0");
+        /* page_size 는 sysconf 값을 그대로 넣은 상수라 검사할 게 없다.
+         * 대신 reopen 후에도 같은 값이 살아남는지를 아래에서 본다. */
         ASSERT(p.header.next_page_id == 3, "initial next_page_id == 3");
         pager_close(&p);
 
@@ -110,6 +111,8 @@ static void test_pager(void) {
         pager_t p2;
         assert(pager_open(&p2, TEST_DB, false) == 0);
         ASSERT(p2.header.next_page_id == 3, "reopen next_page_id == 3");
+        ASSERT(p2.header.page_size == p.header.page_size,
+               "reopen page_size matches on-disk header");
         ASSERT(memcmp(p2.header.magic, DB_MAGIC, 7) == 0, "magic matches");
         pager_close(&p2);
         unlink(TEST_DB);
