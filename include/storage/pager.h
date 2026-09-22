@@ -57,6 +57,10 @@ typedef struct {
                                            * false면 INSERT가 힙 체인 재탐색을 생략한다.
                                            * 스레드 경합 시 최악의 경우 불필요한 탐색
                                            * 1회 또는 재활용 1회 지연만 발생 (정합성 무관) */
+    uint64_t    heap_chain_rescan_count;  /* find_heap_page()가 힙 체인 전체를
+                                           * 재탐색한 횟수 (계측 전용).
+                                           * 순차 INSERT 회귀 테스트가 이 값이
+                                           * 0에 머무는지 확인한다. */
     frame_t     frames[MAX_FRAMES];  /* 페이지 프레임 배열 */
     int         frame_buckets[FRAME_HASH_BUCKETS]; /* page_id -> frame_idx 해시 인덱스 */
     uint64_t    tick;                /* 전역 틱 카운터 (LRU 추적용) */

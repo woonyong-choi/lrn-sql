@@ -127,6 +127,13 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
     }
 #endif
 
+    /*
+     * 계측 전용: 여기까지 왔다는 것은 힌트 게이트를 통과해 힙 체인 전체를
+     * 다시 걷는다는 뜻이다. 회귀 테스트(tests/test_step3_regression.c)가
+     * DELETE 없는 순차 INSERT에서 이 값이 0에 머무는지 검사한다.
+     */
+    pager->heap_chain_rescan_count++;
+
     uint32_t pid = pager->header.first_heap_page_id;
     while (pid != 0) {
         uint8_t *page = pager_get_page_rlatch(pager, pid);
