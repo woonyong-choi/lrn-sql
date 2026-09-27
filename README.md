@@ -75,31 +75,17 @@ flowchart TD
     PAGER["pager.c — Buffer Pool<br/>256 frame · pin · dirty · LRU<br/>페이지 단위 rwlatch"] --> DISK[("DB 파일")]
 ```
 
-- 설계 노트(버린 대안과 이유, 검증의 한계, 다음 병목): [`docs/design.md`](docs/design.md)
+- 설계 노트(구조 선택, 검증의 한계, 다음 병목): [`docs/design.md`](docs/design.md)
 - 빌드 옵션·플랫폼 문제·테스트 스위트 상세: [`docs/build-and-test.md`](docs/build-and-test.md)
 - 문서 목차: [`docs/README.md`](docs/README.md)
 
-## 핵심 결정과 트레이드오프
+## 구현에서 고른 구조
 
-**1. 인덱스를 해시가 아니라 B+Tree로.**
-`BETWEEN`이나 `id >= 996` 같은 범위 질의를 지원하려면 키가 정렬된 상태로 저장되어야 하는데 해시는 순서를 보존하지 못합니다. 노드 하나를 디스크 페이지 하나에 대응시키기에도 B+Tree가 맞습니다. 버린 대안은 해시 인덱스(점 조회는 더 빠르지만 범위 불가)와 정렬 배열(삽입마다 이동 비용). 대가는 분할·병합·언더플로 복구를 전부 직접 구현해야 한다는 것입니다.
-근거: [`src/storage/bptree.c`](src/storage/bptree.c), [`docs/design.md`](docs/design.md) §2. 범위 질의 기울기 `O(N^0.88) → O(N^0.19)`.
-
-**2. 행 저장을 밀집 배열이 아니라 슬롯 페이지 힙으로.**
-페이지 안에 slot directory를 두면 삭제된 슬롯을 재사용할 수 있고, 행이 옮겨져도 `(page_id, slot_id)` 좌표가 그대로 유지되어 B+Tree 리프가 가리키는 값이 무효가 되지 않습니다. 버린 대안은 밀집 배열(삭제 시 뒤 행을 당겨야 해서 인덱스가 전부 깨짐)과 인덱스 구성 테이블(리프에 행을 직접 저장 — 리프 분할이 행 이동을 일으킴).
-근거: [`src/storage/table.c`](src/storage/table.c), [`docs/design.md`](docs/design.md) §1.
-
-**3. 동시성을 전역 mutex 하나가 아니라 latch와 lock 두 층으로.**
-latch는 버퍼 풀 프레임을 읽고 쓰는 짧은 구간에만 유지하고, 논리적 행·범위 lock은 문장이 끝날 때까지 유지합니다(Strict 2PL). 전역 mutex 하나면 구현은 단순하지만 읽기끼리도 직렬화되므로 페이지 내용 보호와 트랜잭션 경계를 분리했습니다. 현재 검사는 S/X 호환성, writer 대기, 범위 충돌, 동시 INSERT와 HTTP 경로를 다룹니다.
-근거: [`src/storage/pager.c`](src/storage/pager.c), [`src/server/lock_table.c`](src/server/lock_table.c), [`docs/design.md`](docs/design.md) §3.
-
-**4. 성능 주장을 절대 배수가 아니라 전 구간 기울기로.**
-처음에는 "×215 빨라졌다"고 적었습니다. 그런데 같은 스크립트를 다시 돌릴 때마다 ×57, ×107로 값이 흔들렸습니다. 절대 배수는 캐시 크기와 메모리 대역폭을 따라 움직이는 숫자라 다른 기계에서 재현되지 않습니다. 대신 행 수가 2배가 될 때 시간이 몇 배가 되는가를 log-log 직선으로 맞춘 지수를 결론으로 삼습니다 — 알고리즘의 성질이라 기계가 바뀌어도 남습니다.
-근거: [`bench/scaling.md`](bench/scaling.md), `make bench`.
-
-**5. 개선 전 동작을 과거 커밋이 아니라 컴파일 가드로 되살려 비교.**
-`-DMINIDB_DISABLE_FREE_HINT`, `-DMINIDB_DISABLE_INDEX_RANGE`로 현재 소스에서 이전 접근 경로만 되살립니다. 컴파일러 옵션과 주변 코드가 같은 상태에서 전후를 비교할 수 있고, 회귀 테스트의 대조군으로도 그대로 씁니다(힌트를 끄면 순차 INSERT 20,000건에서 힙 체인 재탐색이 0회 → 63회).
-근거: [`Makefile`](Makefile), [`tests/test_step3_regression.c`](tests/test_step3_regression.c).
+- **B+Tree 인덱스** — 범위 질의를 위해 키 순서를 보존하고, 노드 하나를 디스크 페이지 하나에 맞춥니다. 범위 질의 기울기는 `O(N^0.88) → O(N^0.19)`로 측정했습니다. → [`src/storage/bptree.c`](src/storage/bptree.c), [`docs/design.md`](docs/design.md) §2
+- **슬롯 페이지 힙** — 삭제한 슬롯을 재사용하고, 행의 `(page_id, slot_id)` 좌표를 유지해 B+Tree 리프가 가리키는 위치가 바뀌지 않게 합니다. → [`src/storage/table.c`](src/storage/table.c), [`docs/design.md`](docs/design.md) §1
+- **latch와 lock 분리** — 페이지 보호는 짧은 latch로, 행·범위의 논리적 잠금은 문장이 끝날 때까지 유지합니다. S/X 호환성, writer 대기, 범위 충돌, 동시 INSERT를 검사합니다. → [`src/storage/pager.c`](src/storage/pager.c), [`src/server/lock_table.c`](src/server/lock_table.c)
+- **성능 비교** — 단일 실행의 배수 대신 행 수별 실행 시간을 log-log 기울기로 비교합니다. 입력 크기가 바뀌어도 접근 경로의 변화를 확인하려는 기준입니다. → [`bench/scaling.md`](bench/scaling.md), `make bench`
+- **회귀 대조군** — `-DMINIDB_DISABLE_FREE_HINT`, `-DMINIDB_DISABLE_INDEX_RANGE`로 현재 소스에서 이전 접근 경로만 끄고 비교합니다. 같은 컴파일러와 주변 코드에서 전후를 재현합니다. → [`Makefile`](Makefile), [`tests/test_step3_regression.c`](tests/test_step3_regression.c)
 
 ![규모별 INSERT·Range 소요 시간 (양축 로그)](https://raw.githubusercontent.com/woonyong-choi/lrn-sql/main/docs/scaling.svg)
 
