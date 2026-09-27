@@ -3,6 +3,9 @@
 프로젝트 문서를 정리하는 디렉터리입니다.
 
 - `design.md`: **설계 노트** — 자료구조 선택 근거, 버린 대안과 이유, 정확성 검증 방법과 그 한계, 알려진 한계와 다음 병목
+- `build-and-test.md`: 빌드 옵션(sanitizer·재현용 컴파일 가드), macOS ASan 플랫폼 문제, 테스트 스위트별 검증 대상과 회귀 검사
+- `attribution.md`: 팀 과제 출처와 기여 경계, 개인 확장 커밋 목록
+- `benchmark-postgres.md`: PostgreSQL 대조 실험 전문 — 측정 조건, 결함 진단, 정직한 평가
 - `convention/`: 프로젝트 규칙과 문서 작성 기준
 - `csapp-11/`: CSAPP 11장 네트워크 학습 계획, 키워드 트리, 자료 정리, SQL API 구현 연결 가이드
 - `sql/`: 지난 주 MiniDB와 이번 주 SQL API 서버 구현을 연결하는 문서
