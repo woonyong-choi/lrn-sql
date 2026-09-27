@@ -1,204 +1,154 @@
-# lrn-sql — 디스크 기반 SQL 엔진
+# SQL 엔진 — C로 구현한 저장·조회 학습 프로젝트
 
-SQL 한 문장을 파싱해 실행 계획을 세우고, Slotted Page·B+Tree·Buffer Pool을 거쳐 디스크의 행을 직접 읽고 쓰는 C11 데이터베이스입니다. "DB가 안에서 무슨 일을 하는가"를 라이브러리 없이 끝까지 구현해 보려고 만들었습니다.
+SQL을 파싱해 실행 계획을 세우고, 페이지에 행을 저장한 뒤 B+Tree 인덱스로 조회하는 C11 학습용 데이터베이스 엔진입니다.
 
-![lrn-sql REPL 스크린샷](docs/screenshot.png)
+[![CI](https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml/badge.svg)](https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml)
 
-## 버전업된 모습
+- 5인 팀 과제에서 parser, planner, executor와 페이지·인덱스·잠금 계층 구현을 주도했고, 과제 이후 범위 조회와 회귀 검사를 추가했습니다.
+- 100만 행에서 드러난 반복 탐색과 잠금 누적을 gdb로 추적했습니다. 개선 전후는 단일 배수가 아니라 전 구간 기울기(INSERT `O(N^2.00) → O(N^1.19)`, 범위 질의 `O(N^0.88) → O(N^0.19)`)로 비교합니다.
+- 현재 공개 `main`에서 `make test-all`의 6개 스위트 534개 단언을 통과했습니다. CI는 Linux에서 ASAN·UBSAN을 함께 실행합니다.
 
-처음 만든 엔진은 10,000행 기준으로는 멀쩡해 보였습니다. **"시료가 작다"는 지적을 받고 규모를 1,000,000행으로 올리자 INSERT가 무너졌습니다.** 삽입 시간이 50k → 0.25초, 100k → 0.96초, 200k → 4.73초 — 행 수가 2배가 될 때마다 시간이 4배, O(N²)의 서명이었습니다.
+## 데모
 
-원인을 눈으로 못 찾아서 실행 중인 삽입 프로세스에 gdb를 붙여 스택을 샘플링했고, 그제서야 결함 2건이 잡혔습니다. 하나는 꼬리 페이지가 찰 때마다(약 90행마다) 삭제 슬롯 재활용을 위해 **DELETE가 한 번도 없었는데도 힙 체인 전체를 처음부터 다시 걷던** `find_heap_page`였습니다. 다른 하나는 서버 경로(`db.c`)는 문장 종료 시 lock을 풀지만 **REPL 경로(`main.c`)만 `lock_release_all()`을 빠뜨려** X-lock 엔트리가 lock 테이블에 영구 누적되던 것이었습니다. 스택 샘플 4회 중 4회가 그 해시 체인 탐색 위에 있었습니다. 두 번째 결함은 같은 autocommit 의미론을 두 경로에 따로 구현해 둔 탓이라, 성능 문제로 위장한 정확성 버그였다는 점이 뼈아팠습니다.
+테이블 생성 → INSERT 1,000건 → 건수 확인과 범위 SELECT를 파이프 입력으로 실행한 실제 출력입니다. 재현은 `bash scripts/demo_repl.sh`이고, 데모 빌드는 sanitizer 없는 `SANITIZE=`입니다.
 
-빈 슬롯 힌트(`heap_may_have_free_slots`)와 REPL의 Strict 2PL 준수로 고쳤습니다. 별도로 범위 질의가 `id` 조건에서도 힙을 전부 훑던 것을 B+Tree 리프 순회(`INDEX_RANGE`)로 바꿨습니다.
+![lrn-sql 구동 GIF](https://raw.githubusercontent.com/woonyong-choi/lrn-sql/main/docs/demo.gif)
 
-### 증거는 배수가 아니라 기울기로 남깁니다
+```
+$ time (scripts/gen_inserts.sh 1000 | build-demo/minidb /tmp/demo.db | tail -2)
+minidb> 1행 삽입 완료 (id=1000)
+  real 0.027s
+$ build-demo/minidb /tmp/demo.db <<'SQL'
+> .debug
+> SELECT * FROM users WHERE id >= 996;
+id | name | email | age
+-----------+------------+------------+-----------
+996 | user996 | user996@example.com | 56
+1000 | user1000 | user1000@example.com | 20
+5행 조회 (INDEX_RANGE)
+[debug] 소요: 0.01ms | 페이지 로드: 2 (히트: 1, 미스: 1) | 디스크 기록: 0
+```
 
-처음에는 "×215 빨라졌다"고 적었습니다. 그런데 같은 스크립트를 다시 돌릴 때마다 ×57, ×107 로 값이 흔들렸습니다. **절대 배수는 캐시 크기와 메모리 대역폭을 따라 움직이는 숫자라, 다른 기계에서 재현되지 않습니다.**
+## 빠르게 실행하기
 
-대신 **행 수가 2배가 될 때 시간이 몇 배가 되는가**를 봅니다. 이건 알고리즘의 성질이라 기계가 바뀌어도 남습니다. 전 구간을 log-log 직선으로 맞춘 지수가 결론입니다.
+GCC, Make, pthread가 필요합니다. 아래는 2026-09-23에 전부 실행해 통과한 명령입니다.
+
+```sh
+git clone https://github.com/woonyong-choi/lrn-sql.git && cd lrn-sql
+
+make SANITIZE= BUILD_DIR=build-nosan all          # 빌드
+printf "CREATE TABLE users (name VARCHAR(32), age INT)\nINSERT INTO users VALUES ('Alice', 25)\nEXPLAIN SELECT * FROM users WHERE id = 1\nSELECT * FROM users WHERE id = 1\n.exit\n" | ./build-nosan/minidb demo.db
+
+make test-all      # 534개 단언
+make bench         # 규모별 기울기 재측정 (36초)
+bash scripts/demo_repl.sh   # 위 데모 재현 (13초)
+```
+
+REPL에서는 `.stats`가 페이지·트리 통계, `.debug`가 쿼리별 페이지 접근, `.btree`가 인덱스 구조를 보여 줍니다. `.exit` 또는 Ctrl-D로 종료하면 dirty 페이지를 기록합니다.
+
+기본 빌드는 sanitizer를 켭니다. **macOS 26(Darwin 25)에서는 ASan 바이너리가 `main()`에 닿기 전에 멈추는 플랫폼 문제가 있어** `Makefile`이 UBSan만 켭니다(원인과 스택은 [`docs/build-and-test.md`](docs/build-and-test.md)). ASan까지 켠 검사는 Dev Container나 Linux에서 돌립니다.
+
+## 구조
+
+```
+src/sql/       parser.c · planner.c · executor.c      문장 → 접근 경로 → 실행
+src/storage/   pager.c · table.c · bptree.c · schema.c  버퍼 풀 · 슬롯 힙 · B+Tree
+src/server/    server.c · http.c · lock_table.c       연결당 스레드 · HTTP · Strict 2PL
+tests/         6개 스위트 534개 단언
+bench/         scaling.py(규모별 기울기) · PostgreSQL 대조군 하니스
+docs/          design.md(설계 노트) · benchmark-postgres.md · build-and-test.md
+```
+
+```mermaid
+flowchart TD
+    REPL["REPL (main.c)"] --> DB
+    HTTP["HTTP 서버 (server.c, http.c)<br/>연결당 스레드"] --> DB
+    DB["db.c — 문장 경계<br/>실행 후 lock 일괄 해제 (Strict 2PL)"] --> PARSER
+    PARSER["parser.c<br/>SQL → AST"] --> PLANNER
+    PLANNER["planner.c<br/>규칙 기반 접근 경로<br/>INDEX_LOOKUP · INDEX_RANGE · TABLE_SCAN"] --> EXEC
+    EXEC["executor.c<br/>계획 실행 · 행 직렬화"] --> LOCK
+    EXEC --> BTREE
+    EXEC --> TABLE
+    LOCK["lock_table.c<br/>행·범위 S/X lock<br/>writer 대기 카운터 · 3초 타임아웃"]
+    BTREE["bptree.c<br/>B+Tree 점 조회 · 리프 체인 순회<br/>latch coupling"] --> PAGER
+    TABLE["table.c<br/>슬롯 페이지 힙<br/>빈 슬롯 재활용 힌트"] --> PAGER
+    PAGER["pager.c — Buffer Pool<br/>256 frame · pin · dirty · LRU<br/>페이지 단위 rwlatch"] --> DISK[("DB 파일")]
+```
+
+- 설계 노트(버린 대안과 이유, 검증의 한계, 다음 병목): [`docs/design.md`](docs/design.md)
+- 빌드 옵션·플랫폼 문제·테스트 스위트 상세: [`docs/build-and-test.md`](docs/build-and-test.md)
+- 문서 목차: [`docs/README.md`](docs/README.md)
+
+## 핵심 결정과 트레이드오프
+
+**1. 인덱스를 해시가 아니라 B+Tree로.**
+`BETWEEN`이나 `id >= 996` 같은 범위 질의를 지원하려면 키가 정렬된 상태로 저장되어야 하는데 해시는 순서를 보존하지 못합니다. 노드 하나를 디스크 페이지 하나에 대응시키기에도 B+Tree가 맞습니다. 버린 대안은 해시 인덱스(점 조회는 더 빠르지만 범위 불가)와 정렬 배열(삽입마다 이동 비용). 대가는 분할·병합·언더플로 복구를 전부 직접 구현해야 한다는 것입니다.
+근거: [`src/storage/bptree.c`](src/storage/bptree.c), [`docs/design.md`](docs/design.md) §2. 범위 질의 기울기 `O(N^0.88) → O(N^0.19)`.
+
+**2. 행 저장을 밀집 배열이 아니라 슬롯 페이지 힙으로.**
+페이지 안에 slot directory를 두면 삭제된 슬롯을 재사용할 수 있고, 행이 옮겨져도 `(page_id, slot_id)` 좌표가 그대로 유지되어 B+Tree 리프가 가리키는 값이 무효가 되지 않습니다. 버린 대안은 밀집 배열(삭제 시 뒤 행을 당겨야 해서 인덱스가 전부 깨짐)과 인덱스 구성 테이블(리프에 행을 직접 저장 — 리프 분할이 행 이동을 일으킴).
+근거: [`src/storage/table.c`](src/storage/table.c), [`docs/design.md`](docs/design.md) §1.
+
+**3. 동시성을 전역 mutex 하나가 아니라 latch와 lock 두 층으로.**
+latch는 버퍼 풀 프레임을 읽고 쓰는 짧은 구간에만 유지하고, 논리적 행·범위 lock은 문장이 끝날 때까지 유지합니다(Strict 2PL). 전역 mutex 하나면 구현은 단순하지만 읽기끼리도 직렬화되므로 페이지 내용 보호와 트랜잭션 경계를 분리했습니다. 현재 검사는 S/X 호환성, writer 대기, 범위 충돌, 동시 INSERT와 HTTP 경로를 다룹니다.
+근거: [`src/storage/pager.c`](src/storage/pager.c), [`src/server/lock_table.c`](src/server/lock_table.c), [`docs/design.md`](docs/design.md) §3.
+
+**4. 성능 주장을 절대 배수가 아니라 전 구간 기울기로.**
+처음에는 "×215 빨라졌다"고 적었습니다. 그런데 같은 스크립트를 다시 돌릴 때마다 ×57, ×107로 값이 흔들렸습니다. 절대 배수는 캐시 크기와 메모리 대역폭을 따라 움직이는 숫자라 다른 기계에서 재현되지 않습니다. 대신 행 수가 2배가 될 때 시간이 몇 배가 되는가를 log-log 직선으로 맞춘 지수를 결론으로 삼습니다 — 알고리즘의 성질이라 기계가 바뀌어도 남습니다.
+근거: [`bench/scaling.md`](bench/scaling.md), `make bench`.
+
+**5. 개선 전 동작을 과거 커밋이 아니라 컴파일 가드로 되살려 비교.**
+`-DMINIDB_DISABLE_FREE_HINT`, `-DMINIDB_DISABLE_INDEX_RANGE`로 현재 소스에서 이전 접근 경로만 되살립니다. 컴파일러 옵션과 주변 코드가 같은 상태에서 전후를 비교할 수 있고, 회귀 테스트의 대조군으로도 그대로 씁니다(힌트를 끄면 순차 INSERT 20,000건에서 힙 체인 재탐색이 0회 → 63회).
+근거: [`Makefile`](Makefile), [`tests/test_step3_regression.c`](tests/test_step3_regression.c).
+
+![규모별 INSERT·Range 소요 시간 (양축 로그)](https://raw.githubusercontent.com/woonyong-choi/lrn-sql/main/docs/scaling.svg)
 
 | INSERT | 전 구간 기울기 | 50k | 100k | 200k | 400k |
 |---|---|---:|---:|---:|---:|
 | 개선 전 (`e640fdd` 직전) | **O(N^2.00)** | 0.131s | 0.461s | 1.901s | 8.415s |
-| | 배가 계수 | — | 3.51x | 4.13x | 4.43x |
 | 개선 후 | **O(N^1.19)** | 0.071s | 0.157s | 0.350s | 0.863s |
-| | 배가 계수 | — | 2.21x | 2.23x | 2.46x |
 
 | Range 질의 (각 1,000행 반환) | 전 구간 기울기 | 50k | 100k | 200k | 400k |
 |---|---|---:|---:|---:|---:|
 | 힙 스캔 (`-DMINIDB_DISABLE_INDEX_RANGE`) | **O(N^0.88)** | 0.062s | 0.118s | 0.183s | 0.412s |
 | B+Tree 리프 순회 (`INDEX_RANGE`) | **O(N^0.19)** | 0.026s | 0.029s | 0.031s | 0.039s |
 
-O(N^2.00)이 O(N^1.19)로, O(N^0.88)이 O(N^0.19)로 내려온 것이 실제 주장입니다. 쌍별 배가 계수는 한 번의 잡음에 흔들리지만 전 구간 기울기는 재실행해도 거의 그대로입니다.
-
-![규모별 INSERT·Range 소요 시간 (양축 로그)](docs/scaling.svg)
-
-`make bench`로 약 1분에 다시 냅니다. "개선 전"은 수정 커밋 `e640fdd`의 직전 코드를 `git archive`로 되살려 같은 컴파일러로 빌드한 것이고, "힙 스캔"은 현재 소스를 `-DMINIDB_DISABLE_INDEX_RANGE`로 빌드한 것입니다. Range는 반환 행 수가 1,000으로 고정이므로, 시간이 N을 따라 늘면 접근 경로가 테이블 크기에 비례한다는 뜻입니다.[^scaling]
-
-단일 규모의 절대 수치가 필요하면 `make bench-1m`입니다. 이 저장소에서 마지막으로 잰 값은 1M 행 기준 INSERT 632,962 ops/sec, Range 3,267 ops/sec(힙 스캔 108 ops/sec)입니다(2026-09-22, Apple M4, -O2, median of 3).
-
-정직하게 덧붙이면, 개선 후 수치가 PostgreSQL(1M INSERT fsync=off 10,919 ops/sec)보다 높은 것은 성능 우위가 아닙니다. 이 엔진은 **WAL이 없어** dirty 페이지를 캐시 축출·종료 시에만 디스크로 내리므로 내구성 조건이 다릅니다. 같은 조건의 성능 비교로 읽으면 안 됩니다.[^bench]
-
-## 구동모습
-
-테이블 생성 → INSERT 1,000건 → 건수 확인과 범위 SELECT를 파이프 입력으로 실행한 실제 출력입니다. INSERT 1,000건 전체에 0.010s(`time`), 범위 SELECT는 `INDEX_RANGE` 경로로 0.02ms(`.debug` 출력)가 걸렸습니다. 데모 빌드는 sanitizer 없는 -O2(`SANITIZE=`)이며 재현은 `bash scripts/demo_repl.sh`입니다.
-
-![lrn-sql 구동 GIF](docs/demo.gif)
-
-## 메인 기술
-
-- **Slotted Page 힙** — 페이지 안에 slot directory를 두고 삭제된 slot을 재사용합니다. 고정 `row_size` 직렬화. → [`src/storage/table.c`](src/storage/table.c)
-- **B+Tree 점 조회와 범위 스캔** — 분할·삭제를 처리하고, 리프의 `next_leaf_page_id` 형제 포인터를 따라 오름차순 순회합니다. 리프 이동은 **다음 리프 rlatch를 먼저 잡고 현재를 해제**하는 leaf-chain latch coupling입니다. → [`src/storage/bptree.c`](src/storage/bptree.c)
-- **규칙 기반 planner** — `id` 점 조건은 `INDEX_LOOKUP`, `id` 범위 조건(`BETWEEN`, `>=`, `<`)은 `INDEX_RANGE`, 그 밖은 `TABLE_SCAN`으로 접근 경로를 고릅니다. 비용 기반이 아닌 규칙 기반입니다. → [`src/sql/planner.c`](src/sql/planner.c)
-- **pin·dirty·LRU Buffer Pool** — 256개 frame을 관리하며 pin된 페이지는 교체 대상에서 제외합니다. → [`src/storage/pager.c`](src/storage/pager.c)
-- **Strict 2PL 행·범위 lock** — S/X lock 호환성과 범위 lock으로 phantom insert를 막고, 문장 종료 시 전부 해제하는 autocommit 경로입니다. → [`src/server/lock_table.c`](src/server/lock_table.c)
-- **재현용 컴파일 가드** — `-DMINIDB_DISABLE_INDEX_RANGE`, `-DMINIDB_DISABLE_FREE_HINT`로 개선 전 동작을 그대로 빌드해 전/후를 같은 바이너리 계열에서 비교합니다.
-
-**왜 이 자료구조를 골랐고 무엇을 버렸는지, 지금 어디가 비어 있는지**는 [`docs/design.md`](docs/design.md)에 적었습니다 — 버린 대안(밀집 배열 힙, 인덱스 구성 테이블, 해시 인덱스, 정렬 배열)과 그 이유, property test가 닿지 못하는 경로, 다음에 무너질 지점까지.
-
-## 계획
-
-- WAL을 넣어 갑작스러운 중단에서의 crash recovery를 검증한다. 지금은 정상 종료 후 재열기만 보장한다.
-- secondary index를 추가하면 planner를 규칙 기반에서 **선택도 기반 비용 모델**로 바꾼다.
-- 여러 문장을 묶는 명시적 트랜잭션(`BEGIN`/`COMMIT`)을 지원하면 지금의 문장 단위 Strict 2PL을 트랜잭션 단위로 확장한다.
-- 1M을 넘는 규모에서 DB 파일이 페이지 캐시를 벗어나면(현재 1M ≈ 52MB) 디스크가 실제 병목인 구간을 다시 측정한다.
-
-## 링크
-
-- [SQL 엔진 구현 Wiki](https://docs.woonyong.com/wiki/lrn-sql/)
-- [설계 노트 — 무엇을 고르고 무엇을 버렸나](docs/design.md)
-- [설계 문서 목차](docs/README.md)
-- [PostgreSQL 대조 실험 전문](docs/benchmark-postgres.md)
-- [팀 원본 저장소 (Jungle-12-303/wk08_1)](https://github.com/Jungle-12-303/wk08_1)
-- [CI 실행 기록](https://github.com/woonyong-choi/lrn-sql/actions)
-
-## 담당
-
-**크래프톤 정글 팀 과제(원본: [Jungle-12-303/wk08_1](https://github.com/Jungle-12-303/wk08_1))에서 시작했고, 종료 후 개인 저장소에서 계속 수정·학습·확장하고 있습니다.**
-
-| 항목 | 내용 |
-|---|---|
-| 원본 팀 저장소 | [Jungle-12-303/wk08_1](https://github.com/Jungle-12-303/wk08_1) |
-| 팀 과제 기간 | 2026-04-16 ~ 2026-05-08 (커밋 `40327ef` ~ `93114c8`). 다른 팀원의 마지막 커밋은 2026-04-22 |
-| 팀 구성 | 5인. `main` 에 병합된 기여자는 4인(최우녕·정범진·이호준·최현진)이고, 나머지 1인의 커밋은 병합되지 않은 브랜치에 남아 있다 — `git shortlog -sne --all` 로 확인 |
-| **본인 담당** | **저장소 전반의 엔진 코드(parser·planner·executor·pager·bptree·table·lock_table)를 개인 주도로 대부분 직접 구현** |
-
-팀 코드 전체를 개인 구현으로 주장하지 않습니다. 팀 기간의 기여 구분은 원본 저장소의 커밋 저자와 파일별 diff로 확인합니다.
-
-### 개인 확장 (팀 과제 종료 후)
-
-**커밋 범위: [`f70b243`](https://github.com/woonyong-choi/lrn-sql/commit/f70b243) (2026-08-01) ~ `7f6cb84` (2026-09-22), 21개 커밋.** `git log --author` 기준입니다.[^authors]
-
-| 무엇이 달라졌나 | 커밋 | 파일 |
-|---|---|---|
-| B+Tree 인덱스 **범위 스캔**(`INDEX_RANGE`) 추가 — `BETWEEN`·부등호 파싱, 접근 경로, 리프 순회 | `7ea5a09` | `bptree.c`, `parser.c`, `planner.c`, `executor.c` |
-| 1M 행 INSERT의 **O(N²) 결함 2건** 수정 — 힙 재탐색 힌트, REPL lock 해제 누락 | `e640fdd` | `table.c`, `pager.c`, `main.c`, `executor.c` |
-| **sanitizer 선택 빌드**(ASAN/UBSAN)와 224개 테스트를 묶는 CI 게이트 도입 | `f814357`, `f862e3e` | `Makefile`, `.github/workflows/ci.yml` |
-| 저장소 정리 — 빌드 산출물·Python 캐시·작업용 스테이징 폴더 제거 | `9b92a14`, `df55747` | `.gitignore` 외 |
-| 문서 — 저장 구조 선택 근거, 실행 방법, 출처·기여 경계 명시 | `f70b243`, `cce95b9`, `413db92`, `5b3d044` | `README.md`, `docs/` |
-| B+Tree **구조 불변식 property test** 추가 — 무작위 삽입·삭제 후 트리 전체를 걸어 8종 검사, 결함 5종 주입으로 검증 | `239f302` | `tests/test_bptree_property.c` |
-| `INDEX_RANGE` **엔드투엔드 테스트** 추가 — 경계·LIMIT·삭제 후, 힙 스캔 결과와 대조 | `239f302` | `tests/test_step1_sql_ext.c` |
-| **EXPLAIN 이 실행기와 다른 계획을 보고하던 버그** 수정 + 회귀 테스트 | `7f6cb84` | `parser.c`, `planner.c`, `tests/` |
-| **규모별 기울기 벤치마크**(`make bench`) — 재현되지 않던 절대 배수를 배가 계수로 교체, 그래프 생성 포함 | `7f6cb84` | `bench/scaling.py`, `docs/scaling.svg` |
-| **설계 노트** — 버린 대안과 이유, 정확성 검증의 한계, 다음 병목 | `7f6cb84` | `docs/design.md` |
-
-팀 과제 종료 시점(`93114c8`) 대비 엔진 코드 변경은 `src/` 기준 +455/-88행입니다(`git diff --stat 93114c8 HEAD -- src/`).
-
-## 구동방법
-
-GCC, Make, pthread가 필요합니다. Linux는 저장소의 Dev Container 설정을 쓸 수 있습니다.
-
-```sh
-git clone https://github.com/woonyong-choi/lrn-sql.git
-cd lrn-sql
-make
-./build/minidb demo.db
-```
-
-새 DB의 REPL에서 다음을 한 줄씩 입력합니다.
-
-```sql
-CREATE TABLE users (name VARCHAR(32), age INT)
-INSERT INTO users VALUES ('Alice', 25)
-SELECT * FROM users
-EXPLAIN SELECT * FROM users WHERE id = 1
-SELECT * FROM users WHERE id = 1
-```
-
-`1 | Alice | 25`가 나오고 `INDEX_LOOKUP` 계획을 확인할 수 있습니다. `.stats`는 페이지·트리 통계, `.debug`는 쿼리별 페이지 접근, `.btree`는 인덱스 구조를 보여 줍니다. `.exit` 또는 Ctrl-D로 종료하면 dirty 페이지를 기록합니다.
-
-기본 빌드는 ASAN·UBSAN을 켭니다. CI(Ubuntu)는 이 빌드로 전 테스트를 돌립니다.
-
-**macOS 26(Darwin 25) + Apple clang 17에서는 ASan 바이너리가 `main()`에 닿기 전에 멈춥니다.** lrn-sql의 문제가 아니라 ASan 런타임 초기화가 자기 자신을 재진입하는 것으로, `int main(void){return 0;}` 한 줄을 `cc -fsanitize=address`로 빌드해도 똑같이 멈춥니다. 스택은 `AsanInitInternal` → `InitializeShadowMemory` → `get_dyld_hdr` → `dyld_shared_cache_iterate_text_swift` → `malloc` → `__sanitizer_mz_malloc` → 다시 `AsanInitFromRtl`로 들어가 spin lock에 걸립니다. UBSan 단독은 정상 동작합니다.
-
-```sh
-# macOS: UBSan 만 켜기 (ASan 대신은 아닙니다)
-make BUILD_DIR=build-ubsan SANITIZE=undefined test-all
-
-# sanitizer 없이
-make BUILD_DIR=build-nosan SANITIZE= all
-./build-nosan/minidb demo.db
-```
-
-CI(`.github/workflows/ci.yml`)는 Linux에서 `make test-all`을 ASAN·UBSAN으로 실행하며, 아래 회귀 검사를 포함합니다. sanitizer를 끈 빌드는 이 검사를 대신하지 않습니다.
-
-| 회귀 검사 (`make test-step3`) | 무엇을 잡는가 |
-| --- | --- |
-| `test_repl_insert_releases_locks` | REPL 경로 문장이 끝난 뒤 lock이 남는 회귀. `db_execute()`의 `lock_release_all()`이 빠지면 executor가 gap check에서 잡은 X lock이 해제되지 않고 누적된다 |
-| `test_sequential_insert_no_heap_rescan` | DELETE 없는 순차 INSERT가 힙 체인을 다시 걷는 회귀. free slot 힌트가 사라지면 꼬리 페이지가 찰 때마다 전체 체인을 재탐색해 O(P^2)로 붕괴한다 |
-
-설계 문서는 [`docs/README.md`](docs/README.md)를 참조합니다.
-
-## 스펙
-
-| 구분 | 내용 |
-|---|---|
-| 언어 | C11 (`-Wall -Wextra -Werror`) |
-| 빌드 | GNU Make, GCC |
-| 런타임 의존성 | POSIX pthread만 사용. **외부 DB·파서·인덱스 라이브러리 없음** |
-| 진단 도구 | AddressSanitizer, UndefinedBehaviorSanitizer, gdb(스택 샘플링) |
-| 서버 경로 | 자체 HTTP 처리(keep-alive, 요청 읽기 타임아웃) |
-| 벤치마크 하니스 | Python 3 + psycopg2 (`bench/`), 대조군 PostgreSQL 16.13 |
+단일 규모의 절대 수치가 필요하면 `make bench-1m`입니다. 마지막으로 잰 값은 1M 행 기준 INSERT 632,962 ops/sec, Range 3,267 ops/sec(힙 스캔 108 ops/sec)입니다(2026-09-22, Apple M4, -O2, median of 3).
+개선 후 수치가 PostgreSQL(1M INSERT `fsync=off` 10,919 ops/sec)보다 높은 것은 성능 우위가 아닙니다. 이 엔진은 **WAL이 없어** dirty 페이지를 캐시 축출·종료 시에만 디스크로 내리므로 내구성 조건이 다릅니다([`docs/benchmark-postgres.md`](docs/benchmark-postgres.md)).
 
 ## 검증
 
-[![CI](https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml/badge.svg)](https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml)
+`make test-all`이 저장 구조·SQL·동시 요청·회귀를 검사합니다. 숫자는 테스트 함수가 아니라 **단언(assertion) 개수**의 합입니다.
 
-`make test-all`은 저장 구조·SQL·동시 요청을 검사합니다. **510개 전부 통과**합니다(2026-09-22 로컬 재실행).[^tests]
+| 스위트 | 검증 대상 | 개수 | 실행 명령 |
+|---|---|---:|---|
+| MiniDB Test Suite | 페이지·힙·B+Tree·재열기 | 76 | `make test` |
+| B+Tree Property | 무작위 삽입·삭제 후 구조 불변식 8종, 범위 스캔 대조 | 215 | `make test-prop` |
+| Step 0 — `db_execute` | 문장 실행 진입점 | 24 | `make test-step0` |
+| Step 1 — SQL Extension | 파싱·계획·조건·정렬·집계·`INDEX_RANGE`·EXPLAIN 일치 | 143 | `make test-step1` |
+| Step 2 — Concurrency | S/X lock 호환성, 범위 lock, 동시 INSERT, HTTP 경로 | 52 | `make test-step2` |
+| Step 3 — Regression | 고친 결함 2건이 되살아나는지 | 24 | `make test-step3` |
+| **합계** | | **534** | `make test-all` |
 
-| 스위트 | 통과 | 대상 |
-|---|---:|---|
-| MiniDB Test Suite | 76/76 | 페이지·힙·B+Tree·재열기 |
-| B+Tree Property | 215/215 | 무작위 삽입·삭제 후 구조 불변식 8종, 범위 스캔 대조 |
-| Step 0 — `db_execute` | 24/24 | 문장 실행 진입점 |
-| Step 1 — SQL Extension | 143/143 | 파싱·계획·조건·정렬·집계·`INDEX_RANGE`·EXPLAIN 일치 |
-| Step 2 — Concurrency | 52/52 | S/X lock 호환성, 범위 lock, 동시 INSERT, HTTP 경로 |
-| **합계** | **510/510** | |
-
-B+Tree는 오름차순 삽입만으로는 검증되지 않습니다. 그 모양은 리프가 오른쪽으로만 쪼개지는 한 가지 경우일 뿐이라, 형제 재분배와 병합이 섞이는 삭제 경로를 밟지 못합니다. Property 스위트는 고정 시드 난수로 삽입·삭제를 섞어 돌리며 체크포인트마다 **트리 전체를 걸어** 리프 깊이 일치·키 순증가·부모 separator 구간·최소 점유율·리프 체인 대칭·페이지 중복 없음·`parent_page_id` 정합·참조 모델 일치를 봅니다. 이 검사가 껍데기가 아닌지는 결함 5종(불균형 분할, separator 오프바이원, 리프 체인 끊김, 언더플로우 복구 비활성화, 범위 경계 제외 누락)을 일부러 심어 확인했고 **전부 서로 다른 불변식에 걸렸습니다**. 자세한 것은 [`docs/design.md`](docs/design.md) §5.
-
-```sh
-make test-all      # 510개 검사 (CI와 동일)
-make bench         # 규모별 기울기 재측정 (약 1분)
-make bench-1m      # 1M 행 단일 규모
-python3 bench/bench_pg_param.py --rows 1000000 --reps-insert 1   # PostgreSQL 대조군
-```
+Property 스위트는 결함 5종(불균형 분할, separator 오프바이원, 리프 체인 끊김, 언더플로우 복구 비활성화, 범위 경계 제외 누락)을 주입해 각각 다른 불변식에서 실패하는지 확인했습니다. 스위트별 상세는 [`docs/build-and-test.md`](docs/build-and-test.md)에 있습니다.
 
 CI는 GitHub Actions에서 `ASAN_OPTIONS=detect_leaks=1`, `UBSAN_OPTIONS=halt_on_error=1`로 `make test-all`을 실행합니다.
 
-### 현재 범위
+## 범위와 한계
 
-단일 테이블과 자동 생성 `id` 인덱스를 중심으로 CREATE·INSERT·SELECT·UPDATE·DELETE·DROP과 일부 조건·정렬·집계를 지원합니다. secondary index, 비용 기반 optimizer, 여러 문장을 묶는 트랜잭션, WAL crash recovery는 **없습니다.** 정상 종료 후 재열기는 보장하지만 갑작스러운 중단에서의 복구는 범위 밖입니다.
+- 단일 테이블과 자동 생성 `id` 인덱스가 중심입니다. **secondary index, 비용 기반 optimizer, 여러 문장을 묶는 트랜잭션(`BEGIN`/`COMMIT`)은 없습니다.**
+- **WAL이 없습니다.** 정상 종료 후 재열기는 보장하지만, 갑작스러운 중단에서의 crash recovery는 범위 밖입니다.
+- 벤치마크는 1M 행에서도 DB 파일이 52MB라 전량 페이지 캐시에 올라갑니다. **디스크가 실제 병목인 구간은 아직 측정하지 못했습니다.**
+- 동시성 검사는 4~8스레드 규모이고, 데이터 레이스 자체를 잡는 ThreadSanitizer는 아직 CI에 넣지 않았습니다. 위 3번 결함이 ASAN 타이밍에서만 드러난 것도 그 때문입니다.
+- 접근 경로 선택은 규칙 기반입니다. 선택도 통계를 보지 않으므로 secondary index가 생기면 다시 설계해야 합니다.
 
-## 참고자료
+## 관련 링크
 
+- [SQL 엔진 구현 Wiki](https://docs.woonyong.com/wiki/lrn-sql/) — 개념 정리
+- [설계 노트 — 무엇을 고르고 무엇을 버렸나](docs/design.md)
 - [PostgreSQL 대조 실험 전문](docs/benchmark-postgres.md) — 측정 조건·결함 진단·정직한 평가
+- [출처와 기여 경계](docs/attribution.md) — 팀 과제 범위와 개인 확장 커밋
 - [팀 원본 저장소 Jungle-12-303/wk08_1](https://github.com/Jungle-12-303/wk08_1)
+- [CI 실행 기록](https://github.com/woonyong-choi/lrn-sql/actions)
 - Database Internals (Alex Petrov) — Slotted Page·B+Tree 구조
 - [PostgreSQL 16 문서](https://www.postgresql.org/docs/16/) — 대조군 설정(`synchronous_commit`, `fsync`)
-
-[^scaling]: `make bench` (= `python3 bench/scaling.py`). 전체 표는 [`bench/scaling.md`](bench/scaling.md), 그래프는 `make bench`가 다시 그립니다. 규모별 3회 중앙값, 프로세스 기동 시간은 no-op 실행으로 차감.
-[^bench]: 측정 조건·결함 진단·재현 명령은 [`docs/benchmark-postgres.md`](docs/benchmark-postgres.md) 9절("규모를 키우니 다른 곳이 무너졌다"). 1M 행 median of 3.
-[^authors]: `git log --author='woonyong' --since=2026-06-01 --reverse --format='%h %ad %s' --date=short`
-[^tests]: `make BUILD_DIR=build-nosan SANITIZE= test-all` 출력의 스위트별 합계.
