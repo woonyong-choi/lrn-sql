@@ -1,0 +1,18 @@
+flow down
+title "UPDATE는 잠금 뒤 조건을 다시 검사하고 행을 바꾼다"
+subtitle "id 수정은 거절한다. id 점 조회와 힙 스캔 경로가 있다"
+box input "UPDATE users SET ... WHERE ..."
+box valid "값·id 수정 금지 검사"
+box target "id 인덱스 또는 힙 스캔"
+box lock "행 X 잠금 · 조건 재검증"
+box heap "힙 행 바이트 변경"
+input -> valid
+valid -> target
+target -> lock
+lock -> heap
+step "대상" "조건에 맞는 행과 값을 검사한다"
+  input -> valid
+  valid -> target
+step "변경" "잠금 뒤 현재 조건을 다시 확인한다"
+  target -> lock
+  lock -> heap

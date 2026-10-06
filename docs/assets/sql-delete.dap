@@ -1,0 +1,18 @@
+flow down
+title "DELETE는 힙 슬롯과 id 인덱스 항목을 지운다"
+subtitle "id 점 삭제와 스캔 삭제가 있다. 다중 문장 롤백과 WAL은 아직 없다"
+box input "DELETE FROM users WHERE ..."
+box target "id 인덱스 또는 힙 스캔"
+box lock "행 X 잠금 · 조건 재검증"
+box heap "heap_delete · 슬롯 FREE"
+box index "bptree_delete · 키 제거"
+input -> target
+target -> lock
+lock -> heap
+heap -> index
+step "대상" "조건에 맞는 id를 찾고 잠근다"
+  input -> target
+  target -> lock
+step "삭제" "힙 슬롯 뒤 인덱스 키를 제거한다"
+  lock -> heap
+  heap -> index

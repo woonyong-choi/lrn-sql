@@ -1,0 +1,15 @@
+flow down
+title "EXPLAIN은 계획을 보여 주고 안쪽 문장을 실행하지 않는다"
+subtitle "INDEX_LOOKUP·INDEX_RANGE·TABLE_SCAN 등의 경로를 출력한다"
+box input "EXPLAIN SELECT ..."
+box parser "안쪽 문장 파싱"
+box planner "같은 규칙으로 경로 선택"
+box output "계획 텍스트 출력"
+input -> parser
+parser -> planner
+planner -> output
+step "해석" "중첩 EXPLAIN을 거절한다"
+  input -> parser
+step "계획" "행 변경 없이 경로 이름을 돌려준다"
+  parser -> planner
+  planner -> output
