@@ -1,0 +1,9 @@
+# SQL 엔진 — C로 구현한 저장·조회 학습 프로젝트
+
+> SQL을 파싱해 실행 계획을 세우고, 페이지에 행을 저장한 뒤 B+Tree 인덱스로 조회하는 C11 학습용 데이터베이스 엔진입니다.
+
+[CI 실행 기록](https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml)
+
+## Docs
+
+- [SQL 엔진 내부 데이터 흐름](https://raw.githubusercontent.com/woonyong-choi/lrn-sql/main/docs/sql/internal-data-flow.md): B+Tree·힙 입출력, pager 메모리, SQL 명령 조합의 Daphnis 그림과 코드 근거

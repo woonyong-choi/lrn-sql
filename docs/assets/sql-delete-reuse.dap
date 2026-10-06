@@ -1,0 +1,32 @@
+flow right
+title "DELETE는 인덱스 키와 힙 슬롯을 지우고 빈 자리를 다시 쓴다"
+subtitle "id 점 삭제 예시. 리프 키 부족 때 형제 차용 또는 병합하고, 힙 행 바이트는 그대로 남긴다"
+box input "DELETE WHERE id = 7"
+box lookup "bptree_search · row_ref(1, 2)"
+box tomb "heap_delete · slot 2를 FREE로 표시"
+box chain "free_slot_head → slot 2 → 이전 빈 슬롯"
+box erase "bptree_delete · id 7 엔트리 제거"
+box balance "키 부족 · 형제 차용 또는 병합"
+box pages "병합으로 빈 페이지 발생 시 free_page_head"
+box insert "다음 INSERT · FREE 슬롯 우선 재사용"
+box update "UPDATE WHERE id = 7 · 힙 행 제자리 수정"
+input -> lookup
+lookup -> tomb "DELETE"
+tomb -> chain
+chain -> insert "재사용"
+tomb -> erase
+erase -> balance "underflow일 때"
+balance -> pages "병합으로 해제할 때"
+lookup -> update "UPDATE는 별도 경로"
+step "주소 찾기" "id 키에서 힙 페이지·슬롯 좌표를 얻는다"
+  input -> lookup
+step "힙과 인덱스 삭제" "슬롯은 FREE 체인에 넣고 리프에서 키를 제거한다"
+  lookup -> tomb
+  tomb -> chain
+  tomb -> erase
+step "나무 복구" "최소 키 수 아래면 차용·병합하고 빈 페이지를 재활용 목록에 넣는다"
+  erase -> balance
+  balance -> pages
+step "재사용과 수정" "다음 INSERT는 빈 슬롯을 덮어쓴다. UPDATE는 id를 바꾸지 않는다"
+  chain -> insert
+  lookup -> update

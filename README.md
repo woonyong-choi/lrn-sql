@@ -87,6 +87,18 @@ docs/          design.md(설계 노트) · benchmark-postgres.md · build-and-te
 
 리프의 `id → row_ref(page_id, slot_id)`가 힙 행을 가리킨다. 점 조회는 경계 키를 따라 한 리프로 내려가고, 범위 조회는 리프 연결을 따라간다. 삽입 중 리프가 차면 분할하고 부모에 경계 키를 전파한다. 그림 속 `10·20·40·50·70`은 구조 설명용 값이다.
 
+### 데이터 입출력·메모리·명령 조합
+
+![INSERT가 값 검증과 id 배정 뒤 힙 슬롯에 행을 복사하고 B+Tree에 주소를 등록하며 분할과 파일 기록 시점을 구분한다](docs/assets/sql-insert-lifecycle.svg)
+
+![SELECT가 id 점·범위·정렬 조건에 따라 B+Tree와 힙의 읽기 경로 및 중간 주소 배열을 다르게 사용한다](docs/assets/sql-read-lifecycle.svg)
+
+![pager가 256개 프레임의 pin·래치·dirty 상태를 관리하고 캐시 미스와 정상 종료에서 디스크를 읽거나 쓴다](docs/assets/sql-pager-lifecycle.svg)
+
+![파서가 한 문장을 검증한 뒤 SELECT의 절 조합이나 변경 명령에 따라 실행 경로를 고르고 EXPLAIN은 계획만 출력한다](docs/assets/sql-command-composition.svg)
+
+그림의 각 단계와 코드 근거는 [SQL 엔진 내부 데이터 흐름](docs/sql/internal-data-flow.md)에 모았다. 이 문서에는 파일 페이지·슬롯 구조, 삭제 후 재사용, 임시 버퍼의 소유권과 해제, 지원하지 않는 명령 조합도 포함된다. 모든 그림은 Daphnis `.dap` 원본에서 생성한다.
+
 ## SQL 명령의 실행 경로
 
 아래 그림은 현재 지원하는 형태의 경로다. 각 명령의 PostgreSQL 18 전체 문법을 뜻하지 않는다. [같은 SQL 차등 검사](docs/sql/pg-compatibility.md)는 현재 20건이다.

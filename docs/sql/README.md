@@ -50,6 +50,8 @@
 
 ## 문서 목록
 
+- [`internal-data-flow.md`](internal-data-flow.md)
+  - B+Tree·힙 입출력, pager와 임시 메모리, 명령 조합을 Daphnis 그림으로 추적하는 문서
 - `pg-compatibility.md`
   - PostgreSQL 18 차등 검사 방법, 현재 비교 범위와 문법 차이를 기록한 문서
 - `legacy-file-migration.md`
@@ -65,7 +67,7 @@
 
 ## 이 문서를 읽는 순서
 
-1. `README.md`
+1. [`internal-data-flow.md`](internal-data-flow.md)
 2. `11-implementation-plan.md`
 3. `13-concurrency-issues.md`
 4. `12-test-harness-plan.md`
