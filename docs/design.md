@@ -186,6 +186,7 @@ B+Tree 는 오름차순 삽입만으로는 검증되지 않는다. 그 모양은
 | **WAL / crash recovery** | 없음. dirty 페이지는 캐시 축출과 정상 종료 때만 디스크로 간다. 비정상 종료 시 파일이 깨질 수 있다. | 문장 단위 autocommit 만 있어서 되돌릴 단위 자체가 없다. WAL 을 넣으면 트랜잭션 경계부터 정의해야 한다. |
 | **secondary index** | 없음. 인덱스는 자동 생성 `id` 하나뿐. | 지금 planner 는 규칙 기반이라 후보가 둘 이상이면 고를 근거가 없다. secondary index 는 선택도 기반 비용 모델과 같이 와야 한다. |
 | **다중 테이블·JOIN** | 없음. 헤더에 컬럼 정의가 하나뿐이다. | 카탈로그 페이지가 필요하고, 이는 파일 포맷 변경이다. |
+| **PostgreSQL SQL 문법** | 단일 테이블의 제한된 부분집합만 실행한다. 지원하지 않는 잔여 절은 실행 전에 거절한다. 문자열 안의 작은따옴표는 `''`로 쓴다. | 전체 호환에는 카탈로그, 식, 타입, 제약, 트랜잭션과 차등 검증이 필요하다. |
 | **내부 노드 분할 검증** | property test 가 닿지 못한다 (§5). | 페이지 크기가 `sysconf` 고정이라 테스트에서 줄일 수 없다. |
 | **PostgreSQL 대비 수치** | 같은 조건의 비교가 아니다. | WAL·MVCC·네트워크 프로토콜이 없다. [`docs/benchmark-postgres.md`](benchmark-postgres.md) 의 "불공정 요소" 절에 전부 적어 두었다. |
 
@@ -195,3 +196,22 @@ B+Tree 는 오름차순 삽입만으로는 검증되지 않는다. 그 모양은
 되고, LRU 정책과 dirty watermark 가 처음으로 의미를 갖는다. 그때 재야 할
 것은 ops/sec 가 아니라 **캐시 미스율과 실제 디스크 I/O 횟수**다
 (`.debug` 가 이미 쿼리별 `page_loads`·`cache_misses` 를 찍는다).
+
+---
+
+## 7. PostgreSQL 18 SQL 호환 목표
+
+이 저장소는 자체 저장 엔진을 유지하면서 [PostgreSQL 18 SQL 명령 목록](https://www.postgresql.org/docs/18/sql-commands.html)과 [SQL 문법](https://www.postgresql.org/docs/18/sql-syntax.html)을 호환 목표로 삼는다. PostgreSQL 서버로 전달하는 방식은 이 목표의 자체 엔진 구현으로 계산하지 않는다. 현재의 제한된 부분집합을 전체 호환으로 표시하지 않는다.
+
+호환 판정은 문법 승인만으로 끝나지 않는다. 같은 스키마와 입력을 PostgreSQL 18과 MiniDB에 실행해 성공·실패, 결과 행과 타입, 스키마 변경, 트랜잭션 효과, 재시작 뒤 상태를 비교한다. `ORDER BY`가 없는 SELECT의 행 순서는 비교 조건에서 제외한다. 미지원 문법은 데이터를 변경하기 전에 오류를 반환한다. 차등 검사는 [#5](https://github.com/woonyong-choi/lrn-sql/issues/5)에서 만든다.
+
+| 기능군 | 현재 코드 | 첫 작업 |
+|---|---|---|
+| 어휘·리터럴·입력 종료 | 한 줄·한 문장 파서. 잔여 절은 거절하지만 일부 숫자 값은 잘못 해석된다. | [#2](https://github.com/woonyong-choi/lrn-sql/issues/2), [#4](https://github.com/woonyong-choi/lrn-sql/issues/4) |
+| 테이블·스키마·제약 | 파일당 테이블 하나, 자동 `id`, `INT`·`BIGINT`·`VARCHAR` 일부. 명시적 제약 없음. | [#6](https://github.com/woonyong-choi/lrn-sql/issues/6) |
+| 조회·식 | `SELECT *`, `COUNT(*)`, 단일 비교식, `ORDER BY`, `LIMIT` 일부. JOIN·NULL·일반 식 없음. | [#7](https://github.com/woonyong-choi/lrn-sql/issues/7) |
+| 데이터 변경 | 단일 행 `INSERT`, `UPDATE`, `DELETE` 일부. 컬럼 목록·`RETURNING`·`ON CONFLICT` 없음. | 호환성 표를 세분화한 뒤 후속 이슈 생성 |
+| 트랜잭션·복구 | 문장별 실행. `BEGIN`·`COMMIT`·`ROLLBACK`과 WAL 없음. | [#8](https://github.com/woonyong-choi/lrn-sql/issues/8), [#9](https://github.com/woonyong-choi/lrn-sql/issues/9) |
+| 서버·관리 명령 | 자체 HTTP API. 권한·역할·확장·복제·PostgreSQL 세션 명령 없음. | 명령별 의존성을 확인한 뒤 후속 이슈 생성 |
+
+작업 순서는 잘못된 성공을 막는 입력 검증, PostgreSQL 18 차등 검사, 스키마·타입 기반 확장, 질의와 변경, 트랜잭션·복구, 관리 명령이다. 저장 파일 형식이 바뀌는 작업은 기존 파일의 열기·전환·복구 규칙을 먼저 정한다. 한 기능군을 구현했더라도 공식 명령 목록의 남은 형식과 실행 의미를 검증하기 전에는 전체 호환으로 표시하지 않는다.
