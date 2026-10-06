@@ -43,7 +43,7 @@ typedef enum {
 
 /* ── 상수 정의 ── */
 #define DB_MAGIC    "MINIDB\0"  /* 매직 넘버: 파일의 첫 8바이트로 minidb 파일인지 식별 */
-#define DB_VERSION  1           /* DB 파일 형식 버전 */
+#define DB_VERSION  2           /* DB 파일 형식 버전 */
 #define MAX_COLUMNS 16          /* 테이블당 최대 컬럼 수 */
 
 /* ── 컬럼 데이터 타입 ──
@@ -97,7 +97,7 @@ typedef struct {
  *   필드                  | 오프셋 | 크기   | 설명
  *   ──────────────────────┼────────┼────────┼─────────────────
  *   magic                 | 0      | 8      | "MINIDB\0"
- *   version               | 8      | 4      | DB_VERSION (1)
+ *   version               | 8      | 4      | DB_VERSION (2)
  *   page_size             | 12     | 4      | 4096 또는 16384
  *   root_index_page_id    | 16     | 4      | B+ tree 루트 페이지
  *   first_heap_page_id    | 20     | 4      | 첫 힙 페이지
@@ -108,8 +108,9 @@ typedef struct {
  *   column_count          | 48     | 2      | 컬럼 수
  *   row_size              | 50     | 2      | 행 직렬화 크기
  *   columns[16]           | 52     | 624    | 컬럼 메타데이터 배열
+ *   table_name            | 676    | 32     | 단일 테이블 이름 (v2)
  *   ──────────────────────┴────────┴────────┴─────────────────
- *   총 크기: 676바이트 (page_size보다 훨씬 작으므로 page 0에 여유 있음)
+ *   총 크기: 708바이트 (page_size보다 훨씬 작으므로 page 0에 여유 있음)
  *
  * 예시 (users 테이블, 행 100개 삽입 후):
  *   magic="MINIDB\0", version=1, page_size=4096
@@ -133,6 +134,7 @@ typedef struct {
     uint16_t column_count;          /* 등록된 컬럼 수 — 2바이트 */
     uint16_t row_size;              /* 한 행의 직렬화 크기 — 2바이트 */
     column_meta_t columns[MAX_COLUMNS]; /* 컬럼 메타데이터 배열 — 39×16 = 624바이트 */
+    char     table_name[32];       /* v2 단일 테이블 이름, v1에는 없음 */
 } __attribute__((packed)) db_header_t;
 
 /* ── row_ref_t — 행 참조 (6바이트, packed) ──

@@ -34,6 +34,7 @@
 #include "storage/bptree.h"
 #include "db.h"
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -203,6 +204,10 @@ static exec_result_t exec_create_table(pager_t *pager, statement_t *stmt)
                  "오류: '%s' 테이블이 이미 존재합니다", stmt->table_name);
         return res;
     }
+
+    strncpy(hdr->table_name, stmt->table_name, sizeof(hdr->table_name) - 1);
+    hdr->table_name[sizeof(hdr->table_name) - 1] = '\0';
+    hdr->version = DB_VERSION;
 
     /* id를 첫 번째 시스템 컬럼으로 추가 (BIGINT 8바이트) */
     hdr->column_count = 0;
@@ -1578,6 +1583,7 @@ static exec_result_t exec_drop_table(pager_t *pager, statement_t *stmt)
 
     /* 스키마 초기화 */
     hdr->column_count = 0;
+    memset(hdr->table_name, 0, sizeof(hdr->table_name));
     hdr->row_size = 0;
     hdr->row_count = 0;
     hdr->next_id = 1;
@@ -1710,6 +1716,21 @@ static int validate_numeric_inputs(const db_header_t *hdr, const statement_t *st
 exec_result_t execute(pager_t *pager, statement_t *stmt)
 {
     exec_result_t invalid = {0, "", NULL, 0};
+    if (stmt->type != STMT_CREATE_TABLE) {
+        if (pager->header.column_count > 0 && pager->header.version == 1) {
+            invalid.status = -1;
+            snprintf(invalid.message, sizeof(invalid.message),
+                     "오류: 기존 파일의 테이블 이름을 --adopt-table로 등록해야 합니다");
+            return invalid;
+        }
+        if (pager->header.column_count == 0
+            || strcasecmp(pager->header.table_name, stmt->table_name) != 0) {
+            invalid.status = -1;
+            snprintf(invalid.message, sizeof(invalid.message),
+                     "오류: 테이블 '%s'이(가) 존재하지 않습니다", stmt->table_name);
+            return invalid;
+        }
+    }
     if (validate_numeric_inputs(&pager->header, stmt, &invalid) != 0) return invalid;
     /* EXPLAIN은 별도 처리 */
     if (stmt->type == STMT_EXPLAIN) {
