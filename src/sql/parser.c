@@ -35,58 +35,68 @@ static const char *skip_ws(const char *p)
     return p;
 }
 
-/* ── WHERE 절 파서 (비교 연산자 확장) ── */
-static int parse_where(const char *p, statement_t *stmt)
+static int at_end(const char *p)
+{
+    return *skip_ws(p) == '\0' ? 0 : -1;
+}
+
+static int parse_string(const char **input, char *out, size_t capacity)
+{
+    const char *p = *input;
+    size_t len = 0;
+    if (*p++ != '\'') return -1;
+    while (*p) {
+        if (*p == '\'') {
+            if (p[1] != '\'') {
+                out[len] = '\0';
+                *input = p + 1;
+                return 0;
+            }
+            p++;
+        }
+        if (len + 1 >= capacity) return -1;
+        out[len++] = *p++;
+    }
+    return -1;
+}
+
+/* ── WHERE 절 파서 ── */
+static int parse_where(const char *p, statement_t *stmt, const char **end)
 {
     p = skip_ws(p);
-    if (*p == '\0' || *p == ';') {
-        stmt->predicate_kind = PREDICATE_NONE;
-        return 0;
-    }
-
-    /* WHERE 외 키워드는 무시 (ORDER BY, LIMIT 등) */
-    if (strcasecmp_n(p, "WHERE", 5) != 0) {
-        stmt->predicate_kind = PREDICATE_NONE;
-        return 0;
-    }
+    *end = p;
+    if (*p == '\0') return 0;
+    if (strcasecmp_n(p, "WHERE", 5) != 0) return 0;
     p = skip_ws(p + 5);
 
-    /* 필드 이름 */
     int i = 0;
     while (*p && *p != '=' && *p != '!' && *p != '<' && *p != '>'
            && !isspace((unsigned char)*p) && i < 31) {
         stmt->pred_field[i++] = *p++;
     }
     stmt->pred_field[i] = '\0';
-
+    if (i == 0) return -1;
     p = skip_ws(p);
 
-    /* ── BETWEEN a AND b ── (id 컬럼에 한해 범위 스캔으로 처리) */
     if (strcasecmp_n(p, "BETWEEN", 7) == 0 && isspace((unsigned char)p[7])) {
-        bool is_id = (strcasecmp_n(stmt->pred_field, "id", 2) == 0
-                      && strlen(stmt->pred_field) == 2);
-        if (!is_id) {
-            return -1;  /* 현재 BETWEEN은 id 컬럼만 지원 */
-        }
+        if (strcasecmp_n(stmt->pred_field, "id", 2) != 0
+            || strlen(stmt->pred_field) != 2) return -1;
         p = skip_ws(p + 7);
-
-        /* 하한 값 */
         char lo_buf[64];
         int j = 0;
-        while (*p && !isspace((unsigned char)*p) && j < 63) lo_buf[j++] = *p++;
+        while (*p && *p != ';' && !isspace((unsigned char)*p) && j < 63)
+            lo_buf[j++] = *p++;
         lo_buf[j] = '\0';
-
+        if (j == 0) return -1;
         p = skip_ws(p);
         if (strcasecmp_n(p, "AND", 3) != 0) return -1;
         p = skip_ws(p + 3);
-
-        /* 상한 값 */
         char hi_buf[64];
         j = 0;
-        while (*p && !isspace((unsigned char)*p) && *p != ';' && j < 63)
+        while (*p && *p != ';' && !isspace((unsigned char)*p) && j < 63)
             hi_buf[j++] = *p++;
         hi_buf[j] = '\0';
-
+        if (j == 0) return -1;
         stmt->predicate_kind = PREDICATE_ID_RANGE;
         stmt->range_lo = (uint64_t)atoll(lo_buf);
         stmt->range_hi = (uint64_t)atoll(hi_buf);
@@ -94,45 +104,38 @@ static int parse_where(const char *p, statement_t *stmt)
         stmt->has_hi = true;
         stmt->lo_inclusive = true;
         stmt->hi_inclusive = true;
-        strncpy(stmt->pred_field, "id", 31);
+        *end = p;
         return 0;
     }
 
-    /* 연산자 파싱 */
-    if (*p == '!' && *(p+1) == '=') {
+    if (*p == '!' && p[1] == '=') {
         stmt->pred_op = OP_NE; p += 2;
-    } else if (*p == '<' && *(p+1) == '=') {
+    } else if (*p == '<' && p[1] == '=') {
         stmt->pred_op = OP_LE; p += 2;
-    } else if (*p == '>' && *(p+1) == '=') {
+    } else if (*p == '>' && p[1] == '=') {
         stmt->pred_op = OP_GE; p += 2;
     } else if (*p == '<') {
-        stmt->pred_op = OP_LT; p += 1;
+        stmt->pred_op = OP_LT; p++;
     } else if (*p == '>') {
-        stmt->pred_op = OP_GT; p += 1;
+        stmt->pred_op = OP_GT; p++;
     } else if (*p == '=') {
-        stmt->pred_op = OP_EQ; p += 1;
+        stmt->pred_op = OP_EQ; p++;
     } else {
         return -1;
     }
-
     p = skip_ws(p);
 
-    /* 값 추출 */
     i = 0;
     if (*p == '\'') {
-        p++;
-        while (*p && *p != '\'' && i < 255) {
-            stmt->pred_value[i++] = *p++;
-        }
-        if (*p == '\'') p++;
+        if (parse_string(&p, stmt->pred_value, sizeof(stmt->pred_value)) != 0)
+            return -1;
     } else {
-        while (*p && !isspace((unsigned char)*p) && *p != ';' && i < 255) {
+        while (*p && *p != ';' && !isspace((unsigned char)*p) && i < 255)
             stmt->pred_value[i++] = *p++;
-        }
+        stmt->pred_value[i] = '\0';
+        if (i == 0) return -1;
     }
-    stmt->pred_value[i] = '\0';
 
-    /* 조건 분류 */
     bool is_id = (strcasecmp_n(stmt->pred_field, "id", 2) == 0
                   && strlen(stmt->pred_field) == 2);
     if (is_id && stmt->pred_op == OP_EQ) {
@@ -140,7 +143,6 @@ static int parse_where(const char *p, statement_t *stmt)
         stmt->pred_id = (uint64_t)atoll(stmt->pred_value);
     } else if (is_id && (stmt->pred_op == OP_GE || stmt->pred_op == OP_GT
                          || stmt->pred_op == OP_LE || stmt->pred_op == OP_LT)) {
-        /* id 범위 조건 → B+tree 범위 스캔 대상 */
         stmt->predicate_kind = PREDICATE_ID_RANGE;
         uint64_t v = (uint64_t)atoll(stmt->pred_value);
         switch (stmt->pred_op) {
@@ -155,43 +157,23 @@ static int parse_where(const char *p, statement_t *stmt)
     } else {
         stmt->predicate_kind = PREDICATE_FIELD_CMP;
     }
+    *end = p;
     return 0;
-}
-
-/* WHERE 이후의 나머지를 파싱 (ORDER BY, LIMIT) */
-static const char *find_after_where(const char *p)
-{
-    p = skip_ws(p);
-    if (strcasecmp_n(p, "WHERE", 5) != 0) return p;
-    p += 5;
-    /* WHERE 절 끝: ORDER, LIMIT, 또는 문자열 끝 */
-    while (*p) {
-        const char *q = skip_ws(p);
-        if (strcasecmp_n(q, "ORDER", 5) == 0 || strcasecmp_n(q, "LIMIT", 5) == 0)
-            return q;
-        p++;
-    }
-    return p;
 }
 
 static int parse_order_limit(const char *p, statement_t *stmt)
 {
     p = skip_ws(p);
-
-    /* ORDER BY */
     if (*p && strcasecmp_n(p, "ORDER", 5) == 0) {
         p = skip_ws(p + 5);
         if (strcasecmp_n(p, "BY", 2) != 0) return -1;
         p = skip_ws(p + 2);
-
         int i = 0;
-        while (*p && !isspace((unsigned char)*p) && *p != ';' && i < 31) {
+        while (*p && !isspace((unsigned char)*p) && i < 31)
             stmt->order_by_field[i++] = *p++;
-        }
         stmt->order_by_field[i] = '\0';
+        if (i == 0) return -1;
         stmt->has_order_by = true;
-        stmt->order_desc = false;
-
         p = skip_ws(p);
         if (*p && strcasecmp_n(p, "DESC", 4) == 0) {
             stmt->order_desc = true;
@@ -200,17 +182,19 @@ static int parse_order_limit(const char *p, statement_t *stmt)
             p = skip_ws(p + 3);
         }
     }
-
-    p = skip_ws(p);
-
-    /* LIMIT */
     if (*p && strcasecmp_n(p, "LIMIT", 5) == 0) {
         p = skip_ws(p + 5);
-        stmt->limit_count = (uint32_t)atoi(p);
+        if (!isdigit((unsigned char)*p)) return -1;
+        uint32_t count = 0;
+        while (isdigit((unsigned char)*p)) {
+            uint32_t digit = (uint32_t)(*p++ - '0');
+            if (count > (UINT32_MAX - digit) / 10) return -1;
+            count = count * 10 + digit;
+        }
+        stmt->limit_count = count;
         stmt->has_limit = true;
     }
-
-    return 0;
+    return at_end(p);
 }
 
 /* ── CREATE TABLE ── */
@@ -230,6 +214,7 @@ static int parse_create_table(const char *input, statement_t *stmt)
 
     stmt->col_count = 0;
     while (*p && *p != ')') {
+        if (stmt->col_count >= MAX_COLUMNS - 1) return -1;
         p = skip_ws(p);
         if (*p == ')') break;
 
@@ -267,8 +252,10 @@ static int parse_create_table(const char *input, statement_t *stmt)
         stmt->col_count++;
         p = skip_ws(p);
         if (*p == ',') p++;
+        else if (*p != ')') return -1;
     }
-    return 0;
+    if (*p != ')') return -1;
+    return at_end(p + 1);
 }
 
 /* ── INSERT ── */
@@ -293,73 +280,59 @@ static int parse_insert(const char *input, statement_t *stmt)
     while (*p && *p != ')') {
         p = skip_ws(p);
         if (*p == ')') break;
-
+        if (stmt->insert_value_count >= MAX_COLUMNS - 1) return -1;
         char *val = stmt->insert_values[stmt->insert_value_count];
         i = 0;
         if (*p == '\'') {
-            p++;
-            while (*p && *p != '\'' && i < 255) val[i++] = *p++;
-            if (*p == '\'') p++;
+            if (parse_string(&p, val, sizeof(stmt->insert_values[0])) != 0)
+                return -1;
         } else {
-            while (*p && *p != ',' && *p != ')' && !isspace((unsigned char)*p) && i < 255)
+            while (*p && *p != ',' && *p != ')' && *p != ';'
+                   && !isspace((unsigned char)*p)
+                   && i < 255)
                 val[i++] = *p++;
+            val[i] = '\0';
+            if (i == 0) return -1;
         }
-        val[i] = '\0';
         stmt->insert_value_count++;
         p = skip_ws(p);
         if (*p == ',') p++;
+        else if (*p != ')') return -1;
     }
-    return 0;
+    if (*p != ')') return -1;
+    return at_end(p + 1);
 }
 
 /* ── SELECT ── */
 static int parse_select(const char *input, statement_t *stmt)
 {
     const char *p = skip_ws(input);
-
-    /* COUNT(*) */
     if (strcasecmp_n(p, "COUNT", 5) == 0) {
         p = skip_ws(p + 5);
-        if (*p == '(') {
-            p++;
-            p = skip_ws(p);
-            if (*p == '*') p++;
-            p = skip_ws(p);
-            if (*p == ')') p++;
-        }
-        stmt->select_count = true;
+        if (*p++ != '(') return -1;
         p = skip_ws(p);
-        if (strcasecmp_n(p, "FROM", 4) != 0) return -1;
-        p = skip_ws(p + 4);
-
-        int i = 0;
-        while (*p && !isspace((unsigned char)*p) && *p != ';' && i < 31)
-            stmt->table_name[i++] = *p++;
-        stmt->table_name[i] = '\0';
-
-        /* WHERE + ORDER BY + LIMIT */
-        const char *rest = skip_ws(p);
-        const char *after_where = find_after_where(rest);
-        if (parse_where(rest, stmt) != 0) return -1;
-        return parse_order_limit(after_where, stmt);
-    }
-
-    /* SELECT * */
-    if (*p == '*') {
+        if (*p++ != '*') return -1;
+        p = skip_ws(p);
+        if (*p++ != ')') return -1;
+        stmt->select_count = true;
+    } else if (*p == '*') {
         stmt->select_all = true;
-        p = skip_ws(p + 1);
+        p++;
+    } else {
+        return -1;
     }
+    p = skip_ws(p);
     if (strcasecmp_n(p, "FROM", 4) != 0) return -1;
     p = skip_ws(p + 4);
 
     int i = 0;
-    while (*p && !isspace((unsigned char)*p) && *p != ';' && i < 31)
+    while (*p && !isspace((unsigned char)*p) && i < 31)
         stmt->table_name[i++] = *p++;
     stmt->table_name[i] = '\0';
+    if (i == 0) return -1;
 
-    const char *rest = skip_ws(p);
-    const char *after_where = find_after_where(rest);
-    if (parse_where(rest, stmt) != 0) return -1;
+    const char *after_where;
+    if (parse_where(p, stmt, &after_where) != 0) return -1;
     return parse_order_limit(after_where, stmt);
 }
 
@@ -375,7 +348,9 @@ static int parse_delete(const char *input, statement_t *stmt)
         stmt->table_name[i++] = *p++;
     stmt->table_name[i] = '\0';
 
-    return parse_where(skip_ws(p), stmt);
+    const char *end;
+    if (parse_where(p, stmt, &end) != 0) return -1;
+    return at_end(end);
 }
 
 /* ── UPDATE ── */
@@ -405,17 +380,17 @@ static int parse_update(const char *input, statement_t *stmt)
 
     i = 0;
     if (*p == '\'') {
-        p++;
-        while (*p && *p != '\'' && i < 255)
-            stmt->update_value[i++] = *p++;
-        if (*p == '\'') p++;
+        if (parse_string(&p, stmt->update_value, sizeof(stmt->update_value)) != 0)
+            return -1;
     } else {
-        while (*p && !isspace((unsigned char)*p) && *p != ';' && i < 255)
+        while (*p && *p != ';' && !isspace((unsigned char)*p) && i < 255)
             stmt->update_value[i++] = *p++;
+        stmt->update_value[i] = '\0';
+        if (i == 0) return -1;
     }
-    stmt->update_value[i] = '\0';
-
-    return parse_where(skip_ws(p), stmt);
+    const char *end;
+    if (parse_where(p, stmt, &end) != 0) return -1;
+    return at_end(end);
 }
 
 /* ── DROP TABLE ── */
@@ -426,7 +401,8 @@ static int parse_drop_table(const char *input, statement_t *stmt)
     while (*p && !isspace((unsigned char)*p) && *p != ';' && i < 31)
         stmt->table_name[i++] = *p++;
     stmt->table_name[i] = '\0';
-    return 0;
+    if (i == 0) return -1;
+    return at_end(p);
 }
 
 /* ── 메인 파서 (진입점) ── */
