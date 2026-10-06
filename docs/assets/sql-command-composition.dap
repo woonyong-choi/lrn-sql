@@ -1,0 +1,47 @@
+flow down
+title "명령과 절 조합은 파서 검증 뒤 접근 경로 하나를 고른다"
+subtitle "한 번에 SQL 문장 하나. 지원하지 않는 절·잔여 입력은 오류이며 PostgreSQL 전체 문법은 아니다"
+box input "CREATE · INSERT · SELECT · UPDATE · DELETE · DROP · EXPLAIN"
+box parse "parse · 문장 종류와 절 읽기 · 끝까지 소비 검사"
+box error "구문 오류 · 실행 전 중단"
+box plan "planner_create_plan · 조건과 ORDER BY / LIMIT 확인"
+box select "SELECT · 절 조합"
+box point "id = 값 → INDEX_LOOKUP"
+box range "id 범위 → INDEX_RANGE"
+box scan "그 밖 → TABLE_SCAN"
+box write "변경 명령 → 해당 실행"
+box explain "EXPLAIN → 계획만 출력"
+box result "행·변경 개수 또는 오류 메시지"
+input -> parse
+parse -> error "미지원·잔여 입력"
+parse -> plan "지원 문장"
+plan -> select "조회"
+select -> point "점"
+select -> range "범위"
+select -> scan "그 밖"
+plan -> write "변경 명령"
+plan -> explain "EXPLAIN"
+point -> result
+range -> result
+scan -> result
+write -> result
+explain -> result
+step "입력 검사" "하나의 문장을 해석하고 끝까지 읽지 못하면 실행하지 않는다"
+  input -> parse
+  parse -> error
+step "id 점 조회" "SELECT WHERE id = 값은 추가 절이 없을 때만 인덱스를 쓴다"
+  parse -> plan
+  plan -> select
+  select -> point
+  point -> result
+step "id 범위 + LIMIT" "정렬이 없으면 리프를 순회하고 LIMIT에서 멈춘다"
+  plan -> select
+  select -> range
+  range -> result
+step "ORDER BY 조합" "정렬이 있으면 힙을 훑고 행을 수집한다"
+  plan -> select
+  select -> scan
+  scan -> result
+step "변경과 계획 확인" "변경 명령은 실행하고 EXPLAIN은 실행하지 않는다"
+  plan -> write & plan -> explain
+  write -> result & explain -> result

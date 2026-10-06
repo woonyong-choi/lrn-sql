@@ -1,0 +1,41 @@
+flow right
+title "INSERT 한 건은 힙을 먼저 쓰고 B+Tree에 주소를 등록한다"
+subtitle "검증 뒤 id를 소비한다. dirty 페이지는 축출·워터마크·정상 종료 중 기록되며 WAL은 없다"
+box input "INSERT · 컬럼과 값"
+box validate "값 개수·정수 범위 검증"
+box id "header.next_id 증가 · X 잠금"
+box bytes "row_serialize · 임시 행 버퍼"
+box heap "heap_insert · 빈 슬롯 재사용 또는 새 슬롯"
+box ref "row_ref(page_id, slot_id)"
+box leaf "bptree_insert · id → row_ref"
+box split "리프 가득 참 · 새 리프 할당과 연결"
+box parent "오른쪽 첫 키를 부모에 전파 · 필요 시 새 루트"
+box count "임시 버퍼 해제 · header.row_count 증가"
+store file "DB 파일 · 나중에 page 단위 기록"
+input -> validate
+validate -> id "성공할 때만"
+id -> bytes
+bytes -> heap
+heap -> ref
+ref -> leaf
+leaf -> split "가득 찬 경우"
+split -> parent "separator"
+leaf -> count "공간 있음"
+parent -> count
+count -> file "dirty flush"
+step "검증과 ID" "잘못된 값은 쓰기 전에 거절한다"
+  input -> validate
+  validate -> id
+step "힙 저장" "직렬화한 행을 슬롯에 복사하고 주소를 돌려받는다"
+  id -> bytes
+  bytes -> heap
+  heap -> ref
+step "인덱스 등록" "리프가 차지 않았다면 정렬 삽입으로 끝난다"
+  ref -> leaf
+  leaf -> count
+step "분할" "리프가 찼다면 오른쪽 리프를 만들고 부모 경계 키를 고친다"
+  leaf -> split
+  split -> parent
+  parent -> count
+step "기록 시점" "수정은 먼저 메모리 프레임에 남고 이후 페이지 단위로 기록된다"
+  count -> file

@@ -1,0 +1,37 @@
+flow right
+title "한 문장의 임시 메모리와 결과 버퍼는 서로 다른 시점에 해제된다"
+subtitle "SELECT 범위 조회 예시. pager 프레임은 문장 뒤에도 남고, 결과 out_buf는 호출자가 free한다"
+box parser "statement_t · 호출 스택의 파싱 결과"
+box refs "row_ref 배열 · realloc으로 확장"
+box page "pager 프레임 · 256개 data 버퍼"
+box decoded "row_value_t · 행 역직렬화 스택"
+box output "out_buf_t · malloc / realloc"
+box result "exec_result_t.out_buf · 소유권 이전"
+box caller "REPL 출력 또는 HTTP 응답"
+box freed "호출자 free(out_buf)"
+box snapshot "힙 스캔 · 페이지별 snapshot malloc/free"
+box close "pager_close · 프레임 data free"
+parser -> refs "범위 조회"
+parser -> snapshot "힙 스캔"
+refs -> page "리프 래치 해제 후 행 조회"
+snapshot -> decoded "페이지 래치 해제 후 콜백"
+page -> decoded "힙 rlatch 안에서 복사"
+decoded -> output "문자열로 출력"
+output -> result "buf_transfer"
+result -> caller
+caller -> freed
+page -> close "DB 종료"
+step "대상 수집" "범위 조회는 주소 배열을 만들고, 힙 스캔은 페이지 snapshot을 만든다"
+  parser -> refs
+  parser -> snapshot
+step "행 복사" "래치 중에 데이터를 읽고, 필요 없는 임시 배열은 해제한다"
+  refs -> page
+  snapshot -> decoded
+  page -> decoded
+step "결과 소유권" "동적 출력 버퍼는 결과 구조체로 옮겨 호출자가 free한다"
+  decoded -> output
+  output -> result
+  result -> caller
+  caller -> freed
+step "DB 종료" "문장 후에도 남은 페이지 프레임은 pager_close에서 해제한다"
+  page -> close
