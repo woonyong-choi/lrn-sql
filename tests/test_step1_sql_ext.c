@@ -608,6 +608,56 @@ static void test_explain_matches_execution(void) {
     teardown_test_db(&pager, "explain_exec");
 }
 
+/* #4: 잘못된 INSERT 값은 행과 다음 id를 바꾸지 않는다. */
+static void test_insert_numeric_values_are_validated(void) {
+    pager_t pager;
+    setup_test_db(&pager, "insert_numeric");
+    exec_result_t r = db_execute(&pager,
+        "CREATE TABLE users (name VARCHAR(32), age INT)");
+    ASSERT_EQ_INT(r.status, 0, "create numeric test table");
+    free(r.out_buf);
+
+    const char *invalid[] = {
+        "INSERT INTO users VALUES ('Bob', abc)",
+        "INSERT INTO users VALUES ('Bob', 2147483648)",
+        "INSERT INTO users VALUES ('Bob', -2147483649)",
+        "INSERT INTO users VALUES ('Bob')",
+        "INSERT INTO users VALUES ('Bob', 30, 'extra')"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        r = db_execute(&pager, invalid[i]);
+        ASSERT_EQ_INT(r.status, -1, invalid[i]);
+        free(r.out_buf);
+    }
+
+    r = db_execute(&pager, "INSERT INTO users VALUES ('Alice', 25)");
+    ASSERT_EQ_INT(r.status, 0, "valid INSERT succeeds after rejection");
+    ASSERT_TRUE(strstr(r.message, "id=1") != NULL,
+                "rejected INSERT does not consume an id");
+    free(r.out_buf);
+    r = db_execute(&pager, "SELECT * FROM users");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "Alice | 25") != NULL,
+                "valid row keeps its value");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "Bob") == NULL,
+                "invalid rows were not stored");
+    free(r.out_buf);
+
+    r = db_execute(&pager, "DROP TABLE users");
+    ASSERT_EQ_INT(r.status, 0, "drop numeric test table");
+    free(r.out_buf);
+    r = db_execute(&pager, "CREATE TABLE metrics (value BIGINT)");
+    ASSERT_EQ_INT(r.status, 0, "create BIGINT test table");
+    free(r.out_buf);
+    r = db_execute(&pager, "INSERT INTO metrics VALUES (9223372036854775808)");
+    ASSERT_EQ_INT(r.status, -1, "BIGINT overflow is rejected");
+    free(r.out_buf);
+    r = db_execute(&pager, "INSERT INTO metrics VALUES (9223372036854775807)");
+    ASSERT_EQ_INT(r.status, 0, "BIGINT maximum is accepted");
+    free(r.out_buf);
+
+    teardown_test_db(&pager, "insert_numeric");
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -624,6 +674,7 @@ int main(void)
     test_explain_extended();
     test_index_range();
     test_explain_matches_execution();
+    test_insert_numeric_values_are_validated();
 
     printf("\n");
     printf("========================================\n");
