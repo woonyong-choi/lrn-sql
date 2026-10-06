@@ -734,6 +734,55 @@ static void test_numeric_predicates_and_updates_are_validated(void) {
     teardown_test_db(&pager, "numeric_predicate");
 }
 
+static void test_identity_and_column_list_insert(void) {
+    pager_t pager;
+    setup_test_db(&pager, "identity_insert");
+    exec_result_t r = db_execute(&pager,
+        "CREATE TABLE users (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
+        "name VARCHAR(32), age INT)");
+    ASSERT_EQ_INT(r.status, 0, "identity declaration is accepted");
+    free(r.out_buf);
+
+    r = db_execute(&pager,
+        "INSERT INTO users (name, age) VALUES ('Alice', 25)");
+    ASSERT_TRUE(r.status == 0 && strstr(r.message, "id=1") != NULL,
+                "PostgreSQL-style column list inserts first row");
+    free(r.out_buf);
+
+    const char *invalid[] = {
+        "INSERT INTO users (name, name) VALUES ('Bob', 'Other')",
+        "INSERT INTO users (name, missing) VALUES ('Bob', 30)",
+        "INSERT INTO users (name) VALUES ('Bob')",
+        "INSERT INTO users (id, name, age) VALUES (2, 'Bob', 30)",
+        "INSERT INTO users (name, age) VALUES ('Bob')",
+        "INSERT INTO users (name, age) VALUES ('Bob', abc)"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        r = db_execute(&pager, invalid[i]);
+        ASSERT_EQ_INT(r.status, -1, invalid[i]);
+        free(r.out_buf);
+    }
+
+    r = db_execute(&pager,
+        "INSERT INTO users (age, name) VALUES (30, 'Bob')");
+    ASSERT_TRUE(r.status == 0 && strstr(r.message, "id=2") != NULL,
+                "reordered columns work without consuming rejected IDs");
+    free(r.out_buf);
+    r = db_execute(&pager, "SELECT * FROM users WHERE id = 2");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "Bob | 30") != NULL,
+                "reordered values map to their column names");
+    free(r.out_buf);
+
+    pager_close(&pager);
+    ASSERT_EQ_INT(pager_open(&pager, test_db_path("identity_insert"), false), 0,
+                  "identity table reopens");
+    r = db_execute(&pager, "SELECT * FROM users WHERE id = 1");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "Alice | 25") != NULL,
+                "identity row survives reopening");
+    free(r.out_buf);
+    teardown_test_db(&pager, "identity_insert");
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -753,6 +802,7 @@ int main(void)
     test_sql_input_is_fully_consumed();
     test_insert_numeric_values_are_validated();
     test_numeric_predicates_and_updates_are_validated();
+    test_identity_and_column_list_insert();
 
     printf("\n");
     printf("========================================\n");
