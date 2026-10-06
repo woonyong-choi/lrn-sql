@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 
 static void trim(char *s)
 {
@@ -60,6 +62,17 @@ static int parse_string(const char **input, char *out, size_t capacity)
     return -1;
 }
 
+static int parse_id_value(const char *input, uint64_t *value)
+{
+    if (!isdigit((unsigned char)*input)) return -1;
+    char *end;
+    errno = 0;
+    unsigned long long parsed = strtoull(input, &end, 10);
+    if (*end != '\0' || errno == ERANGE || parsed > INT64_MAX) return -1;
+    *value = (uint64_t)parsed;
+    return 0;
+}
+
 /* ── WHERE 절 파서 ── */
 static int parse_where(const char *p, statement_t *stmt, const char **end)
 {
@@ -98,8 +111,8 @@ static int parse_where(const char *p, statement_t *stmt, const char **end)
         hi_buf[j] = '\0';
         if (j == 0) return -1;
         stmt->predicate_kind = PREDICATE_ID_RANGE;
-        stmt->range_lo = (uint64_t)atoll(lo_buf);
-        stmt->range_hi = (uint64_t)atoll(hi_buf);
+        if (parse_id_value(lo_buf, &stmt->range_lo) != 0
+            || parse_id_value(hi_buf, &stmt->range_hi) != 0) return -1;
         stmt->has_lo = true;
         stmt->has_hi = true;
         stmt->lo_inclusive = true;
@@ -138,19 +151,22 @@ static int parse_where(const char *p, statement_t *stmt, const char **end)
 
     bool is_id = (strcasecmp_n(stmt->pred_field, "id", 2) == 0
                   && strlen(stmt->pred_field) == 2);
-    if (is_id && stmt->pred_op == OP_EQ) {
-        stmt->predicate_kind = PREDICATE_ID_EQ;
-        stmt->pred_id = (uint64_t)atoll(stmt->pred_value);
-    } else if (is_id && (stmt->pred_op == OP_GE || stmt->pred_op == OP_GT
-                         || stmt->pred_op == OP_LE || stmt->pred_op == OP_LT)) {
-        stmt->predicate_kind = PREDICATE_ID_RANGE;
-        uint64_t v = (uint64_t)atoll(stmt->pred_value);
-        switch (stmt->pred_op) {
-            case OP_GE: stmt->range_lo = v; stmt->has_lo = true; stmt->lo_inclusive = true;  break;
-            case OP_GT: stmt->range_lo = v; stmt->has_lo = true; stmt->lo_inclusive = false; break;
-            case OP_LE: stmt->range_hi = v; stmt->has_hi = true; stmt->hi_inclusive = true;  break;
-            case OP_LT: stmt->range_hi = v; stmt->has_hi = true; stmt->hi_inclusive = false; break;
-            default: break;
+    if (is_id) {
+        if (parse_id_value(stmt->pred_value, &stmt->pred_id) != 0) return -1;
+        if (stmt->pred_op == OP_EQ) {
+            stmt->predicate_kind = PREDICATE_ID_EQ;
+        } else if (stmt->pred_op == OP_NE) {
+            stmt->predicate_kind = PREDICATE_FIELD_CMP;
+        } else {
+            stmt->predicate_kind = PREDICATE_ID_RANGE;
+            uint64_t v = stmt->pred_id;
+            switch (stmt->pred_op) {
+                case OP_GE: stmt->range_lo = v; stmt->has_lo = true; stmt->lo_inclusive = true;  break;
+                case OP_GT: stmt->range_lo = v; stmt->has_lo = true; stmt->lo_inclusive = false; break;
+                case OP_LE: stmt->range_hi = v; stmt->has_hi = true; stmt->hi_inclusive = true;  break;
+                case OP_LT: stmt->range_hi = v; stmt->has_hi = true; stmt->hi_inclusive = false; break;
+                default: break;
+            }
         }
     } else if (stmt->pred_op == OP_EQ) {
         stmt->predicate_kind = PREDICATE_FIELD_EQ;

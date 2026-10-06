@@ -1637,8 +1637,46 @@ static exec_result_t exec_explain(pager_t *pager, statement_t *stmt)
  *          TABLE_SCAN   → exec_table_scan() 또는 exec_delete_scan()
  *          INDEX_DELETE → exec_index_delete()
  * ══════════════════════════════════════════════════════════════════════ */
+static int validate_numeric_inputs(const db_header_t *hdr, const statement_t *stmt,
+                                   exec_result_t *res)
+{
+    if (stmt->predicate_kind == PREDICATE_FIELD_EQ
+        || stmt->predicate_kind == PREDICATE_FIELD_CMP) {
+        int col_idx = find_column_index(hdr, stmt->pred_field);
+        if (col_idx >= 0 && hdr->columns[col_idx].type != COL_TYPE_VARCHAR) {
+            int64_t number;
+            int64_t min = hdr->columns[col_idx].type == COL_TYPE_INT ? INT32_MIN : INT64_MIN;
+            int64_t max = hdr->columns[col_idx].type == COL_TYPE_INT ? INT32_MAX : INT64_MAX;
+            if (parse_integer_value(stmt->pred_value, min, max, &number) != 0) {
+                res->status = -1;
+                snprintf(res->message, sizeof(res->message),
+                         "오류: 컬럼 '%s'의 정수 조건이 올바르지 않습니다", stmt->pred_field);
+                return -1;
+            }
+        }
+    }
+    if (stmt->type == STMT_UPDATE || (stmt->type == STMT_EXPLAIN
+                                      && stmt->inner_type == STMT_UPDATE)) {
+        int col_idx = find_column_index(hdr, stmt->update_field);
+        if (col_idx >= 0 && hdr->columns[col_idx].type != COL_TYPE_VARCHAR) {
+            int64_t number;
+            int64_t min = hdr->columns[col_idx].type == COL_TYPE_INT ? INT32_MIN : INT64_MIN;
+            int64_t max = hdr->columns[col_idx].type == COL_TYPE_INT ? INT32_MAX : INT64_MAX;
+            if (parse_integer_value(stmt->update_value, min, max, &number) != 0) {
+                res->status = -1;
+                snprintf(res->message, sizeof(res->message),
+                         "오류: 컬럼 '%s'의 정수 값이 올바르지 않습니다", stmt->update_field);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 exec_result_t execute(pager_t *pager, statement_t *stmt)
 {
+    exec_result_t invalid = {0, "", NULL, 0};
+    if (validate_numeric_inputs(&pager->header, stmt, &invalid) != 0) return invalid;
     /* EXPLAIN은 별도 처리 */
     if (stmt->type == STMT_EXPLAIN) {
         return exec_explain(pager, stmt);
