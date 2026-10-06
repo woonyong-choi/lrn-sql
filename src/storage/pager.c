@@ -356,9 +356,10 @@ int pager_open(pager_t* pager, const char* path, bool create) {
     memcpy(&pager->header, hbuf, sizeof(db_header_t));
     free(hbuf);
 
-    /* 매직 넘버 검증 ("MINIDB\0" 7바이트 비교) */
-    if (memcmp(pager->header.magic, DB_MAGIC, 7) != 0) {
-      fprintf(stderr, "pager: 유효하지 않은 매직 넘버입니다\n");
+    /* 매직과 지원 파일 버전을 확인한다. v1에는 테이블 이름이 없다. */
+    if (memcmp(pager->header.magic, DB_MAGIC, 7) != 0
+        || (pager->header.version != 1 && pager->header.version != DB_VERSION)) {
+      fprintf(stderr, "pager: 지원하지 않는 데이터베이스 파일입니다\n");
       pthread_mutex_destroy(&pager->header_lock);
       pthread_mutex_destroy(&pager->pager_mutex);
       for (int i = 0; i < MAX_FRAMES; i++) {
@@ -367,6 +368,10 @@ int pager_open(pager_t* pager, const char* path, bool create) {
       }
       close(fd);
       return -1;
+    }
+
+    if (pager->header.version == 1) {
+      memset(pager->header.table_name, 0, sizeof(pager->header.table_name));
     }
 
     /*

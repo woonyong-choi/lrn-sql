@@ -13,10 +13,11 @@ PostgreSQL 18에서 같은 데이터로 실행한 성공·실패와 결과 행�
 | `SELECT *`·`COUNT(*)`·단일 `WHERE`·`ORDER BY`·`LIMIT` | 제한된 형태 지원 | 동일 SQL의 결과 행 비교 |
 | `UPDATE`·`DELETE`·`DROP TABLE` | 제한된 형태 지원 | 동일 SQL의 성공·실패와 후속 조회 비교 |
 | 잘못된 숫자 값 | 변경 전에 거절 | 양쪽의 실패 여부와 후속 조회 비교 |
+| 없는 테이블 이름 | SQL 실행 전 거절 | INSERT·SELECT·UPDATE·DELETE·DROP의 오류와 후속 조회 비교 |
 
 별도 SQL이 필요한 사례가 생기면
 [`tests/pg_compat_cases.json`](../../tests/pg_compat_cases.json)에 이유를 기록하고
-**문법 호환 통과로 세지 않는다**. 현재 fixture 15건은 모두 같은 SQL이다.
+**문법 호환 통과로 세지 않는다**. 현재 fixture 20건은 모두 같은 SQL이다.
 성공·실패와
 결과 행만 비교하며, 오류 코드·메시지, 반환 컬럼 타입, 잠금·트랜잭션,
 재시작 후 상태는 아직 판정하지 않는다. 문자열 `|`나 줄바꿈이 포함된
