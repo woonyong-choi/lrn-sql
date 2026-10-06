@@ -1,0 +1,26 @@
+flow down
+title "SELECT는 조건에 따라 인덱스 또는 힙을 읽는다"
+subtitle "id 동등 비교는 점 조회, id 범위는 리프 순회, 그 밖은 힙 스캔이다"
+box input "SELECT · WHERE · ORDER BY · LIMIT"
+box plan "planner_create_plan"
+box point "INDEX_LOOKUP · id = 값"
+box range "INDEX_RANGE · id 범위"
+box scan "TABLE_SCAN · 일반 조건·정렬·집계"
+box rows "힙 행 읽기 · 결과 출력"
+input -> plan
+plan -> point "점"
+plan -> range "범위"
+plan -> scan "그 밖"
+point -> rows "row_ref"
+range -> rows "row_ref"
+scan -> rows "전체 순회"
+step "점 조회" "id 동등 비교는 B+Tree에서 좌표를 찾는다"
+  input -> plan
+  plan -> point
+  point -> rows
+step "범위 조회" "하한 리프부터 오른쪽으로 순회한다"
+  plan -> range
+  range -> rows
+step "일반 조회" "정렬·COUNT와 일반 컬럼 조건은 힙을 순회한다"
+  plan -> scan
+  scan -> rows

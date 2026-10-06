@@ -1,0 +1,18 @@
+flow down
+title "DROP TABLE은 이름을 검사한 뒤 페이지를 반환한다"
+subtitle "다른 이름이면 쓰기 전에 거절한다. 서버 경로는 DDL 독점 잠금을 잡는다"
+box input "DROP TABLE users"
+box guard "저장된 테이블 이름 검사"
+box pages "기존 페이지를 free list로"
+box blank "빈 힙·인덱스 루트 재할당"
+store header "헤더의 스키마·건수·이름 초기화"
+input -> guard
+guard -> pages "일치"
+pages -> blank
+blank -> header
+step "보호" "이름이 다르면 데이터 페이지에 닿지 않는다"
+  input -> guard
+step "교체" "페이지 반환 뒤 빈 시작 페이지를 만든다"
+  guard -> pages
+  pages -> blank
+  blank -> header

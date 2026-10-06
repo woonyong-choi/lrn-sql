@@ -1,0 +1,20 @@
+flow right
+title "리프가 차면 둘로 나누고 부모 경계 키를 갱신한다"
+subtitle "bptree_insert는 키를 정렬 합친 뒤 분할하고 next_leaf와 부모 separator를 갱신한다"
+box full "가득 찬 리프"
+box sorted "기존 키 + 새 키 정렬"
+box left "기존 리프 · 왼쪽 절반"
+box right "새 리프 · 오른쪽 절반"
+box parent "부모 · 첫 오른쪽 키"
+full -> sorted "삽입"
+sorted -> left "왼쪽"
+sorted -> right "오른쪽"
+left -> right "next_leaf"
+right -> parent "separator"
+step "정렬" "기존 키와 새 키를 임시 배열에 합친다"
+  full -> sorted
+step "분할" "두 리프에 절반씩 저장하고 연결을 바꾼다"
+  sorted -> left & sorted -> right
+  left -> right
+step "전파" "오른쪽 첫 키를 부모에 올린다"
+  right -> parent

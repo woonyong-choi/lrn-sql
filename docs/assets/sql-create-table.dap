@@ -1,0 +1,15 @@
+flow down
+title "CREATE TABLE은 이름과 컬럼 배치를 헤더에 등록한다"
+subtitle "기존 테이블은 거절한다. id BIGINT가 첫 시스템 컬럼이다"
+box input "CREATE TABLE users (...)"
+box guard "기존 테이블 검사"
+box schema "id + 사용자 컬럼 · 배치 계산"
+store header "v2 헤더 · 이름·스키마"
+input -> guard
+guard -> schema "비어 있을 때"
+schema -> header "dirty"
+step "검사" "이미 테이블이 있으면 쓰지 않는다"
+  input -> guard
+step "등록" "이름과 컬럼을 헤더의 메모리 상태에 기록한다"
+  guard -> schema
+  schema -> header

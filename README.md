@@ -61,21 +61,68 @@ bench/         scaling.py(규모별 기울기) · PostgreSQL 대조군 하니스
 docs/          design.md(설계 노트) · benchmark-postgres.md · build-and-test.md
 ```
 
-```mermaid
-flowchart TD
-    REPL["REPL (main.c)"] --> DB
-    HTTP["HTTP 서버 (server.c, http.c)<br/>연결당 스레드"] --> DB
-    DB["db.c — 문장 경계<br/>실행 후 lock 일괄 해제 (Strict 2PL)"] --> PARSER
-    PARSER["parser.c<br/>SQL → AST"] --> PLANNER
-    PLANNER["planner.c<br/>규칙 기반 접근 경로<br/>INDEX_LOOKUP · INDEX_RANGE · TABLE_SCAN"] --> EXEC
-    EXEC["executor.c<br/>계획 실행 · 행 직렬화"] --> LOCK
-    EXEC --> BTREE
-    EXEC --> TABLE
-    LOCK["lock_table.c<br/>행·범위 S/X lock<br/>writer 대기 카운터 · 3초 타임아웃"]
-    BTREE["bptree.c<br/>B+Tree 점 조회 · 리프 체인 순회<br/>latch coupling"] --> PAGER
-    TABLE["table.c<br/>슬롯 페이지 힙<br/>빈 슬롯 재활용 힌트"] --> PAGER
-    PAGER["pager.c — Buffer Pool<br/>256 frame · pin · dirty · LRU<br/>페이지 단위 rwlatch"] --> DISK[("DB 파일")]
-```
+![REPL과 HTTP가 SQL 실행기와 저장 계층으로 모이며, 단일 테이블 파일까지 이어진다](docs/assets/sql-layers.svg)
+
+| 계층 | 현재 구현 | 남은 핵심 |
+|---|---|---|
+| 입력 | REPL의 한 줄 SQL과 디버그 명령, HTTP `POST /query` | 바인딩 매개변수, 여러 문장 입력 |
+| 네트워크 | 최소 HTTP/1.1, keep-alive, 연결별 스레드, 연결 상한 128 | PostgreSQL 클라이언트 프로토콜, 인증·TLS |
+| 파서·계획 | 7개 명령의 제한된 문법, `id` 점·범위 인덱스와 힙 스캔 선택 | 식·NULL·JOIN, 통계 기반 계획 |
+| 실행·동시성 | 행·범위 S/X 잠금, HTTP 경로의 DDL 독점 잠금, 페이지 래치 | [동시 INSERT 간헐 정지](https://github.com/woonyong-choi/lrn-sql/issues/19), 다중 문장 트랜잭션·MVCC |
+| 저장 | 단일 테이블 헤더, 슬롯 힙, `id` B+Tree, 256 프레임 pager | 다중 테이블 카탈로그, 2차 인덱스 |
+| 내구성 | 캐시 축출·정상 종료 때 페이지 기록과 `fsync` | WAL, 강제 종료 후 복구·원자성 |
+| 결과 | REPL 텍스트와 HTTP 본문 | 형식화된 결과·오류 계약, 큰 응답 처리 |
+
+현재 상태를 나타낸 그림이다. 회색 경로도 구현된 흐름이며, 아직 없는 기능은 표의 오른쪽 칸에 적었다. HTTP는 `db_execute`에서 선행 잠금을 잡고 REPL은 `parse`·`execute`를 직접 호출한다. 실행기 내부의 잠금은 두 경로가 공유한다. 두 경로는 같은 저장 계층을 사용한다.
+
+### 동시 요청
+
+![서로 다른 HTTP 연결의 두 스레드가 행·범위 잠금과 공유 pager를 거쳐 시간차로 실행된다](docs/assets/sql-concurrent.svg)
+
+이 그림의 움직이는 점은 연결별 스레드에서 겹쳐 처리되는 요청이다. 이벤트 큐나 비동기 I/O 런타임을 나타내지 않는다.
+
+### B+Tree와 힙
+
+![id 키가 내부 페이지와 리프를 지나 행의 페이지·슬롯 좌표를 찾아 힙 행에 닿는다](docs/assets/sql-btree.svg)
+
+![리프가 가득 차면 키를 정렬해 두 리프로 나누고 부모 경계 키를 갱신한다](docs/assets/sql-btree-split.svg)
+
+리프의 `id → row_ref(page_id, slot_id)`가 힙 행을 가리킨다. 점 조회는 경계 키를 따라 한 리프로 내려가고, 범위 조회는 리프 연결을 따라간다. 삽입 중 리프가 차면 분할하고 부모에 경계 키를 전파한다. 그림 속 `10·20·40·50·70`은 구조 설명용 값이다.
+
+## SQL 명령의 실행 경로
+
+아래 그림은 현재 지원하는 형태의 경로다. 각 명령의 PostgreSQL 18 전체 문법을 뜻하지 않는다. [같은 SQL 차등 검사](docs/sql/pg-compatibility.md)는 현재 20건이다.
+
+### `CREATE TABLE`
+
+![CREATE TABLE이 기존 테이블을 확인하고 id와 사용자 컬럼 배치를 파일 헤더에 등록한다](docs/assets/sql-create-table.svg)
+
+### `INSERT`
+
+![INSERT가 값을 검증한 뒤 id를 할당하고 힙의 행 좌표를 B+Tree에 등록한다](docs/assets/sql-insert.svg)
+
+### `SELECT`
+
+![SELECT가 id 점 조회, id 범위 조회, 힙 스캔 가운데 한 경로로 행을 읽는다](docs/assets/sql-select.svg)
+
+### `UPDATE`
+
+![UPDATE가 수정 값을 확인하고 대상 행을 잠근 뒤 조건을 재검사해 힙 행을 바꾼다](docs/assets/sql-update.svg)
+
+### `DELETE`
+
+![DELETE가 대상 행을 잠근 뒤 힙 슬롯과 B+Tree 키를 제거한다](docs/assets/sql-delete.svg)
+
+### `DROP TABLE`
+
+![DROP TABLE이 저장된 테이블 이름을 검사한 뒤 페이지와 헤더를 초기화한다](docs/assets/sql-drop-table.svg)
+
+### `EXPLAIN`
+
+![EXPLAIN이 안쪽 문장의 접근 경로를 계산해 출력하고 문장은 실행하지 않는다](docs/assets/sql-explain.svg)
+
+그림 원본은 [`docs/assets/sql-layers.dap`](docs/assets/sql-layers.dap)과 같은 이름의 `.dap` 파일이다. Daphnis `0.1.3`에서 `npm exec --yes --package=daphnis@0.1.3 -- daphnis check docs/assets/sql-*.dap --strict --no-deprecated`로 검사하고 같은 입력을 `render`로 생성했다. 실행 코드와 연결한 근거는 [`db.c`](src/db.c), [`planner.c`](src/sql/planner.c), [`executor.c`](src/sql/executor.c), [`bptree.c`](src/storage/bptree.c)다.
+
 
 - 설계 노트(구조 선택, 검증의 한계, 다음 병목): [`docs/design.md`](docs/design.md)
 - 빌드 옵션·플랫폼 문제·테스트 스위트 상세: [`docs/build-and-test.md`](docs/build-and-test.md)
