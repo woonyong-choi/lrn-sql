@@ -47,6 +47,8 @@ def run_postgres(
 
 
 def mini_rows(output: str) -> list[tuple[str, ...]]:
+    if output == "":
+        return []
     lines = output.splitlines()
     if len(lines) < 2 or not re.fullmatch(r"[-+]+", lines[1]):
         raise ValueError(f"MiniDB 결과 형식을 해석할 수 없음: {output!r}")
