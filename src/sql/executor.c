@@ -9,8 +9,9 @@
  *   1. parse() → stmt = {type=INSERT, table_name="users", values=["Alice","25"]}
  *   2. execute() → planner_create_plan() → ACCESS_PATH_INSERT
  *   3. exec_insert() 호출:
- *      a. id = next_id = 1 (자동 할당)
- *      b. values[0].bigint_val = 1     (id)
+ *      a. 값 개수와 타입을 검증
+ *      b. id = next_id = 1 (자동 할당)
+ *         values[0].bigint_val = 1     (id)
  *         values[1].str_val = "Alice"  (name)
  *         values[2].int_val = 25       (age)
  *      c. row_serialize() → 44바이트 버퍼 생성
@@ -37,6 +38,8 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <inttypes.h>
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -163,6 +166,18 @@ static void append_header(out_buf_t *b, const db_header_t *hdr)
     buf_append(b, "\n");
 }
 
+static int parse_integer_value(const char *input, int64_t min, int64_t max,
+                               int64_t *value)
+{
+    char *end;
+    errno = 0;
+    long long parsed = strtoll(input, &end, 10);
+    if (input == end || *end != '\0' || errno == ERANGE
+        || parsed < min || parsed > max) return -1;
+    *value = (int64_t)parsed;
+    return 0;
+}
+
 /* ══════════════════════════════════════════════════════════════════════
  *  CREATE TABLE
  *
@@ -233,8 +248,8 @@ static exec_result_t exec_create_table(pager_t *pager, statement_t *stmt)
  *  예시: INSERT INTO users VALUES ('Alice', 25)
  *
  *  실행 과정:
- *    1. id = next_id = 1 (자동 할당)
- *    2. values[0] = id(1), values[1] = "Alice", values[2] = 25
+ *    1. 값 개수와 타입을 검증
+ *    2. id = next_id = 1, values[1] = "Alice", values[2] = 25
  *    3. row_serialize() → 44바이트 버퍼: [01 00...][Alice\0...][19 00 00 00]
  *    4. heap_insert(row_buf) → ref = {page_id=1, slot_id=0}
  *    5. bptree_insert(key=1, ref={1,0})
@@ -254,21 +269,44 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
     row_value_t values[MAX_COLUMNS];
     memset(values, 0, sizeof(values));
 
-    /*
-     * id 할당: header_lock으로 next_id를 원자적으로 읽고 증가시킨다.
-     * DML이 rdlock으로 동시 실행되므로 여러 INSERT가 같은 next_id를 쓰지 않도록 보호.
-     */
+    if (stmt->insert_value_count != hdr->column_count - 1) {
+        res.status = -1;
+        snprintf(res.message, sizeof(res.message),
+                 "오류: INSERT 값 개수가 컬럼 수와 다릅니다");
+        return res;
+    }
+
+    for (uint16_t i = 1; i < hdr->column_count; i++) {
+        const column_meta_t *col = &hdr->columns[i];
+        const char *input = stmt->insert_values[i - 1];
+        int64_t number;
+        switch (col->type) {
+            case COL_TYPE_INT:
+            case COL_TYPE_BIGINT:
+                if (parse_integer_value(input,
+                        col->type == COL_TYPE_INT ? INT32_MIN : INT64_MIN,
+                        col->type == COL_TYPE_INT ? INT32_MAX : INT64_MAX,
+                        &number) != 0) {
+                    res.status = -1;
+                    snprintf(res.message, sizeof(res.message),
+                             "오류: 컬럼 '%s'의 정수 값이 올바르지 않습니다", col->name);
+                    return res;
+                }
+                if (col->type == COL_TYPE_INT) values[i].int_val = (int32_t)number;
+                else values[i].bigint_val = number;
+                break;
+            case COL_TYPE_VARCHAR:
+                strncpy(values[i].str_val, input, 255);
+                break;
+        }
+    }
+
+    /* 값 검증이 끝난 뒤에만 id를 소비하고 쓰기 잠금을 잡는다. */
     pthread_mutex_lock(&pager->header_lock);
     uint64_t my_id = hdr->next_id++;
     pager->header_dirty = true;
     pthread_mutex_unlock(&pager->header_lock);
 
-    /*
-     * Gap Check (Next-Key Lock): 새 id에 대한 point X lock을 항상 잡는다.
-     * 내부에서 point-vs-range 충돌도 함께 검사하므로, range lock이 존재하면
-     * 해당 INSERT는 range lock 해제까지 대기한다.
-     * → Phantom Insert 방지 + lock table에 대한 락 없는 읽기 제거.
-     */
     lock_table_t *lt = db_get_lock_table();
     if (lock_acquire(lt, my_id, LOCK_X) != 0) {
         res.status = -1;
@@ -276,29 +314,7 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
                  "오류: INSERT gap check timeout (id=%" PRIu64 ", range lock 충돌)", my_id);
         return res;
     }
-
     values[0].bigint_val = (int64_t)my_id;
-
-    /*
-     * 사용자 입력 값을 비시스템 컬럼에 매핑한다.
-     * 컬럼 0(id)은 건너뛰고, 컬럼 1부터 사용자 값을 순서대로 넣는다.
-     */
-    uint16_t val_idx = 0;
-    for (uint16_t i = 1; i < hdr->column_count && val_idx < stmt->insert_value_count; i++) {
-        const column_meta_t *col = &hdr->columns[i];
-        const char *sv = stmt->insert_values[val_idx++];
-        switch (col->type) {
-            case COL_TYPE_INT:
-                values[i].int_val = atoi(sv);
-                break;
-            case COL_TYPE_BIGINT:
-                values[i].bigint_val = atoll(sv);
-                break;
-            case COL_TYPE_VARCHAR:
-                strncpy(values[i].str_val, sv, 255);
-                break;
-        }
-    }
 
     /* 행 직렬화 → 힙 삽입 → B+ tree 등록 */
     uint8_t *row_buf = (uint8_t *)calloc(1, hdr->row_size);
