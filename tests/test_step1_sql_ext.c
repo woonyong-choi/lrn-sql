@@ -693,6 +693,47 @@ static void test_insert_numeric_values_are_validated(void) {
     teardown_test_db(&pager, "insert_numeric");
 }
 
+static void test_numeric_predicates_and_updates_are_validated(void) {
+    pager_t pager;
+    setup_test_db(&pager, "numeric_predicate");
+    create_and_populate(&pager, 2);
+
+    const char *invalid[] = {
+        "SELECT * FROM users WHERE id = abc",
+        "SELECT * FROM users WHERE id BETWEEN 1 AND abc",
+        "DELETE FROM users WHERE id = 9223372036854775808",
+        "SELECT * FROM users WHERE age = abc",
+        "SELECT * FROM users WHERE age = 25x",
+        "SELECT * FROM users WHERE age = 2147483648",
+        "UPDATE users SET age = abc WHERE id = 1",
+        "UPDATE users SET age = 2147483648 WHERE name = 'Alice'",
+        "UPDATE users SET age = 5x WHERE id = 1"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        exec_result_t r = db_execute(&pager, invalid[i]);
+        ASSERT_EQ_INT(r.status, -1, invalid[i]);
+        free(r.out_buf);
+    }
+
+    exec_result_t r = db_execute(&pager, "SELECT * FROM users WHERE id = 1");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "Alice | 25") != NULL,
+                "rejected UPDATE keeps the row unchanged");
+    free(r.out_buf);
+    r = db_execute(&pager, "SELECT COUNT(*) FROM users");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "2") != NULL,
+                "rejected DELETE keeps the row count");
+    free(r.out_buf);
+    r = db_execute(&pager, "INSERT INTO users VALUES ('Cara', 31)");
+    ASSERT_TRUE(r.status == 0 && strstr(r.message, "id=3") != NULL,
+                "rejected statements do not consume an id");
+    free(r.out_buf);
+    r = db_execute(&pager, "UPDATE users SET age = -2147483648 WHERE id = 1");
+    ASSERT_EQ_INT(r.status, 0, "INT minimum remains valid");
+    free(r.out_buf);
+
+    teardown_test_db(&pager, "numeric_predicate");
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -711,6 +752,7 @@ int main(void)
     test_explain_matches_execution();
     test_sql_input_is_fully_consumed();
     test_insert_numeric_values_are_validated();
+    test_numeric_predicates_and_updates_are_validated();
 
     printf("\n");
     printf("========================================\n");
