@@ -608,6 +608,41 @@ static void test_explain_matches_execution(void) {
     teardown_test_db(&pager, "explain_exec");
 }
 
+/* #2: 지원하지 않는 SQL은 일부만 실행하지 않고 거절한다. */
+static void test_sql_input_is_fully_consumed(void) {
+    pager_t pager;
+    setup_test_db(&pager, "full_input");
+    create_and_populate(&pager, 1);
+
+    exec_result_t r = db_execute(&pager,
+        "INSERT INTO users VALUES ('O''Brien', 30)");
+    ASSERT_EQ_INT(r.status, 0, "escaped quote INSERT succeeds");
+    free(r.out_buf);
+    r = db_execute(&pager, "SELECT * FROM users WHERE id = 2");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "O'Brien | 30") != NULL,
+                "escaped quote and following value are preserved");
+    free(r.out_buf);
+
+    const char *invalid[] = {
+        "SELECT * FROM users WHERE age = 25 OR age = 30",
+        "SELECT * FROM users OFFSET 1",
+        "SELECT * FROM users LIMIT 1 OFFSET 1",
+        "UPDATE users SET age = 99 WHERE id = 1 OR id = 2",
+        "DELETE FROM users WHERE id = 1 OR id = 2",
+        "INSERT INTO users VALUES ('Bob', 30) RETURNING id",
+        "DROP TABLE users CASCADE",
+        "SELECT * FROM users LIMIT -1",
+        "SELECT * FROM users WHERE id = 1;DROP TABLE users"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        exec_result_t r = db_execute(&pager, invalid[i]);
+        ASSERT_EQ_INT(r.status, -1, invalid[i]);
+        free(r.out_buf);
+    }
+
+    teardown_test_db(&pager, "full_input");
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -624,6 +659,7 @@ int main(void)
     test_explain_extended();
     test_index_range();
     test_explain_matches_execution();
+    test_sql_input_is_fully_consumed();
 
     printf("\n");
     printf("========================================\n");
