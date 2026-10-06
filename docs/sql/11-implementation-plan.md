@@ -108,7 +108,7 @@ EXPLAIN SELECT * FROM users WHERE id = 1;
 - 단일 테이블만 지원한다.
 - `id`는 자동 생성되는 시스템 컬럼이다.
 - `id`는 수정할 수 없다.
-- 명시적 `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, 복합 키 문법은 아직 지원하지 않는다.
+- 첫 컬럼의 `id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`는 지원한다. 일반 `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, 복합 키 문법은 아직 지원하지 않는다.
 - `id` 외 컬럼에는 2차 인덱스가 없다.
 
 ---
@@ -147,7 +147,7 @@ EXPLAIN SELECT * FROM users WHERE id = 1;
 1. 다중 테이블
 2. 2차 인덱스
 3. 더 엄격한 HTTP 입력 검증
-4. WAL / recovery / MVCC는 아직 범위 밖
+4. WAL / recovery는 미구현([#9](https://github.com/woonyong-choi/lrn-sql/issues/9)); MVCC도 미구현
 
 ---
 
