@@ -59,9 +59,12 @@ jobs:
           node-version: 20
       - name: Check Daphnis figures and generated SVG
         run: |
+          python3 scripts/check_readme_figures.py
           npm exec --yes --package=daphnis@0.1.3 -- daphnis check docs/assets/sql-*.dap --strict --no-deprecated
+          npm exec --yes --package=daphnis@0.1.3 -- daphnis check docs/assets/sql-scaling-*.dap --strict --no-deprecated --require-data
           mkdir -p build/figures
           npm exec --yes --package=daphnis@0.1.3 -- daphnis render docs/assets/sql-*.dap --strict --out build/figures
+          npm exec --yes --package=daphnis@0.1.3 -- daphnis render docs/assets/sql-scaling-*.dap --strict --require-data --out build/figures
           for source in docs/assets/sql-*.dap; do
             name="${source##*/}"
             cmp "docs/assets/${name%.dap}.svg" "build/figures/${name%.dap}.svg"

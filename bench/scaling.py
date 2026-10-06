@@ -17,12 +17,14 @@
   noindex 현재 코드 + -DMINIDB_DISABLE_INDEX_RANGE (Range 가 힙 스캔으로 감)
 
 사용:
-  python3 bench/scaling.py                      # N = 25k..200k, 3회 중앙값
-  python3 bench/scaling.py --max-rows 400000
+  make bench                                    # 기본 50k..400k, 3회 중앙값
+  python3 bench/scaling.py --max-rows 200000     # 측정 표·차트 입력 생성
   python3 bench/scaling.py --reps 1 --out bench/scaling.md
 """
 import argparse
+import json
 import os
+from pathlib import Path
 import random
 import statistics
 import subprocess
@@ -118,97 +120,72 @@ def measure(binary, workdir, n, reps, do_range):
     return i, r
 
 
-# ── SVG 그리기 (외부 의존성 없이) ───────────────────────────────────────
-# GitHub README 에서 바로 보이고, 다시 측정하면 같은 명령으로 갱신된다.
-# 라이트/다크 어느 배경에서도 읽히도록 배경은 비우고 중간 회색 축을 쓴다.
+def write_chart_inputs(
+    sizes: list[int], res: dict[str, dict[str, list[float]]], reps: int
+) -> None:
+    """공개 표와 같은 1ms 단위로 차트 데이터와 Daphnis 원본을 만든다."""
+    root = Path(REPO)
+    data = {
+        "repetitions": reps,
+        "rows": sizes,
+        "x": "log2(rows / first row count)",
+        "unit": "ms",
+        "insert": [],
+        "range": [],
+    }
+    for index, _ in enumerate(sizes):
+        data["insert"].append(
+            {
+                "x": index,
+                "before_ms": round(res["prefix"]["insert"][index] * 1000),
+                "after_ms": round(res["after"]["insert"][index] * 1000),
+            }
+        )
+        data["range"].append(
+            {
+                "x": index,
+                "scan_ms": round(res["noindex"]["range"][index] * 1000),
+                "btree_ms": round(res["after"]["range"][index] * 1000),
+            }
+        )
+    data_path = root / "bench/scaling.json"
+    data_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
-AXIS = "#8b949e"
-TEXT = "#8b949e"
-BEFORE = "#d1495b"
-AFTER = "#2a9d8f"
-
-
-def _panel(x0, y0, w, h, sizes, series, title, note):
-    """log-log 선그래프 한 장. series = [(label, color, [초, ...]), ...]"""
-    import math
-    xs = [math.log10(n) for n in sizes]
-    ys = [math.log10(v * 1000) for _, _, vals in series for v in vals]
-    xmin, xmax = min(xs), max(xs)
-    ymin, ymax = min(ys), max(ys)
-    if ymax - ymin < 0.5:
-        mid = (ymax + ymin) / 2
-        ymin, ymax = mid - 0.25, mid + 0.25
-    pad = (ymax - ymin) * 0.12
-    ymin, ymax = ymin - pad, ymax + pad
-
-    def px(v):
-        return x0 + (v - xmin) / (xmax - xmin) * w
-    def py(v):
-        return y0 + h - (v - ymin) / (ymax - ymin) * h
-
-    out = [f'<text x="{x0}" y="{y0 - 24}" font-size="15" font-weight="600"'
-           f' fill="{TEXT}">{title}</text>',
-           f'<text x="{x0}" y="{y0 - 7}" font-size="11" fill="{TEXT}">{note}</text>',
-           f'<line x1="{x0}" y1="{y0 + h}" x2="{x0 + w}" y2="{y0 + h}"'
-           f' stroke="{AXIS}" stroke-width="1"/>',
-           f'<line x1="{x0}" y1="{y0}" x2="{x0}" y2="{y0 + h}"'
-           f' stroke="{AXIS}" stroke-width="1"/>']
-
-    for n, xv in zip(sizes, xs):
-        lab = f"{n // 1000}k"
-        out.append(f'<text x="{px(xv):.1f}" y="{y0 + h + 16}" font-size="11"'
-                   f' text-anchor="middle" fill="{TEXT}">{lab}</text>')
-    for dec in range(int(ymin), int(ymax) + 2):
-        if not (ymin <= dec <= ymax):
-            continue
-        yy = py(dec)
-        ms = 10 ** dec
-        lab = f"{ms:g}ms" if ms < 1000 else f"{ms / 1000:g}s"
-        out.append(f'<line x1="{x0}" y1="{yy:.1f}" x2="{x0 + w}" y2="{yy:.1f}"'
-                   f' stroke="{AXIS}" stroke-width="0.5" stroke-dasharray="3 4"'
-                   f' opacity="0.5"/>')
-        out.append(f'<text x="{x0 - 6}" y="{yy + 4:.1f}" font-size="11"'
-                   f' text-anchor="end" fill="{TEXT}">{lab}</text>')
-
-    for li, (label, color, vals) in enumerate(series):
-        pts = " ".join(f"{px(x):.1f},{py(math.log10(v * 1000)):.1f}"
-                       for x, v in zip(xs, vals))
-        out.append(f'<polyline points="{pts}" fill="none" stroke="{color}"'
-                   f' stroke-width="2.5" stroke-linejoin="round"/>')
-        for x, v in zip(xs, vals):
-            out.append(f'<circle cx="{px(x):.1f}" cy="{py(math.log10(v*1000)):.1f}"'
-                       f' r="3.5" fill="{color}"/>')
-        ly = y0 + 13 + li * 17
-        out.append(f'<line x1="{x0 + w - 142}" y1="{ly - 4}"'
-                   f' x2="{x0 + w - 124}" y2="{ly - 4}" stroke="{color}"'
-                   f' stroke-width="2.5"/>')
-        out.append(f'<text x="{x0 + w - 118}" y="{ly}" font-size="12"'
-                   f' fill="{color}">{label}</text>')
-    return out
-
-
-def write_svg(path, sizes, res):
-    W, H = 960, 320
-    body = []
-    ki_b = exponent(sizes, res["prefix"]["insert"])
-    ki_a = exponent(sizes, res["after"]["insert"])
-    kr_b = exponent(sizes, res["noindex"]["range"])
-    kr_a = exponent(sizes, res["after"]["range"])
-    body += _panel(66, 52, 340, 196, sizes,
-                   [(f"개선 전  O(N^{ki_b:.2f})", BEFORE, res["prefix"]["insert"]),
-                    (f"개선 후  O(N^{ki_a:.2f})", AFTER, res["after"]["insert"])],
-                   "INSERT 전체 소요", "양축 로그 — 기울기가 그대로 지수다")
-    body += _panel(556, 52, 340, 196, sizes,
-                   [(f"힙 스캔  O(N^{kr_b:.2f})", BEFORE, res["noindex"]["range"]),
-                    (f"B+Tree  O(N^{kr_a:.2f})", AFTER, res["after"]["range"])],
-                   "Range 질의 100회 (각 1,000행)", "반환 행 수는 고정, 테이블만 커진다")
-    body.append(f'<text x="66" y="{H - 12}" font-size="11" fill="{TEXT}">'
-                f'bench/scaling.py — 규모별 중앙값, 프로세스 기동 시간 차감, -O2</text>')
-    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
-           f'viewBox="0 0 {W} {H}" font-family="-apple-system,Segoe UI,Helvetica,sans-serif">\n'
-           + "\n".join(body) + "\n</svg>\n")
-    with open(path, "w") as f:
-        f.write(svg)
+    row_labels = ", ".join(f"{index}={n // 1000}k" for index, n in enumerate(sizes))
+    header = (
+        f'subtitle "{row_labels}. {reps}회 중앙값, 세로축 로그"\n'
+        'x "행 수 배가 횟수"\n'
+        'y "총 소요 시간(ms)"\n'
+        "scale log\n"
+    )
+    charts = {
+        "sql-scaling-insert": (
+            "INSERT 전체 소요",
+            "insert",
+            ("before", "개선 전", "before_ms", "compare"),
+            ("after", "개선 후", "after_ms", "main"),
+        ),
+        "sql-scaling-range": (
+            "범위 질의 100회 · 각 1,000행",
+            "range",
+            ("scan", "힙 스캔", "scan_ms", "compare"),
+            ("btree", "B+Tree", "btree_ms", "main"),
+        ),
+    }
+    for name, (title, pointer, before, after) in charts.items():
+        source = (
+            "chart line\n"
+            f'title "{title}"\n'
+            + header
+            + f'data "../../bench/scaling.json" at "/{pointer}"\n'
+            + f'series {before[0]} "{before[1]}" role={before[3]} key="{before[2]}"\n'
+            + f'series {after[0]} "{after[1]}" role={after[3]} key="{after[2]}"\n'
+            + f'step "{before[1]}" "같은 규모에서 측정한 기준 경로"\n'
+            + f"  reveal {before[0]}\n"
+            + f'step "{after[1]}" "같은 행 수에서 소요 시간을 비교"\n'
+            + f"  reveal {after[0]}\n"
+        )
+        (root / "docs/assets" / f"{name}.dap").write_text(source)
 
 
 def exponent(sizes, times):
@@ -324,11 +301,10 @@ def main():
     body = "\n".join(lines) + "\n"
     with open(args.out, "w") as f:
         f.write(body)
-    svg_path = os.path.join(REPO, "docs", "scaling.svg")
-    write_svg(svg_path, sizes, res)
+    write_chart_inputs(sizes, res, args.reps)
     print("\n" + body)
     print(f"→ {args.out}")
-    print(f"→ {svg_path}")
+    print("→ bench/scaling.json, docs/assets/sql-scaling-*.dap")
     return 0
 
 

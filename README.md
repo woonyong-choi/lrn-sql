@@ -2,7 +2,7 @@
 
 SQL을 파싱해 실행 계획을 세우고, 페이지에 행을 저장한 뒤 B+Tree 인덱스로 조회하는 C11 학습용 데이터베이스 엔진입니다.
 
-[![CI](https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml/badge.svg)](https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml)
+[CI 실행 기록](https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml)
 
 - 5인 팀 과제에서 parser, planner, executor와 페이지·인덱스·잠금 계층 구현을 주도했고, 과제 이후 범위 조회와 회귀 검사를 추가했습니다.
 - 100만 행에서 드러난 반복 탐색과 잠금 누적을 gdb로 추적했습니다. 개선 전후는 단일 배수가 아니라 전 구간 기울기(INSERT `O(N^2.00) → O(N^1.19)`, 범위 질의 `O(N^0.88) → O(N^0.19)`)로 비교합니다.
@@ -11,8 +11,6 @@ SQL을 파싱해 실행 계획을 세우고, 페이지에 행을 저장한 뒤 B
 ## 데모
 
 테이블 생성 → INSERT 1,000건 → 건수 확인과 범위 SELECT를 파이프 입력으로 실행한 실제 출력입니다. 재현은 `bash scripts/demo_repl.sh`이고, 데모 빌드는 sanitizer 없는 `SANITIZE=`입니다.
-
-![lrn-sql 구동 GIF](https://raw.githubusercontent.com/woonyong-choi/lrn-sql/main/docs/demo.gif)
 
 ```
 $ time (scripts/gen_inserts.sh 1000 | build-demo/minidb /tmp/demo.db | tail -2)
@@ -31,7 +29,7 @@ id | name | email | age
 
 ## 빠르게 실행하기
 
-GCC, Make, pthread가 필요합니다. 아래는 2026-09-23에 전부 실행해 통과한 명령입니다.
+GCC, Make, pthread가 필요합니다. `make bench`의 차트 생성에는 Node.js 20 이상도 필요합니다.
 
 ```sh
 git clone https://github.com/woonyong-choi/lrn-sql.git && cd lrn-sql
@@ -40,7 +38,7 @@ make SANITIZE= BUILD_DIR=build-nosan all          # 빌드
 printf "CREATE TABLE users (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name VARCHAR(32), age INT)\nINSERT INTO users (name, age) VALUES ('Alice', 25)\nEXPLAIN SELECT * FROM users WHERE id = 1\nSELECT * FROM users WHERE id = 1\n.exit\n" | ./build-nosan/minidb demo.db
 
 make test-all      # 593개 단언
-make bench         # 규모별 기울기 재측정 (36초)
+make bench         # 규모별 기울기 재측정과 Daphnis 차트 갱신
 bash scripts/demo_repl.sh   # 위 데모 재현 (13초)
 ```
 
@@ -136,7 +134,13 @@ docs/          design.md(설계 노트) · benchmark-postgres.md · build-and-te
 - **성능 비교** — 단일 실행의 배수 대신 행 수별 실행 시간을 log-log 기울기로 비교합니다. 입력 크기가 바뀌어도 접근 경로의 변화를 확인하려는 기준입니다. → [`bench/scaling.md`](bench/scaling.md), `make bench`
 - **회귀 대조군** — `-DMINIDB_DISABLE_FREE_HINT`, `-DMINIDB_DISABLE_INDEX_RANGE`로 현재 소스에서 이전 접근 경로만 끄고 비교합니다. 같은 컴파일러와 주변 코드에서 전후를 재현합니다. → [`Makefile`](Makefile), [`tests/test_step3_regression.c`](tests/test_step3_regression.c)
 
-![규모별 INSERT·Range 소요 시간 (양축 로그)](https://raw.githubusercontent.com/woonyong-choi/lrn-sql/main/docs/scaling.svg)
+두 차트의 가로축 0·1·2·3은 각각 5만·10만·20만·40만 행이다. 한 칸이 행 수 2배이고 세로축은 로그 눈금이다. 움직이는 선은 같은 측정값을 계열별로 드러낸다. 수치는 아래 표와 [`bench/scaling.md`](bench/scaling.md)에 있다.
+
+![행 수가 5만에서 40만으로 늘 때 INSERT 전체 시간이 개선 전에는 131ms에서 8415ms, 개선 후에는 71ms에서 863ms로 증가한다](docs/assets/sql-scaling-insert.svg)
+
+![범위 질의 100회는 힙 스캔에서 62ms에서 412ms, B+Tree에서 26ms에서 39ms로 증가한다](docs/assets/sql-scaling-range.svg)
+
+차트 원본은 [`INSERT`](docs/assets/sql-scaling-insert.dap)·[`범위 질의`](docs/assets/sql-scaling-range.dap)이고, 값은 [`bench/scaling.json`](bench/scaling.json)에 있다. `make bench`가 측정 결과와 그림을 함께 갱신한다.
 
 | INSERT | 전 구간 기울기 | 50k | 100k | 200k | 400k |
 |---|---|---:|---:|---:|---:|

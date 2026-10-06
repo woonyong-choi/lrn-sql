@@ -29,7 +29,7 @@
 | B+Tree **구조 불변식 property test** 추가 — 무작위 삽입·삭제 후 트리 전체를 걸어 8종 검사, 결함 5종 주입으로 검증 | `239f302` | `tests/test_bptree_property.c` |
 | `INDEX_RANGE` **엔드투엔드 테스트** 추가 — 경계·LIMIT·삭제 후, 힙 스캔 결과와 대조 | `239f302` | `tests/test_step1_sql_ext.c` |
 | **EXPLAIN이 실행기와 다른 계획을 보고하던 버그** 수정 + 회귀 테스트 | `7f6cb84` | `parser.c`, `planner.c`, `tests/` |
-| **규모별 기울기 벤치마크**(`make bench`) — 재현되지 않던 절대 배수를 배가 계수로 교체, 그래프 생성 포함 | `7f6cb84` | `bench/scaling.py`, `docs/scaling.svg` |
+| **규모별 기울기 벤치마크**(`make bench`) — 재현되지 않던 절대 배수를 배가 계수로 교체, 당시 그래프 생성 포함 | `7f6cb84` | `bench/scaling.py` |
 | **설계 노트** — 버린 대안과 이유, 정확성 검증의 한계, 다음 병목 | `7f6cb84` | `docs/design.md` |
 | **Strict 2PL lock 해제·힙 체인 재탐색 회귀 테스트**(`make test-step3`) | `da1624b` | `tests/test_step3_regression.c` |
 

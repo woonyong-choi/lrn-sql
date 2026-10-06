@@ -138,7 +138,7 @@ wlatch` 단방향 규약을 코드 주석으로 못 박고 있다
 | 200k → 400k | 4.40x | 2.00x |
 
 전체 표와 Range 질의 결과는 [`bench/scaling.md`](../bench/scaling.md),
-그래프는 [`docs/scaling.svg`](scaling.svg). 둘 다 `make bench` 가 다시 만든다.
+차트는 [`INSERT`](assets/sql-scaling-insert.svg)와 [`범위 질의`](assets/sql-scaling-range.svg)로 나뉜다. `make bench`가 측정 표·차트 입력·Daphnis 원본·SVG를 함께 갱신한다.
 
 ---
 

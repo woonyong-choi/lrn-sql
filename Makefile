@@ -81,11 +81,13 @@ gen: $(BUILD_DIR)/gen_data
 #
 # bench      규모별 기울기. 개선 전(993d4d8^)·개선 후·인덱스 비활성 세 빌드를
 #            같은 소스에서 뽑아 같은 워크로드로 잰다. 약 1분.
-#            결과: bench/scaling.md + docs/scaling.svg
+#            결과: bench/scaling.md + bench/scaling.json + Daphnis 차트 2개
 # bench-1m   1M 행 단일 규모 측정 (개선 전 INSERT 가 느려 수 분 걸린다)
 # bench-http HTTP 서버 경로 부하 생성기 (make run-server 가 먼저 필요)
 bench:
 	python3 bench/scaling.py
+	npm_config_cache=$(BUILD_DIR)/npm-cache npm exec --yes --package=daphnis@0.1.3 -- daphnis check docs/assets/sql-scaling-*.dap --strict --no-deprecated --require-data
+	npm_config_cache=$(BUILD_DIR)/npm-cache npm exec --yes --package=daphnis@0.1.3 -- daphnis render docs/assets/sql-scaling-*.dap --strict --require-data
 
 bench-1m:
 	python3 bench/bench_minidb_param.py --rows 1000000
