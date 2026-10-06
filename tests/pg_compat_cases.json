@@ -1,21 +1,15 @@
 [
   {
     "name": "create_users",
-    "sql": "CREATE TABLE users (name VARCHAR(32), age INT)",
-    "pg_sql": "CREATE TABLE users (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name VARCHAR(32), age INT)",
-    "difference": "MiniDB는 id를 자동으로 추가하고 PostgreSQL은 identity 선언이 필요하다"
+    "sql": "CREATE TABLE users (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name VARCHAR(32), age INT)"
   },
   {
     "name": "insert_alice",
-    "sql": "INSERT INTO users VALUES ('Alice', 25)",
-    "pg_sql": "INSERT INTO users (name, age) VALUES ('Alice', 25)",
-    "difference": "MiniDB는 INSERT 컬럼 목록을 아직 지원하지 않는다"
+    "sql": "INSERT INTO users (name, age) VALUES ('Alice', 25)"
   },
   {
     "name": "insert_quote",
-    "sql": "INSERT INTO users VALUES ('O''Brien', 30)",
-    "pg_sql": "INSERT INTO users (name, age) VALUES ('O''Brien', 30)",
-    "difference": "MiniDB는 INSERT 컬럼 목록을 아직 지원하지 않는다"
+    "sql": "INSERT INTO users (name, age) VALUES ('O''Brien', 30)"
   },
   {
     "name": "select_ordered",

@@ -42,6 +42,16 @@ static int at_end(const char *p)
     return *skip_ws(p) == '\0' ? 0 : -1;
 }
 
+static int consume_word(const char **input, const char *word)
+{
+    const char *p = skip_ws(*input);
+    size_t len = strlen(word);
+    if (strlen(p) < len || strcasecmp_n(p, word, len) != 0
+        || isalnum((unsigned char)p[len]) || p[len] == '_') return -1;
+    *input = p + len;
+    return 0;
+}
+
 static int parse_string(const char **input, char *out, size_t capacity)
 {
     const char *p = *input;
@@ -265,6 +275,17 @@ static int parse_create_table(const char *input, statement_t *stmt)
             return -1;
         }
 
+        p = skip_ws(p);
+        if (strcmp(cd->name, "id") == 0 && *p != ',' && *p != ')') {
+            if (stmt->col_count != 0 || cd->type != COL_TYPE_BIGINT
+                || consume_word(&p, "GENERATED") != 0
+                || consume_word(&p, "ALWAYS") != 0
+                || consume_word(&p, "AS") != 0
+                || consume_word(&p, "IDENTITY") != 0
+                || consume_word(&p, "PRIMARY") != 0
+                || consume_word(&p, "KEY") != 0) return -1;
+        }
+
         stmt->col_count++;
         p = skip_ws(p);
         if (*p == ',') p++;
@@ -282,9 +303,35 @@ static int parse_insert(const char *input, statement_t *stmt)
     p = skip_ws(p + 4);
 
     int i = 0;
-    while (*p && !isspace((unsigned char)*p) && i < 31)
+    while (*p && !isspace((unsigned char)*p) && *p != '(' && i < 31)
         stmt->table_name[i++] = *p++;
     stmt->table_name[i] = '\0';
+    if (i == 0) return -1;
+
+    p = skip_ws(p);
+    if (*p == '(') {
+        stmt->has_insert_columns = true;
+        p++;
+        while (*p) {
+            p = skip_ws(p);
+            if (stmt->insert_column_count >= MAX_COLUMNS - 1) return -1;
+            char *column = stmt->insert_columns[stmt->insert_column_count];
+            i = 0;
+            while (*p && (isalnum((unsigned char)*p) || *p == '_') && i < 31)
+                column[i++] = *p++;
+            column[i] = '\0';
+            if (i == 0) return -1;
+            stmt->insert_column_count++;
+            p = skip_ws(p);
+            if (*p == ')') {
+                p++;
+                break;
+            }
+            if (*p != ',') return -1;
+            p++;
+        }
+        if (stmt->insert_column_count == 0) return -1;
+    }
 
     p = skip_ws(p);
     if (strcasecmp_n(p, "VALUES", 6) != 0) return -1;

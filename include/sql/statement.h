@@ -56,6 +56,9 @@ typedef struct {
     /* INSERT */
     char              insert_values[MAX_COLUMNS][256];
     uint16_t          insert_value_count;
+    char              insert_columns[MAX_COLUMNS][32];
+    uint16_t          insert_column_count;
+    bool              has_insert_columns;
 
     /* UPDATE: SET col = val */
     char              update_field[32];
