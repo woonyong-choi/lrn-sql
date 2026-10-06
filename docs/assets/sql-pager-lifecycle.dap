@@ -1,0 +1,44 @@
+flow down
+title "pager의 256개 프레임은 pin과 dirty 상태로 페이지를 관리한다"
+subtitle "메모리 적재와 디스크 기록은 별개다. pin이 있으면 축출하지 않고, 정상 종료에서 fsync한다"
+box caller "힙·B+Tree · pager_get_page"
+box hash "512 버킷 해시 · page_id → frame"
+box hit "히트 · pin_count 증가 · used_tick 갱신"
+box miss "미스 · 빈 프레임 또는 unpinned LRU 선택"
+box old "희생 프레임 dirty면 pwrite 후 교체"
+store disk "DB 파일 · pread / pwrite"
+box frame "프레임 데이터 · page_size 바이트"
+box latch "읽기·쓰기 래치 · 페이지 내용 보호"
+box dirty "수정 후 dirty 표시 · 64 이상이면 16 목표 플러시"
+box release "unlatch + unpin · 교체 가능"
+box close "pager_close · 남은 dirty + 헤더 기록 · fsync"
+caller -> hash
+hash -> hit "찾음"
+hash -> miss "없음"
+miss -> old "교체 필요"
+old -> disk "dirty일 때 기록"
+disk -> frame "pread 적재"
+hit -> frame
+frame -> latch "요청한 접근"
+latch -> dirty "쓰기일 때"
+latch -> release "읽기 완료"
+dirty -> release
+release -> close "정상 종료"
+close -> disk "pwrite + fsync"
+step "캐시 히트" "기존 프레임을 pin하고 래치를 잡는다"
+  caller -> hash
+  hash -> hit
+  hit -> frame
+  frame -> latch
+step "캐시 미스" "빈 프레임 또는 pin 없는 오래된 프레임을 골라 읽는다"
+  hash -> miss
+  miss -> old
+  old -> disk
+  disk -> frame
+step "변경과 해제" "수정한 프레임은 dirty로 표시하고 래치와 pin을 놓는다"
+  frame -> latch
+  latch -> dirty
+  dirty -> release
+step "종료 기록" "남은 dirty와 헤더를 기록한 뒤 fsync하고 프레임을 해제한다"
+  release -> close
+  close -> disk
