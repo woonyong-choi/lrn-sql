@@ -1,0 +1,21 @@
+flow down
+title "id B+Tree는 키를 힙 행의 페이지·슬롯 좌표로 바꾼다"
+subtitle "키와 페이지는 구조를 설명하는 예시이며 실제 파일 값은 아니다"
+box root "내부 페이지 · 경계 키 50"
+box left "왼쪽 리프 · 10 · 20 · 40"
+box right "오른쪽 리프 · 50 · 70"
+box ref "row_ref · page_id, slot_id"
+box heap "힙 페이지 · 행 바이트"
+root -> left "id < 50"
+root -> right "id ≥ 50"
+left -> right "next_leaf · 범위"
+left -> ref "행 좌표"
+right -> ref "행 좌표"
+ref -> heap "슬롯 읽기"
+step "점 조회" "id 70은 오른쪽 리프에서 좌표를 찾는다"
+  root -> right
+  right -> ref
+  ref -> heap
+step "범위 조회" "하한 리프부터 오른쪽 연결을 순회한다"
+  root -> left
+  left -> right

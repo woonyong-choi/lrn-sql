@@ -1,0 +1,17 @@
+flow right
+title "두 HTTP 연결은 별도 스레드에서 겹쳐 실행된다"
+subtitle "두 스레드는 잠금과 공유 pager를 거친다. 이벤트 큐는 구현되어 있지 않다"
+person a "클라이언트 A"
+person b "클라이언트 B"
+box wa "연결 스레드 A"
+box wb "연결 스레드 B"
+box locks "행·범위 잠금"
+box pager "공유 pager"
+a -> wa "요청 A"
+b -> wb "요청 B"
+wa -> locks "SQL A"
+wb -> locks "SQL B"
+locks -> pager "허용된 접근"
+step "동시 요청" "두 연결의 요청이 시간차로 같은 저장 계층에 도착한다" for=6s
+  track a -> wa -> locks -> pager at=0s time=4s
+  track b -> wb -> locks -> pager at=500ms time=4s tone=purple

@@ -1,0 +1,48 @@
+flow down
+title "두 입력 경로가 같은 SQL·저장 계층으로 모인다"
+subtitle "REPL은 직접 파싱하고 HTTP는 연결별 스레드에서 db_execute를 거친다. WAL과 PostgreSQL 프로토콜은 없다"
+group input "입력" direction=down {
+  box repl "REPL"
+  person client "HTTP 클라이언트"
+}
+group network "네트워크 · 구현" direction=down {
+  box worker "연결별 스레드"
+  box http "HTTP 해석"
+  box boundary "db_execute · 잠금"
+}
+group sql "SQL · 부분 구현" direction=down {
+  box parser "파서 · 7종"
+  box planner "규칙 기반 계획"
+  box executor "실행기"
+}
+group storage "저장 · 단일 테이블" direction=down {
+  box index "id B+Tree"
+  box heap "슬롯 힙"
+  box pager "버퍼 풀"
+  store file "DB 파일"
+}
+repl -> parser "직접" no=1
+client -> worker "TCP" no=1
+worker -> http no=2
+http -> boundary "POST /query" no=3
+boundary -> parser no=4
+parser -> planner no=5
+planner -> executor no=6
+executor -> index "id 경로" no=7
+executor -> heap "행 경로" no=7
+index -> pager no=8
+heap -> pager no=8
+pager -> file "축출·종료 플러시" no=9
+step "REPL" "터미널 SQL은 파서를 직접 지난다"
+  repl -> parser
+  parser -> planner
+  planner -> executor
+step "HTTP" "연결별 스레드가 db_execute로 SQL을 보낸다"
+  client -> worker
+  worker -> http
+  http -> boundary
+  boundary -> parser
+step "저장" "실행기는 인덱스와 힙을 사용한다"
+  executor -> index & executor -> heap
+  index -> pager & heap -> pager
+  pager -> file
