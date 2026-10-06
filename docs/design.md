@@ -207,7 +207,7 @@ B+Tree 는 오름차순 삽입만으로는 검증되지 않는다. 그 모양은
 
 | 기능군 | 현재 코드 | 첫 작업 |
 |---|---|---|
-| 어휘·리터럴·입력 종료 | 한 줄·한 문장 파서. 일부 절과 값이 잘못 해석된다. | [#2](https://github.com/woonyong-choi/lrn-sql/issues/2), [#4](https://github.com/woonyong-choi/lrn-sql/issues/4) |
+| 어휘·리터럴·입력 종료 | 한 줄·한 문장 파서. 잔여 절은 거절하지만 일부 숫자 값은 잘못 해석된다. | [#2](https://github.com/woonyong-choi/lrn-sql/issues/2), [#4](https://github.com/woonyong-choi/lrn-sql/issues/4) |
 | 테이블·스키마·제약 | 파일당 테이블 하나, 자동 `id`, `INT`·`BIGINT`·`VARCHAR` 일부. 명시적 제약 없음. | [#6](https://github.com/woonyong-choi/lrn-sql/issues/6) |
 | 조회·식 | `SELECT *`, `COUNT(*)`, 단일 비교식, `ORDER BY`, `LIMIT` 일부. JOIN·NULL·일반 식 없음. | [#7](https://github.com/woonyong-choi/lrn-sql/issues/7) |
 | 데이터 변경 | 단일 행 `INSERT`, `UPDATE`, `DELETE` 일부. 컬럼 목록·`RETURNING`·`ON CONFLICT` 없음. | 호환성 표를 세분화한 뒤 후속 이슈 생성 |
