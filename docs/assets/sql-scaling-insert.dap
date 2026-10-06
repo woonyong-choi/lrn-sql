@@ -1,0 +1,13 @@
+chart line
+title "INSERT 전체 소요"
+subtitle "0=50k, 1=100k, 2=200k, 3=400k. 3회 중앙값, 세로축 로그"
+x "행 수 배가 횟수"
+y "총 소요 시간(ms)"
+scale log
+data "../../bench/scaling.json" at "/insert"
+series before "개선 전" role=compare key="before_ms"
+series after "개선 후" role=main key="after_ms"
+step "개선 전" "같은 규모에서 측정한 기준 경로"
+  reveal before
+step "개선 후" "같은 행 수에서 소요 시간을 비교"
+  reveal after

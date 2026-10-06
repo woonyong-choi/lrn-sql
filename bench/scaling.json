@@ -1,0 +1,55 @@
+{
+  "repetitions": 3,
+  "rows": [
+    50000,
+    100000,
+    200000,
+    400000
+  ],
+  "x": "log2(rows / first row count)",
+  "unit": "ms",
+  "insert": [
+    {
+      "x": 0,
+      "before_ms": 131,
+      "after_ms": 71
+    },
+    {
+      "x": 1,
+      "before_ms": 461,
+      "after_ms": 157
+    },
+    {
+      "x": 2,
+      "before_ms": 1901,
+      "after_ms": 350
+    },
+    {
+      "x": 3,
+      "before_ms": 8415,
+      "after_ms": 863
+    }
+  ],
+  "range": [
+    {
+      "x": 0,
+      "scan_ms": 62,
+      "btree_ms": 26
+    },
+    {
+      "x": 1,
+      "scan_ms": 118,
+      "btree_ms": 29
+    },
+    {
+      "x": 2,
+      "scan_ms": 183,
+      "btree_ms": 31
+    },
+    {
+      "x": 3,
+      "scan_ms": 412,
+      "btree_ms": 39
+    }
+  ]
+}
