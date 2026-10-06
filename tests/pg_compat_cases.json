@@ -1,0 +1,81 @@
+[
+  {
+    "name": "create_users",
+    "sql": "CREATE TABLE users (name VARCHAR(32), age INT)",
+    "pg_sql": "CREATE TABLE users (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name VARCHAR(32), age INT)",
+    "difference": "MiniDB는 id를 자동으로 추가하고 PostgreSQL은 identity 선언이 필요하다"
+  },
+  {
+    "name": "insert_alice",
+    "sql": "INSERT INTO users VALUES ('Alice', 25)",
+    "pg_sql": "INSERT INTO users (name, age) VALUES ('Alice', 25)",
+    "difference": "MiniDB는 INSERT 컬럼 목록을 아직 지원하지 않는다"
+  },
+  {
+    "name": "insert_quote",
+    "sql": "INSERT INTO users VALUES ('O''Brien', 30)",
+    "pg_sql": "INSERT INTO users (name, age) VALUES ('O''Brien', 30)",
+    "difference": "MiniDB는 INSERT 컬럼 목록을 아직 지원하지 않는다"
+  },
+  {
+    "name": "select_ordered",
+    "sql": "SELECT * FROM users ORDER BY age DESC LIMIT 2",
+    "rows": true,
+    "ordered": true
+  },
+  {
+    "name": "select_escaped_string",
+    "sql": "SELECT * FROM users WHERE name = 'O''Brien'",
+    "rows": true
+  },
+  {
+    "name": "select_limit_zero",
+    "sql": "SELECT * FROM users LIMIT 0",
+    "rows": true
+  },
+  {
+    "name": "select_filtered_limit",
+    "sql": "SELECT * FROM users WHERE age > 25 ORDER BY id LIMIT 1",
+    "rows": true,
+    "ordered": true
+  },
+  {
+    "name": "select_count",
+    "sql": "SELECT COUNT(*) FROM users WHERE age >= 25",
+    "rows": true
+  },
+  {
+    "name": "select_id_range",
+    "sql": "SELECT * FROM users WHERE id BETWEEN 1 AND 2 ORDER BY id ASC",
+    "rows": true,
+    "ordered": true
+  },
+  {
+    "name": "reject_invalid_number",
+    "sql": "UPDATE users SET age = abc WHERE id = 1",
+    "expect": "error"
+  },
+  {
+    "name": "update_age",
+    "sql": "UPDATE users SET age = 31 WHERE name = 'O''Brien'"
+  },
+  {
+    "name": "select_after_update",
+    "sql": "SELECT * FROM users WHERE id = 2",
+    "rows": true
+  },
+  {
+    "name": "delete_alice",
+    "sql": "DELETE FROM users WHERE id = 1"
+  },
+  {
+    "name": "select_after_delete",
+    "sql": "SELECT * FROM users ORDER BY id",
+    "rows": true,
+    "ordered": true
+  },
+  {
+    "name": "drop_users",
+    "sql": "DROP TABLE users"
+  }
+]

@@ -45,6 +45,8 @@
 
 ## 문서 목록
 
+- `pg-compatibility.md`
+  - PostgreSQL 18 차등 검사 방법, 현재 비교 범위와 문법 차이를 기록한 문서
 - `11-implementation-plan.md`
   - 초기 구현 계획을 현재 구현 현황과 다음 백로그 중심으로 재정리한 문서
 - `12-test-harness-plan.md`
