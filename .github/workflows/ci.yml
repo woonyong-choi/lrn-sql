@@ -23,6 +23,33 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1
         run: make test-all
 
+  pg-compat:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: compat_test
+          POSTGRES_USER: compat
+          POSTGRES_PASSWORD: compat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U compat -d compat_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Compare SQL behavior with PostgreSQL 18
+        env:
+          PGCOMPAT_DSN: postgresql://compat:compat@localhost:5432/compat_test
+        run: |
+          make SANITIZE= BUILD_DIR=build-pg build-pg/sql_probe
+          python3 tests/pg_compat.py --probe ./build-pg/sql_probe --require-postgres
+
   actionlint:
     runs-on: ubuntu-latest
     steps:
