@@ -157,7 +157,10 @@ $(BUILD_DIR)/sql_probe: tests/sql_probe.c $(OBJS)
 test-pg-compat: $(BUILD_DIR)/sql_probe
 	python3 tests/pg_compat.py --probe ./$(BUILD_DIR)/sql_probe
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3
+test-legacy-adopt: $(BUILD_DIR)/minidb
+	python3 tests/test_legacy_adopt.py --minidb ./$(BUILD_DIR)/minidb
+
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
