@@ -1,5 +1,5 @@
 /*
- * test_step2_concurrency.c — 동시성 제어 테스트 (Step 4)
+ * test_step2_concurrency.c — 동시성 제어 테스트 (Step 2)
  *
  * 검증 항목:
  *   1. lock_table: S/X 호환성, timeout, release_all

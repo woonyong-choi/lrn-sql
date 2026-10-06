@@ -1,15 +1,5 @@
-/*
- * server.c — Thread-per-connection TCP 서버
- *
- * 이전 구조: 고정 크기 스레드 풀 + keep-alive → HoL blocking 발생
- * 현재 구조: accept() 시 연결마다 스레드 생성 + pthread_detach
- *           MAX_CONNECTIONS로 동시 연결 수 제한 (MySQL 모델)
- *
- * 변경 이유:
- *   스레드 풀(4 workers)에서 keep-alive 연결 16개가 오면
- *   worker 4개가 fd 4개에 묶여 나머지 12개는 큐에서 대기.
- *   → head-of-line blocking. 자세한 디버깅 과정은
- *   docs/temp/DB/SQL 엔진/db-sql-engine-concurrency-debugging-debrief.md 참조.
+/* 연결마다 스레드를 생성하고 MAX_CONNECTIONS로 동시 연결을 제한한다.
+ * 전환 배경: docs/sql/13-concurrency-issues.md
  */
 
 #include "server/server.h"
@@ -31,7 +21,7 @@
 #include <arpa/inet.h>
 
 /* ── 설정 ── */
-#define MAX_CONNECTIONS 128  /* 동시 연결 상한 (MySQL max_connections 역할) */
+#define MAX_CONNECTIONS 128  /* 동시 연결 상한 */
 #define IDLE_TIMEOUT_SEC 30  /* keep-alive idle timeout */
 
 /* ── 전역 상태 ── */
