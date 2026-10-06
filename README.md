@@ -6,7 +6,7 @@ SQL을 파싱해 실행 계획을 세우고, 페이지에 행을 저장한 뒤 B
 
 - 5인 팀 과제에서 parser, planner, executor와 페이지·인덱스·잠금 계층 구현을 주도했고, 과제 이후 범위 조회와 회귀 검사를 추가했습니다.
 - 100만 행에서 드러난 반복 탐색과 잠금 누적을 gdb로 추적했습니다. 개선 전후는 단일 배수가 아니라 전 구간 기울기(INSERT `O(N^2.00) → O(N^1.19)`, 범위 질의 `O(N^0.88) → O(N^0.19)`)로 비교합니다.
-- 현재 공개 `main`에서 `make test-all`의 6개 스위트 534개 단언을 통과했습니다. CI는 Linux에서 ASAN·UBSAN을 함께 실행합니다.
+- `make test-all`의 6개 스위트 584개 단언을 통과했습니다. CI는 Linux에서 ASAN·UBSAN을 함께 실행합니다.
 
 ## 데모
 
@@ -37,12 +37,14 @@ GCC, Make, pthread가 필요합니다. 아래는 2026-09-23에 전부 실행해 
 git clone https://github.com/woonyong-choi/lrn-sql.git && cd lrn-sql
 
 make SANITIZE= BUILD_DIR=build-nosan all          # 빌드
-printf "CREATE TABLE users (name VARCHAR(32), age INT)\nINSERT INTO users VALUES ('Alice', 25)\nEXPLAIN SELECT * FROM users WHERE id = 1\nSELECT * FROM users WHERE id = 1\n.exit\n" | ./build-nosan/minidb demo.db
+printf "CREATE TABLE users (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name VARCHAR(32), age INT)\nINSERT INTO users (name, age) VALUES ('Alice', 25)\nEXPLAIN SELECT * FROM users WHERE id = 1\nSELECT * FROM users WHERE id = 1\n.exit\n" | ./build-nosan/minidb demo.db
 
-make test-all      # 534개 단언
+make test-all      # 584개 단언
 make bench         # 규모별 기울기 재측정 (36초)
 bash scripts/demo_repl.sh   # 위 데모 재현 (13초)
 ```
+
+이 예시의 CREATE와 INSERT는 PostgreSQL 18에서도 같은 SQL로 실행된다. 호환 확인 범위와 제약은 [차등 검사](docs/sql/pg-compatibility.md)에 있다.
 
 REPL에서는 `.stats`가 페이지·트리 통계, `.debug`가 쿼리별 페이지 접근, `.btree`가 인덱스 구조를 보여 줍니다. `.exit` 또는 Ctrl-D로 종료하면 dirty 페이지를 기록합니다.
 
@@ -54,7 +56,7 @@ REPL에서는 `.stats`가 페이지·트리 통계, `.debug`가 쿼리별 페이
 src/sql/       parser.c · planner.c · executor.c      문장 → 접근 경로 → 실행
 src/storage/   pager.c · table.c · bptree.c · schema.c  버퍼 풀 · 슬롯 힙 · B+Tree
 src/server/    server.c · http.c · lock_table.c       연결당 스레드 · HTTP · Strict 2PL
-tests/         6개 스위트 534개 단언
+tests/         6개 스위트 584개 단언
 bench/         scaling.py(규모별 기울기) · PostgreSQL 대조군 하니스
 docs/          design.md(설계 노트) · benchmark-postgres.md · build-and-test.md
 ```
@@ -111,10 +113,10 @@ flowchart TD
 | MiniDB Test Suite | 페이지·힙·B+Tree·재열기 | 76 | `make test` |
 | B+Tree Property | 무작위 삽입·삭제 후 구조 불변식 8종, 범위 스캔 대조 | 215 | `make test-prop` |
 | Step 0 — `db_execute` | 문장 실행 진입점 | 24 | `make test-step0` |
-| Step 1 — SQL Extension | 파싱·계획·조건·정렬·집계·`INDEX_RANGE`·EXPLAIN 일치 | 143 | `make test-step1` |
+| Step 1 — SQL Extension | 파싱·계획·조건·정렬·집계·`INDEX_RANGE`·EXPLAIN 일치 | 193 | `make test-step1` |
 | Step 2 — Concurrency | S/X lock 호환성, 범위 lock, 동시 INSERT, HTTP 경로 | 52 | `make test-step2` |
 | Step 3 — Regression | 고친 결함 2건이 되살아나는지 | 24 | `make test-step3` |
-| **합계** | | **534** | `make test-all` |
+| **합계** | | **584** | `make test-all` |
 
 Property 스위트는 결함 5종(불균형 분할, separator 오프바이원, 리프 체인 끊김, 언더플로우 복구 비활성화, 범위 경계 제외 누락)을 주입해 각각 다른 불변식에서 실패하는지 확인했습니다. 스위트별 상세는 [`docs/build-and-test.md`](docs/build-and-test.md)에 있습니다.
 

@@ -269,7 +269,35 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
     row_value_t values[MAX_COLUMNS];
     memset(values, 0, sizeof(values));
 
-    if (stmt->insert_value_count != hdr->column_count - 1) {
+    uint16_t value_index[MAX_COLUMNS];
+    for (uint16_t i = 0; i < MAX_COLUMNS; i++) value_index[i] = UINT16_MAX;
+    if (stmt->has_insert_columns) {
+        if (stmt->insert_column_count != stmt->insert_value_count) {
+            res.status = -1;
+            snprintf(res.message, sizeof(res.message),
+                     "오류: INSERT 컬럼과 값 개수가 다릅니다");
+            return res;
+        }
+        for (uint16_t i = 0; i < stmt->insert_column_count; i++) {
+            int col_idx = -1;
+            for (uint16_t j = 0; j < hdr->column_count; j++) {
+                if (strcmp(hdr->columns[j].name, stmt->insert_columns[i]) == 0) {
+                    col_idx = (int)j;
+                    break;
+                }
+            }
+            if (col_idx <= 0 || value_index[col_idx] != UINT16_MAX) {
+                res.status = -1;
+                snprintf(res.message, sizeof(res.message),
+                         "오류: INSERT 컬럼 '%s'이(가) 없거나 중복됩니다",
+                         stmt->insert_columns[i]);
+                return res;
+            }
+            value_index[col_idx] = i;
+        }
+    } else if (stmt->insert_value_count == hdr->column_count - 1) {
+        for (uint16_t i = 1; i < hdr->column_count; i++) value_index[i] = i - 1;
+    } else {
         res.status = -1;
         snprintf(res.message, sizeof(res.message),
                  "오류: INSERT 값 개수가 컬럼 수와 다릅니다");
@@ -277,8 +305,14 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
     }
 
     for (uint16_t i = 1; i < hdr->column_count; i++) {
+        if (value_index[i] == UINT16_MAX) {
+            res.status = -1;
+            snprintf(res.message, sizeof(res.message),
+                     "오류: INSERT 컬럼 '%s'의 값이 없습니다", hdr->columns[i].name);
+            return res;
+        }
         const column_meta_t *col = &hdr->columns[i];
-        const char *input = stmt->insert_values[i - 1];
+        const char *input = stmt->insert_values[value_index[i]];
         int64_t number;
         switch (col->type) {
             case COL_TYPE_INT:
