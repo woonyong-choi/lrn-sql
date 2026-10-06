@@ -1,0 +1,18 @@
+flow down
+title "INSERT는 검증한 행을 힙에 쓰고 id를 B+Tree에 등록한다"
+subtitle "WAL이 없으므로 중간 실패의 원자성은 아직 보장되지 않는다"
+box input "INSERT INTO users (name, age) VALUES (...)"
+box valid "컬럼·숫자 범위 검증"
+box id "next_id 할당 · X 잠금"
+box heap "직렬화 · heap_insert"
+box index "bptree_insert(id, row_ref)"
+input -> valid
+valid -> id
+id -> heap
+heap -> index "page_id, slot_id"
+step "검증" "잘못된 값은 행을 쓰기 전에 거절한다"
+  input -> valid
+step "저장" "힙의 행 좌표를 id 인덱스에 기록한다"
+  valid -> id
+  id -> heap
+  heap -> index
