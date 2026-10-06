@@ -150,6 +150,13 @@ $(BUILD_DIR)/test_step3: tests/test_step3_regression.c $(OBJS)
 test-step3: $(BUILD_DIR)/test_step3
 	./$(BUILD_DIR)/test_step3
 
+$(BUILD_DIR)/sql_probe: tests/sql_probe.c $(OBJS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+test-pg-compat: $(BUILD_DIR)/sql_probe
+	python3 tests/pg_compat.py --probe ./$(BUILD_DIR)/sql_probe
+
 test-all: test test-prop test-step0 test-step1 test-step2 test-step3
 
 clean:
