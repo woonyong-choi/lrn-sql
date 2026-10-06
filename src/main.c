@@ -44,6 +44,8 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <ctype.h>
+#include <unistd.h>
 /* readline 제거 — fgets 기반 입력 */
 #define MAX_INPUT_LEN 4096
 
@@ -167,8 +169,50 @@ static void cmd_stats(pager_t *pager)
  *   3. REPL 루프: fgets → 파싱 → 실행 → 반복
  *   4. .exit 또는 EOF(Ctrl+D) → pager_close()로 flush 후 종료
  */
+static int adopt_legacy_table(const char *name, const char *path)
+{
+    size_t len = strlen(name);
+    if (len == 0 || len >= 32
+        || !(isalpha((unsigned char)name[0]) || name[0] == '_')) {
+        fprintf(stderr, "오류: 유효한 테이블 이름이 필요합니다\n");
+        return 1;
+    }
+    for (size_t i = 1; i < len; i++) {
+        if (!(isalnum((unsigned char)name[i]) || name[i] == '_')) {
+            fprintf(stderr, "오류: 유효한 테이블 이름이 필요합니다\n");
+            return 1;
+        }
+    }
+    if (access(path, F_OK) != 0) {
+        fprintf(stderr, "오류: 기존 데이터베이스 파일이 없습니다\n");
+        return 1;
+    }
+
+    pager_t pager;
+    if (pager_open(&pager, path, false) != 0) return 1;
+    if (pager.header.version != 1 || pager.header.column_count == 0) {
+        fprintf(stderr, "오류: 이름을 등록할 v1 테이블이 없습니다\n");
+        pager_close(&pager);
+        return 1;
+    }
+    memcpy(pager.header.table_name, name, len + 1);
+    pager.header.version = DB_VERSION;
+    pager.header_dirty = true;
+    pager_close(&pager);
+    printf("기존 테이블 이름 '%s' 등록 완료\n", name);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "--adopt-table") == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "사용법: minidb --adopt-table TABLE_NAME DB_PATH\n");
+            return 1;
+        }
+        return adopt_legacy_table(argv[2], argv[3]);
+    }
+
     const char *db_path = "test.db";
     int server_mode = 0;
     int port = 8080;
