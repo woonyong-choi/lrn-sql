@@ -783,6 +783,41 @@ static void test_identity_and_column_list_insert(void) {
     teardown_test_db(&pager, "identity_insert");
 }
 
+static void test_table_name_guard(void) {
+    pager_t pager;
+    setup_test_db(&pager, "table_name_guard");
+    create_and_populate(&pager, 1);
+
+    const char *invalid[] = {
+        "INSERT INTO other VALUES ('X', 9)",
+        "SELECT * FROM other",
+        "UPDATE other SET age = 9 WHERE id = 1",
+        "DELETE FROM other WHERE id = 1",
+        "DROP TABLE other"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        exec_result_t r = db_execute(&pager, invalid[i]);
+        ASSERT_EQ_INT(r.status, -1, invalid[i]);
+        free(r.out_buf);
+    }
+    exec_result_t r = db_execute(&pager, "SELECT * FROM users WHERE id = 1");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "Alice | 25") != NULL,
+                "wrong table names do not change users");
+    free(r.out_buf);
+
+    pager_close(&pager);
+    ASSERT_EQ_INT(pager_open(&pager, test_db_path("table_name_guard"), false), 0,
+                  "table name survives reopening");
+    r = db_execute(&pager, "DROP TABLE other");
+    ASSERT_EQ_INT(r.status, -1, "wrong DROP remains rejected after reopening");
+    free(r.out_buf);
+    r = db_execute(&pager, "SELECT * FROM users WHERE id = 1");
+    ASSERT_TRUE(r.out_buf && strstr(r.out_buf, "Alice | 25") != NULL,
+                "row survives wrong DROP after reopening");
+    free(r.out_buf);
+    teardown_test_db(&pager, "table_name_guard");
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -803,6 +838,7 @@ int main(void)
     test_insert_numeric_values_are_validated();
     test_numeric_predicates_and_updates_are_validated();
     test_identity_and_column_list_insert();
+    test_table_name_guard();
 
     printf("\n");
     printf("========================================\n");

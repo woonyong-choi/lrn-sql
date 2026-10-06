@@ -208,10 +208,10 @@ B+Tree 는 오름차순 삽입만으로는 검증되지 않는다. 그 모양은
 | 기능군 | 현재 코드 | 첫 작업 |
 |---|---|---|
 | 어휘·리터럴·입력 종료 | 한 줄·한 문장 파서. 잔여 절은 거절하지만 일부 숫자 값은 잘못 해석된다. | [#2](https://github.com/woonyong-choi/lrn-sql/issues/2), [#4](https://github.com/woonyong-choi/lrn-sql/issues/4) |
-| 테이블·스키마·제약 | 파일당 테이블 하나, 자동 `id`, `INT`·`BIGINT`·`VARCHAR` 일부. 명시적 제약 없음. | [#6](https://github.com/woonyong-choi/lrn-sql/issues/6) |
+| 테이블·스키마·제약 | 파일당 테이블 하나, 이름은 v2 헤더에 저장, 자동 `id`, `INT`·`BIGINT`·`VARCHAR` 일부. 명시적 제약 없음. | [#6](https://github.com/woonyong-choi/lrn-sql/issues/6) |
 | 조회·식 | `SELECT *`, `COUNT(*)`, 단일 비교식, `ORDER BY`, `LIMIT` 일부. JOIN·NULL·일반 식 없음. | [#7](https://github.com/woonyong-choi/lrn-sql/issues/7) |
 | 데이터 변경 | 단일 행 `INSERT`, `UPDATE`, `DELETE` 일부. 컬럼 목록·`RETURNING`·`ON CONFLICT` 없음. | 호환성 표를 세분화한 뒤 후속 이슈 생성 |
 | 트랜잭션·복구 | 문장별 실행. `BEGIN`·`COMMIT`·`ROLLBACK`과 WAL 없음. | [#8](https://github.com/woonyong-choi/lrn-sql/issues/8), [#9](https://github.com/woonyong-choi/lrn-sql/issues/9) |
 | 서버·관리 명령 | 자체 HTTP API. 권한·역할·확장·복제·PostgreSQL 세션 명령 없음. | 명령별 의존성을 확인한 뒤 후속 이슈 생성 |
 
-작업 순서는 잘못된 성공을 막는 입력 검증, PostgreSQL 18 차등 검사, 스키마·타입 기반 확장, 질의와 변경, 트랜잭션·복구, 관리 명령이다. 저장 파일 형식이 바뀌는 작업은 기존 파일의 열기·전환·복구 규칙을 먼저 정한다. 검증한 부분집합만 호환으로 표시하고, 명령 목록 전체를 지원하는 것으로 표시하지 않는다.
+작업 순서는 잘못된 성공을 막는 입력 검증, PostgreSQL 18 차등 검사, 스키마·타입 기반 확장, 질의와 변경, 트랜잭션·복구, 관리 명령이다. 저장 파일 형식이 바뀌는 작업은 기존 파일의 열기·전환·복구 규칙을 먼저 정한다. v1 이름 등록 절차는 [전환 문서](sql/legacy-file-migration.md)를 따른다. 검증한 부분집합만 호환으로 표시하고, 명령 목록 전체를 지원하는 것으로 표시하지 않는다.

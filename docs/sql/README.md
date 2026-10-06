@@ -24,6 +24,7 @@
   - `LIMIT`
 - 지원하지 않는 잔여 절은 실행 전에 거절한다. 문자열 안의 작은따옴표는 `''`로 쓴다.
 - 시스템 컬럼: `id BIGINT` 자동 생성, 자동 증가, 수정 금지
+- 단일 테이블 이름을 파일에 저장한다. v1 파일은 [이름 등록](legacy-file-migration.md) 전 SQL 실행을 차단한다.
 - `INSERT`는 사용자 컬럼 수와 숫자 범위를 검증한 뒤 `id`를 할당한다. PostgreSQL식 컬럼 목록과 명시적 identity 선언도 지원한다. 잘못된 값은 행을 쓰지 않는다.
 - 동시성:
   - Row Lock / Range Lock
@@ -39,14 +40,19 @@
   - keep-alive 지원
 - 검증:
   - `test_all`: 76/76
+  - `test_prop`: 215/215
   - `test_step0`: 24/24
-  - `test_step1`: 72/72
-  - `test_step2`: 44/44
+  - `test_step1`: 202/202
+  - `test_step2`: 52/52
+  - `test_step3`: 24/24
+  - v1 파일 이름 등록 통합 검사
 
 ## 문서 목록
 
 - `pg-compatibility.md`
   - PostgreSQL 18 차등 검사 방법, 현재 비교 범위와 문법 차이를 기록한 문서
+- `legacy-file-migration.md`
+  - 이름이 없던 v1 파일을 백업하고 명시적으로 v2로 전환하는 방법
 - `11-implementation-plan.md`
   - 초기 구현 계획을 현재 구현 현황과 다음 백로그 중심으로 재정리한 문서
 - `12-test-harness-plan.md`

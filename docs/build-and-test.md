@@ -52,10 +52,10 @@ CI(Ubuntu)는 항상 `address,undefined` 둘 다 켭니다.
 | MiniDB Test Suite | `tests/test_all.c` | 페이지·힙·B+Tree·재열기 | 76 | `make test` |
 | B+Tree Property | `tests/test_bptree_property.c` | 무작위 삽입·삭제 후 구조 불변식 8종, 범위 스캔 대조 | 215 | `make test-prop` |
 | Step 0 — `db_execute` | `tests/test_step0_db_execute.c` | 문장 실행 진입점 | 24 | `make test-step0` |
-| Step 1 — SQL Extension | `tests/test_step1_sql_ext.c` | 파싱·계획·조건·정렬·집계·`INDEX_RANGE`·EXPLAIN 일치 | 143 | `make test-step1` |
+| Step 1 — SQL Extension | `tests/test_step1_sql_ext.c` | 파싱·계획·조건·정렬·집계·`INDEX_RANGE`·EXPLAIN 일치 | 202 | `make test-step1` |
 | Step 2 — Concurrency | `tests/test_step2_concurrency.c` | S/X lock 호환성, 범위 lock, 동시 INSERT, HTTP 경로 | 52 | `make test-step2` |
 | Step 3 — Regression | `tests/test_step3_regression.c` | 고친 결함이 되살아나는지 | 24 | `make test-step3` |
-| 합계 | | | **534** | `make test-all` |
+| 합계 | | | **593** | `make test-all` |
 
 숫자는 테스트 함수 개수가 아니라 **단언(assertion) 개수**의 합입니다.
 
