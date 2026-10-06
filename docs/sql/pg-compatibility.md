@@ -8,18 +8,21 @@ PostgreSQL 18에서 같은 데이터로 실행한 성공·실패와 결과 행�
 
 | 기능 | 현재 상태 | 검사 |
 |---|---|---|
-| `CREATE TABLE`의 `INT`·`BIGINT`·`VARCHAR` | MiniDB가 `id BIGINT`를 자동 추가함 | 별도 PostgreSQL DDL로 같은 스키마를 준비 |
-| `INSERT INTO ... VALUES` | MiniDB가 자동 `id`를 제외한 값을 받음 | PostgreSQL은 컬럼 목록을 지정해 같은 행을 삽입 |
+| `CREATE TABLE`의 `INT`·`BIGINT`·`VARCHAR` | 첫 컬럼의 `id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY` 지원 | 동일 DDL로 스키마 준비 |
+| `INSERT INTO ... (컬럼 목록) VALUES` | `id` 외 모든 사용자 컬럼을 지정하는 형태 지원 | 동일 SQL로 같은 행 삽입 |
 | `SELECT *`·`COUNT(*)`·단일 `WHERE`·`ORDER BY`·`LIMIT` | 제한된 형태 지원 | 동일 SQL의 결과 행 비교 |
 | `UPDATE`·`DELETE`·`DROP TABLE` | 제한된 형태 지원 | 동일 SQL의 성공·실패와 후속 조회 비교 |
 | 잘못된 숫자 값 | 변경 전에 거절 | 양쪽의 실패 여부와 후속 조회 비교 |
 
-DDL과 INSERT에 서로 다른 SQL을 쓰는 사례는
-[`tests/pg_compat_cases.json`](../../tests/pg_compat_cases.json)에 이유를 기록한다.
-이 사례는 **문법 호환 통과로 세지 않는다**. 다른 사례에서도 성공·실패와
+별도 SQL이 필요한 사례가 생기면
+[`tests/pg_compat_cases.json`](../../tests/pg_compat_cases.json)에 이유를 기록하고
+**문법 호환 통과로 세지 않는다**. 현재 fixture 15건은 모두 같은 SQL이다.
+성공·실패와
 결과 행만 비교하며, 오류 코드·메시지, 반환 컬럼 타입, 잠금·트랜잭션,
 재시작 후 상태는 아직 판정하지 않는다. 문자열 `|`나 줄바꿈이 포함된
-표 출력도 현재 하니스가 해석하지 못한다.
+표 출력도 현재 하니스가 해석하지 못한다. 기존 `INSERT INTO ... VALUES`와
+암묵적 `id` 생성은 레거시 문법으로 유지한다. PostgreSQL 호환 예시에서는
+명시적 identity 선언과 INSERT 컬럼 목록을 사용한다.
 
 ## 실행
 
