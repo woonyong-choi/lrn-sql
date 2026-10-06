@@ -23,6 +23,7 @@
   - `ORDER BY`
   - `LIMIT`
 - 시스템 컬럼: `id BIGINT` 자동 생성, 자동 증가, 수정 금지
+- `INSERT`는 사용자 컬럼 수와 숫자 범위를 검증한 뒤 `id`를 할당한다. 잘못된 값은 행을 쓰지 않는다.
 - 동시성:
   - Row Lock / Range Lock
   - Engine RWLock
