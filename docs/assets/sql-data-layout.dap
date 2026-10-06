@@ -1,0 +1,23 @@
+flow down
+title "파일 페이지에서 id가 행 바이트에 닿는 방법"
+subtitle "구조 예시: 페이지 ID와 슬롯 번호는 설명용이다. 실제 크기는 파일의 page_size를 따른다"
+store file "DB 파일 · page_id × page_size"
+box meta "page 0 · DB 헤더 · 루트와 첫 힙 페이지 ID"
+box root "내부 페이지 · 경계 키로 자식 선택"
+box leaf "리프 페이지 · id 7 → row_ref(1, 2)"
+box heap "힙 페이지 1 · 16B 헤더 + 8B 슬롯들 + 행 바이트"
+box slot "slot 2 · ALIVE · 행 시작 offset"
+box row "직렬화된 행 · id, 사용자 컬럼"
+file -> meta "파일 헤더"
+meta -> root "root_index_page_id"
+root -> leaf "경계 키 따라 하강"
+leaf -> heap "row_ref.page_id = 1"
+heap -> slot "row_ref.slot_id = 2"
+slot -> row "offset 위치 읽기"
+step "주소 찾기" "id 7을 내부 페이지에서 리프로 내려보낸다"
+  meta -> root
+  root -> leaf
+step "행 읽기" "리프 엔트리의 6B row_ref가 힙 페이지와 슬롯을 지정한다"
+  leaf -> heap
+  heap -> slot
+  slot -> row

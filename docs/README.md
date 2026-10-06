@@ -12,6 +12,12 @@
 - `question/`: 질문 예시 문서
 - `team/`: 팀원별 개인 문서
 
+## 핵심 문서
+
+| 문서 | 내용 |
+|---|---|
+| [SQL 엔진 내부 데이터 흐름](sql/internal-data-flow.md) | B+Tree·힙 입출력, pager 메모리, SQL 명령 조합의 Daphnis 그림과 코드 근거 |
+
 ## convention/
 
 - `c-style.md`: C 코딩 스타일 컨벤션

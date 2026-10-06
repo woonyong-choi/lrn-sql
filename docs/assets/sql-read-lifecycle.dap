@@ -1,0 +1,41 @@
+flow down
+title "SELECT의 절 조합이 읽는 페이지와 중간 메모리를 결정한다"
+subtitle "id 점 조회·범위 조회·힙 스캔은 서로 다른 경로다. ORDER BY는 현재 힙 스캔을 선택한다"
+box query "SELECT · WHERE · ORDER BY · LIMIT"
+box plan "planner_create_plan · 규칙 기반"
+box point "INDEX_LOOKUP · id = 값, 정렬·LIMIT 없음"
+box range "INDEX_RANGE · id 범위, 정렬·COUNT 없음"
+box scan "TABLE_SCAN · 그 밖의 지원 조합"
+box one "B+Tree 검색 · row_ref 1개"
+box refs "리프 연결 순회 · row_ref 배열"
+box heap "힙 페이지 · slot ALIVE 확인 · 행 역직렬화"
+box sort "필요하면 행 수집·정렬 또는 LIMIT Top-K"
+box output "결과 버퍼 · 호출자에게 소유권 이전"
+query -> plan
+plan -> point "점 조건"
+plan -> range "범위 조건"
+plan -> scan "그 밖"
+point -> one
+range -> refs "LIMIT면 조기 종료"
+one -> heap
+refs -> heap "리프 래치 해제 후"
+scan -> heap "힙 체인 순회"
+heap -> sort "ORDER BY 때만"
+heap -> output "정렬 없음"
+sort -> output
+step "점 조회" "B+Tree에서 한 주소를 찾고 힙 행을 읽는다"
+  query -> plan
+  plan -> point
+  point -> one
+  one -> heap
+  heap -> output
+step "범위 조회" "리프에서 주소를 모은 뒤 래치를 놓고 힙을 읽는다"
+  plan -> range
+  range -> refs
+  refs -> heap
+  heap -> output
+step "정렬 조회" "ORDER BY가 있으면 힙을 훑고 행을 모아 정렬한다"
+  plan -> scan
+  scan -> heap
+  heap -> sort
+  sort -> output
