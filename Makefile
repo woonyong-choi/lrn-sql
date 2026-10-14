@@ -62,8 +62,25 @@ $(BUILD_DIR)/test_all: tests/test_all.c $(OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-test: $(BUILD_DIR)/test_all
+$(BUILD_DIR)/test_record: tests/test_record.c src/storage/record.c src/storage/record_page.c include/storage/record.h include/storage/record_page.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_record.c src/storage/record.c src/storage/record_page.c
+
+$(BUILD_DIR)/storage/record_fault.o: src/storage/record.c include/storage/record.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Dmalloc=record_test_malloc -c -o $@ $<
+
+$(BUILD_DIR)/storage/record_page_fault.o: src/storage/record_page.c include/storage/record_page.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Dcalloc=record_test_calloc -c -o $@ $<
+
+$(BUILD_DIR)/test_record_fault: tests/test_record_fault.c $(BUILD_DIR)/storage/record_fault.o $(BUILD_DIR)/storage/record_page_fault.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+test: $(BUILD_DIR)/test_all $(BUILD_DIR)/test_record $(BUILD_DIR)/test_record_fault
 	./$(BUILD_DIR)/test_all
+	./$(BUILD_DIR)/test_record
+	./$(BUILD_DIR)/test_record_fault
 
 # ── data generator ──
 $(BUILD_DIR)/gen_data: tools/gen_data.c $(OBJS)
