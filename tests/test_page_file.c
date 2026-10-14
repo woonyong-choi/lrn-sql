@@ -586,7 +586,15 @@ static void test_commit_failures_keep_current_generation(void)
     CHECK(page_file_control(file)->generation == 1, "쓰이지 않은 제어 쓰기는 보이지 않음");
     assert(page_file_release(file, first) == PAGE_FILE_OK);
     CHECK(page_file_commit(file) == PAGE_FILE_OK, "다시 commit 성공");
-    CHECK(page_file_reusable_count(file) == 1, "성공한 commit 뒤에야 재사용 가능");
+    CHECK(page_file_pending_release_count(file) == 0 && page_file_aging_release_count(file) == 1 &&
+              page_file_reusable_count(file) == 0,
+          "commit 한 번 뒤에는 fallback 세대가 아직 가리킬 수 있어 재사용 불가");
+    uint32_t held;
+    assert(page_file_alloc(file, &held) == PAGE_FILE_OK);
+    CHECK(held != first, "commit 한 번 뒤에도 해제한 페이지를 돌려주지 않음");
+    CHECK(page_file_commit(file) == PAGE_FILE_OK, "두 번째 commit 성공");
+    CHECK(page_file_aging_release_count(file) == 0 && page_file_reusable_count(file) == 1,
+          "commit이 두 번 성공한 뒤에야 재사용 가능");
     uint32_t reused;
     CHECK(page_file_alloc(file, &reused) == PAGE_FILE_OK && reused == first, "해제한 페이지를 재사용");
     CHECK(page_file_release(file, 9999) == PAGE_FILE_INVALID, "범위 밖 해제 거절");
@@ -597,7 +605,7 @@ static void test_commit_failures_keep_current_generation(void)
 
     /* 제어 쓰기 전의 fsync 실패는 미반영, 핸들은 poison */
     CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK, "다시 열기");
-    CHECK(page_file_control(file)->generation == 2, "마지막으로 성공한 세대 2");
+    CHECK(page_file_control(file)->generation == 3, "마지막으로 성공한 세대 3");
     hooks_reset();
     g_hooks.fsync_fail_at = 1;
     CHECK(page_file_commit(file) == PAGE_FILE_IO, "데이터 fsync 실패");
@@ -608,10 +616,10 @@ static void test_commit_failures_keep_current_generation(void)
     errno = 0;
     CHECK(page_file_commit(file) == PAGE_FILE_IO && errno == EIO,
           "fsync가 실패한 핸들은 이후 commit도 거절");
-    CHECK(page_file_control(file)->generation == 2, "세대 그대로");
+    CHECK(page_file_control(file)->generation == 3, "세대 그대로");
     page_file_close(file);
     CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK, "다른 핸들로는 다시 열림");
-    CHECK(page_file_control(file)->generation == 2, "미반영: 디스크도 세대 2");
+    CHECK(page_file_control(file)->generation == 3, "미반영: 디스크도 세대 3");
     page_file_close(file);
 
     /* 제어 쓰기 뒤의 fsync 실패는 불확정: 응답은 실패인데 다시 열면 새 세대가 보일 수 있다 */
@@ -620,12 +628,12 @@ static void test_commit_failures_keep_current_generation(void)
     g_hooks.fsync_fail_at = 2;
     CHECK(page_file_commit(file) == PAGE_FILE_IO, "제어 쓰기 뒤 fsync 실패");
     CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_UNKNOWN &&
-              page_file_is_poisoned(file) && page_file_control(file)->generation == 2,
+              page_file_is_poisoned(file) && page_file_control(file)->generation == 3,
           "불확정 결과, 핸들 poison, 핸들이 아는 세대는 그대로");
     hooks_reset();
     page_file_close(file);
     CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK, "불확정 뒤에도 열림");
-    CHECK(page_file_control(file)->generation == 3,
+    CHECK(page_file_control(file)->generation == 4,
           "실패를 돌려준 commit의 새 세대가 다시 열면 보임(불확정 결과)");
     page_file_close(file);
     clean_dir();
@@ -819,6 +827,45 @@ static void test_corrupt_data_pages_are_detected(void)
 }
 
 /* ══════════════════════════════════════════════════════════════ */
+static void test_released_pages_survive_for_fallback_generation(void)
+{
+    printf("\n[test_released_pages_survive_for_fallback_generation]\n");
+    fresh_dir();
+    hooks_reset();
+    page_file_t *file;
+    assert(page_file_create(DB_PATH, &file) == PAGE_FILE_OK);
+    uint32_t old_page;
+    assert(page_file_alloc(file, &old_page) == PAGE_FILE_OK);
+    uint8_t body[PAGE_BODY_BYTES], got[PAGE_BODY_BYTES];
+    memset(body, 0x33, sizeof(body));
+    assert(page_file_write(file, old_page, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    assert(page_file_commit(file) == PAGE_FILE_OK);   /* 세대 1: old_page를 참조한다고 본다 */
+    assert(page_file_publish(file) == PAGE_FILE_OK);
+
+    /* 세대 2는 old_page를 더는 가리키지 않는다 */
+    assert(page_file_release(file, old_page) == PAGE_FILE_OK);
+    assert(page_file_commit(file) == PAGE_FILE_OK);
+    uint32_t next_page;
+    assert(page_file_alloc(file, &next_page) == PAGE_FILE_OK);
+    CHECK(next_page != old_page, "세대 2 직후에도 fallback(세대 1)이 가리키는 페이지는 재사용 안 함");
+    memset(body, 0x77, sizeof(body));
+    assert(page_file_write(file, next_page, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    page_file_close(file);    /* 세대 3 commit 전에 중단 */
+
+    /* 최신 제어 쓰기(세대 2, slot 0)를 잃은 상황: 세대 1로 열리고 그 페이지는 온전하다 */
+    flip_slot(DB_PATH, 0, 100);
+    page_file_open_info_t open_info;
+    assert(page_file_open(DB_PATH, false, &file, &open_info) == PAGE_FILE_OK);
+    CHECK(page_file_control(file)->generation == 1 && open_info.damaged_slots == 1,
+          "한 세대 전으로 열림");
+    CHECK(page_file_read(file, old_page, PAGE_KIND_OVERFLOW, 0, got) == PAGE_FILE_OK &&
+              got[0] == 0x33 && got[PAGE_BODY_BYTES - 1] == 0x33,
+          "fallback 세대의 페이지는 덮어쓰이지 않음");
+    page_file_close(file);
+    clean_dir();
+}
+
+/* ══════════════════════════════════════════════════════════════ */
 static void test_page_info_reports_verified_kind(void)
 {
     printf("\n[test_page_info_reports_verified_kind]\n");
@@ -888,6 +935,7 @@ int main(void)
     test_publish_never_clobbers_destination();
     test_locking_and_unpublished_files();
     test_corrupt_data_pages_are_detected();
+    test_released_pages_survive_for_fallback_generation();
     test_page_info_reports_verified_kind();
     page_file_set_default_io(NULL);
     clean_dir();
