@@ -44,6 +44,7 @@ static void test_optional_install(void)
     CHECK(database_table_count(db) == tables, "재시작 뒤에도 큐 테이블이 없다");
     CHECK(ackq_install(db, &o, &q) == ACKQ_OK && q != NULL, "install");
     CHECK(database_table_count(db) == tables + 1, "설치가 테이블 하나를 만든다");
+    ackq_close(&q);
     ackq_t *again = NULL;
     CHECK(ackq_install(db, &o, &again) == ACKQ_OK && ackq_open(db, &o, &q) == ACKQ_OK, "install·open은 멱등이다");
     CHECK(database_table_count(db) == tables + 1, "다시 설치해도 테이블은 하나");
