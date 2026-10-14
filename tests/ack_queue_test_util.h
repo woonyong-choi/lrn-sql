@@ -35,20 +35,20 @@ static int g_run, g_fail;
 static char g_dir[128], g_db_path[192], g_wal_path[192];
 static uint64_t g_now;
 
-static uint64_t fake_clock(void *ctx)
+static __attribute__((unused)) uint64_t fake_clock(void *ctx)
 {
     (void)ctx;
     return g_now;
 }
 
-static void set_dir(const char *dir)
+static __attribute__((unused)) void set_dir(const char *dir)
 {
     snprintf(g_dir, sizeof(g_dir), "%s", dir);
     snprintf(g_db_path, sizeof(g_db_path), "%s/db.lrdb", dir);
     snprintf(g_wal_path, sizeof(g_wal_path), "%s/db.wal", dir);
 }
 
-static void fresh_dir(void)
+static __attribute__((unused)) void fresh_dir(void)
 {
     DIR *d = opendir(g_dir);
     if (d != NULL) {
@@ -66,13 +66,13 @@ static void fresh_dir(void)
 }
 
 /* 시험이 모두 통과했을 때 작업 directory를 지운다. 실패하면 조사하도록 남긴다. */
-static void remove_dir(void)
+static __attribute__((unused)) void remove_dir(void)
 {
     fresh_dir();
     rmdir(g_dir);
 }
 
-static void make_db(void)
+static __attribute__((unused)) void make_db(void)
 {
     fresh_dir();
     database_t *db = NULL;
@@ -81,7 +81,7 @@ static void make_db(void)
 }
 
 /* 트랜잭션 계층을 붙여 연다. with_wal이면 짝 WAL로 연다(처음이면 durable로 전환한다). */
-static database_t *open_db(bool with_wal)
+static __attribute__((unused)) database_t *open_db(bool with_wal)
 {
     database_txn_options_t o = {0};
     o.wal_path = with_wal ? g_wal_path : NULL;
@@ -96,7 +96,7 @@ static database_t *open_db(bool with_wal)
     return db;
 }
 
-static ackq_options_t qopts(const char *name, uint32_t max_attempts)
+static __attribute__((unused)) ackq_options_t qopts(const char *name, uint32_t max_attempts)
 {
     ackq_options_t o = {0};
     o.name = name;
@@ -153,7 +153,7 @@ static __attribute__((unused)) int64_t scalar_int(database_t *db, const char *sq
     return value;
 }
 
-static ackq_status_t enq(ackq_t *q, database_txn_t *txn, const char *payload, const char *key, uint64_t *id,
+static __attribute__((unused)) ackq_status_t enq(ackq_t *q, database_txn_t *txn, const char *payload, const char *key, uint64_t *id,
                          bool *dup)
 {
     return ackq_enqueue(q, txn, (const uint8_t *)payload, strlen(payload), key, id, dup);
