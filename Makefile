@@ -312,7 +312,51 @@ ifeq ($(SANITIZE),thread)
 	$(PYTHON) -c 'from pathlib import Path; import sys; text = Path(sys.argv[1]).read_text(); sys.exit(0 if "WARNING: ThreadSanitizer: lock-order-inversion" in text else 1)' $(BUILD_DIR)/fault/test_order_detector.json.stderr
 endif
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
+DATABASE_OBJS = $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store.o $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/sql/sql_statement.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/sql/result.o
+DATABASE_TESTS = test_sql_statement test_heap_store test_database test_database_sqlite test_database_fault
+DATABASE_BINS = $(addprefix $(BUILD_DIR)/,$(DATABASE_TESTS))
+
+$(BUILD_DIR)/test_sql_statement: $(BUILD_DIR)/tests/test_sql_statement.o $(BUILD_DIR)/sql/sql_statement_fault.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/storage/value_statement_fault.o
+$(BUILD_DIR)/test_heap_store: $(BUILD_DIR)/tests/test_heap_store.o $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store_test.o
+$(BUILD_DIR)/test_database: $(BUILD_DIR)/tests/test_database.o $(DATABASE_OBJS)
+$(BUILD_DIR)/test_database_sqlite: $(BUILD_DIR)/tests/test_database_sqlite.o $(DATABASE_OBJS)
+$(BUILD_DIR)/test_database_fault: $(BUILD_DIR)/tests/test_database_fault.o $(filter-out $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/storage/heap_store.o,$(DATABASE_OBJS)) $(BUILD_DIR)/sql/database_fault.o $(BUILD_DIR)/storage/heap_store_fault.o
+$(DATABASE_BINS):
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/sql/sql_statement_fault.o: src/sql/sql_statement.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=sqlstmt_test_malloc -Dcalloc=sqlstmt_test_calloc -Dfree=sqlstmt_test_free -c -o $@ $<
+
+$(BUILD_DIR)/storage/value_statement_fault.o: src/storage/value.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=sqlstmt_test_malloc -Dcalloc=sqlstmt_test_calloc -Dfree=sqlstmt_test_free -c -o $@ $<
+
+$(BUILD_DIR)/storage/heap_store_test.o: src/storage/heap_store.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=hs_test_malloc -Dcalloc=hs_test_calloc -Drealloc=hs_test_realloc -c -o $@ $<
+
+$(BUILD_DIR)/sql/database_fault.o: src/sql/database.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=db_test_malloc -Dcalloc=db_test_calloc -Drealloc=db_test_realloc -Dfree=db_test_free -c -o $@ $<
+
+$(BUILD_DIR)/storage/heap_store_fault.o: src/storage/heap_store.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=db_test_malloc -Dcalloc=db_test_calloc -Drealloc=db_test_realloc -Dfree=db_test_free -c -o $@ $<
+
+test-database: $(DATABASE_BINS)
+	@set -e; for binary in $(DATABASE_BINS); do \
+		$(TEST_RUNNER) --report "$(BUILD_DIR)/fault/$${binary##*/}.json" -- "$$binary"; \
+	done
+
+$(BUILD_DIR)/test_corrupt_open: $(BUILD_DIR)/tests/test_corrupt_open.o $(OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-corrupt-open: $(BUILD_DIR)/test_corrupt_open $(BUILD_DIR)/minidb
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_corrupt_open.json -- ./$(BUILD_DIR)/test_corrupt_open $(BUILD_DIR)/corrupt-open
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_corrupt_open_cli.json -- $(PYTHON) tests/test_corrupt_open_cli.py --minidb ./$(BUILD_DIR)/minidb --workdir $(BUILD_DIR)/corrupt-open-cli
+
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
@@ -324,5 +368,8 @@ clean:
 -include $(HOOK_OBJS:.o=.d) $(wildcard $(BUILD_DIR)/hooks/tests/*.d)
 -include $(BUILD_DIR)/hooks/main.d
 -include $(BUILD_DIR)/sql/result.d $(BUILD_DIR)/sql/result_fault.d
+-include $(DATABASE_OBJS:.o=.d) $(BUILD_DIR)/sql/database_fault.d $(BUILD_DIR)/sql/sql_statement_fault.d $(BUILD_DIR)/storage/heap_store_test.d
+
+.PHONY: test-database test-corrupt-open
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
