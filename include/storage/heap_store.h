@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sql/mem_ledger.h"
 #include "storage/page_file.h"
 #include "storage/value.h"
 
@@ -109,6 +110,24 @@ typedef struct heap_cursor heap_cursor_t;
  */
 heap_status_t heap_open(page_file_t *file, uint32_t table_id, uint32_t heap_root,
                         const heap_schema_t *schema, heap_t **out);
+/*
+ * heap_open과 같고 ledger가 있으면 이 heap과 여기서 연 cursor·batch의 모든 할당을 MEM_SCOPE_QUERY로
+ * 먼저 reserve한다. ledger는 heap·cursor·batch가 모두 닫힐 때까지 호출자가 살려 둔다. reserve가
+ * 거절되면 HEAP_NOMEM이며 그 호출은 아무 상태도 바꾸지 않는다(batch는 failed로 표시된다). NULL이거나
+ * ops가 NULL이면 계상하지 않는다. 재할당은 새 크기를 먼저 reserve하므로 순간 최대치는 old+new다.
+ *
+ * 호출자가 쥐는 몫의 반환:
+ *   heap_get·heap_batch_get의 row, cursor가 돌려준 row: heap_release_row가 clear하고 돌려준다.
+ *     cursor의 row는 다음 heap_cursor_next·heap_cursor_close에서 이 모듈이 돌려주므로 호출자는
+ *     value_clear만 하면 된다(heap_release_row를 부르면 이중 반환이다).
+ *   heap_collect_pages의 pages: heap_free_pages가 free하고 돌려준다.
+ * 계상하는 것은 이 모듈이 직접 만드는 할당과 overflow·record_page·value가 이 모듈 호출 중에 쓰는
+ * 임시 메모리의 상한이다. page_file의 해제 목록은 page_file 소유이며 여기서 계상하지 않는다.
+ */
+heap_status_t heap_open_ex(page_file_t *file, uint32_t table_id, uint32_t heap_root,
+                           const heap_schema_t *schema, const mem_ledger_t *ledger, heap_t **out);
+void heap_release_row(const heap_t *heap, value_t *row);
+void heap_free_pages(const heap_t *heap, uint32_t *pages, size_t count);
 void heap_close(heap_t *heap);
 uint32_t heap_root(const heap_t *heap);
 size_t heap_record_page_count(const heap_t *heap);
