@@ -1269,6 +1269,25 @@ static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
     exec_result_t res = {0, "", NULL, 0};
     db_header_t *hdr = &pager->header;
 
+    /* 컬럼 검증은 LIMIT 0 조기 종료와 COUNT 전용 경로보다 먼저 한다 */
+    int order_col_idx = -1;
+    if (stmt->has_order_by) {
+        order_col_idx = find_column_index(hdr, stmt->order_by_field);
+        if (order_col_idx < 0) {
+            res.status = -1;
+            snprintf(res.message, sizeof(res.message),
+                     "오류: ORDER BY 대상 컬럼 '%s'를 찾을 수 없습니다",
+                     stmt->order_by_field);
+            return res;
+        }
+    }
+
+    /* 집계 결과도 최종 LIMIT 대상이다. LIMIT 0이면 집계 행을 만들지 않는다 */
+    if (stmt->has_limit && stmt->limit_count == 0) {
+        snprintf(res.message, sizeof(res.message), "0행 조회 (TABLE_SCAN)");
+        return res;
+    }
+
     /* COUNT(*) 전용 경로 */
     if (stmt->select_count) {
         out_buf_t buf;
@@ -1293,21 +1312,9 @@ static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
         return res;
     }
 
-    if (stmt->has_limit && stmt->limit_count == 0) {
-        snprintf(res.message, sizeof(res.message), "0행 조회 (TABLE_SCAN)");
-        return res;
-    }
-
     /* ORDER BY가 있으면 수집 후 정렬 */
     if (stmt->has_order_by) {
-        int col_idx = find_column_index(hdr, stmt->order_by_field);
-        if (col_idx < 0) {
-            res.status = -1;
-            snprintf(res.message, sizeof(res.message),
-                     "오류: ORDER BY 대상 컬럼 '%s'를 찾을 수 없습니다",
-                     stmt->order_by_field);
-            return res;
-        }
+        int col_idx = order_col_idx;
 
         row_collect_t rc;
         if (stmt->has_limit) {
