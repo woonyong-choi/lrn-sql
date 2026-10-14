@@ -27,6 +27,9 @@ struct result {
     uint64_t rows_delivered;
     char tag[RESULT_MAX_TAG_BYTES];
     char message[RESULT_MAX_ERROR_MESSAGE_BYTES];
+    mem_ledger_t ledger;   /* ops가 NULL이면 계상하지 않는다 */
+    mem_scope_t scope;
+    size_t accounted;
 };
 
 /* builder가 쓰는 메모리 행 공급자. 행마다 [셀 배열][복사한 바이트] 한 덩어리다. */
@@ -326,19 +329,44 @@ static result_status_t check_command(const result_command_t *command)
     return memchr(command->tag, '\0', command->tag_len) == NULL ? RESULT_OK : RESULT_INVALID;
 }
 
-result_status_t result_open_command(const result_command_t *command, result_t **out)
+/* ledger가 있으면 결과 구조체 크기를 먼저 reserve한다. 만든 결과가 그 계상과 ledger를 쥔다. */
+static result_t *create_accounted(result_kind_t kind, const mem_ledger_t *ledger)
+{
+    size_t size = sizeof(result_t);
+    if (!mem_reserve(ledger, MEM_SCOPE_QUERY, size)) return NULL;
+    result_t *result = create_result(kind, 0, 0);
+    if (result == NULL) {
+        mem_release(ledger, MEM_SCOPE_QUERY, size);
+        return NULL;
+    }
+    if (mem_ledger_enabled(ledger)) {
+        result->ledger = *ledger;
+        result->scope = MEM_SCOPE_QUERY;
+        result->accounted = size;
+        mem_ledger_retain(ledger);
+    }
+    return result;
+}
+
+result_status_t result_open_command_ex(const result_command_t *command, const mem_ledger_t *ledger,
+                                       result_t **out)
 {
     if (out == NULL) return RESULT_INVALID;
     *out = NULL;
     result_status_t status = check_command(command);
     if (status != RESULT_OK) return status;
-    result_t *result = create_result(RESULT_KIND_COMMAND, 0, 0);
+    result_t *result = create_accounted(RESULT_KIND_COMMAND, ledger);
     if (result == NULL) return RESULT_NOMEM;
     memcpy(result->tag, command->tag, command->tag_len);
     result->command = (result_command_t){command->affected_rows, result->tag, command->tag_len};
     result->state = RESULT_STATE_COMPLETE;
     *out = result;
     return RESULT_OK;
+}
+
+result_status_t result_open_command(const result_command_t *command, result_t **out)
+{
+    return result_open_command_ex(command, NULL, out);
 }
 
 static result_status_t check_error(const result_error_t *error)
@@ -349,18 +377,24 @@ static result_status_t check_error(const result_error_t *error)
     return RESULT_OK;
 }
 
-result_status_t result_open_error(const result_error_t *error, result_t **out)
+result_status_t result_open_error_ex(const result_error_t *error, const mem_ledger_t *ledger,
+                                     result_t **out)
 {
     if (out == NULL) return RESULT_INVALID;
     *out = NULL;
     result_status_t status = check_error(error);
     if (status != RESULT_OK) return status;
-    result_t *result = create_result(RESULT_KIND_ERROR, 0, 0);
+    result_t *result = create_accounted(RESULT_KIND_ERROR, ledger);
     if (result == NULL) return RESULT_NOMEM;
     store_error(result, error);
     result->state = RESULT_STATE_FAILED;
     *out = result;
     return RESULT_OK;
+}
+
+result_status_t result_open_error(const result_error_t *error, result_t **out)
+{
+    return result_open_error_ex(error, NULL, out);
 }
 
 static result_next_t next_memory_row(void *ctx, result_step_t *step)
@@ -393,28 +427,53 @@ static size_t fixed_bytes(const result_t *result)
 
 result_status_t result_builder_create(const result_builder_spec_t *spec, result_builder_t **out)
 {
+    return result_builder_create_ex(spec, NULL, out);
+}
+
+result_status_t result_builder_create_ex(const result_builder_spec_t *spec, const mem_ledger_t *ledger,
+                                         result_builder_t **out)
+{
     if (out == NULL) return RESULT_INVALID;
     *out = NULL;
     if (spec == NULL) return RESULT_INVALID;
+    /* 검사는 할당과 reserve보다 먼저 한다. 고정 할당 크기는 결과를 열고 나서 fixed_bytes와 같다. */
+    result_limits_t limits;
+    size_t names_bytes;
+    result_status_t checked = check_columns(spec->columns, spec->column_count, &names_bytes);
+    if (checked != RESULT_OK) return checked;
+    checked = resolve_limits(spec->limits, &limits);
+    if (checked != RESULT_OK) return checked;
+    size_t fixed = sizeof(result_t) + spec->column_count * sizeof(result_column_t) + names_bytes +
+                   sizeof(mem_rows_t) + sizeof(result_builder_t);
+    if (fixed > limits.max_total_bytes) return RESULT_LIMIT;
+    if (!mem_reserve(ledger, MEM_SCOPE_QUERY, fixed)) return RESULT_NOMEM;
+
     mem_rows_t *mem = calloc(1, sizeof(*mem));
-    if (mem == NULL) return RESULT_NOMEM;
+    if (mem == NULL) {
+        mem_release(ledger, MEM_SCOPE_QUERY, fixed);
+        return RESULT_NOMEM;
+    }
     mem->column_count = spec->column_count;
     result_rows_spec_t rows = {spec->columns, spec->column_count, &memory_ops, mem, spec->limits};
     result_t *result;
     result_status_t status = result_open_rows(&rows, &result);
     if (status != RESULT_OK) {
         free(mem);
+        mem_release(ledger, MEM_SCOPE_QUERY, fixed);
         return status;
     }
     mem->used_bytes = fixed_bytes(result);
-    if (mem->used_bytes > result->limits.max_total_bytes) {
-        result_release(&result);
-        return RESULT_LIMIT;
-    }
     result_builder_t *builder = malloc(sizeof(*builder));
     if (builder == NULL) {
-        result_release(&result);
+        result_release(&result);  /* 아직 계상을 쥐지 않았다 */
+        mem_release(ledger, MEM_SCOPE_QUERY, fixed);
         return RESULT_NOMEM;
+    }
+    if (mem_ledger_enabled(ledger)) {
+        result->ledger = *ledger;
+        result->scope = MEM_SCOPE_QUERY;
+        result->accounted = fixed;
+        mem_ledger_retain(ledger);
     }
     *builder = (result_builder_t){result, mem};
     *out = builder;
@@ -473,15 +532,31 @@ result_status_t result_builder_add_row(result_builder_t *builder, const value_vi
     if (slots > (SIZE_MAX - row_bytes) / sizeof(value_view_t *)) return RESULT_LIMIT;
     size_t charge = row_bytes + slots * sizeof(value_view_t *);
     if (charge > result->limits.max_total_bytes - mem->used_bytes) return RESULT_LIMIT;
-    value_view_t *row = copy_row(cells, cell_count, row_bytes);
-    if (row == NULL) return RESULT_NOMEM;
-    if (slots > 0 && !grow_rows(mem, slots)) {
-        free(row);
+
+    /* 행과, 배열을 늘릴 때는 새 배열 전체를 먼저 reserve한다. 옛 배열은 이미 계상돼 있어 순간 최대치가 old+new다. */
+    const mem_ledger_t *ledger = &result->ledger;
+    size_t old_array = mem->capacity * sizeof(*mem->rows);
+    size_t new_array = (mem->capacity + slots) * sizeof(*mem->rows);
+    if (!mem_reserve(ledger, MEM_SCOPE_QUERY, row_bytes)) return RESULT_NOMEM;
+    if (slots > 0 && !mem_reserve(ledger, MEM_SCOPE_QUERY, new_array)) {
+        mem_release(ledger, MEM_SCOPE_QUERY, row_bytes);
         return RESULT_NOMEM;
     }
+    value_view_t *row = copy_row(cells, cell_count, row_bytes);
+    if (row == NULL) goto fail;
+    if (slots > 0 && !grow_rows(mem, slots)) {
+        free(row);
+        goto fail;
+    }
+    if (slots > 0) mem_release(ledger, MEM_SCOPE_QUERY, old_array);
     mem->rows[mem->count++] = row;
     mem->used_bytes += charge;
+    if (mem_ledger_enabled(ledger)) result->accounted += row_bytes + new_array - old_array;
     return RESULT_OK;
+fail:
+    mem_release(ledger, MEM_SCOPE_QUERY, row_bytes);
+    if (slots > 0) mem_release(ledger, MEM_SCOPE_QUERY, new_array);
+    return RESULT_NOMEM;
 }
 
 result_status_t result_builder_finish(result_builder_t **builder, result_t **out)
@@ -489,7 +564,13 @@ result_status_t result_builder_finish(result_builder_t **builder, result_t **out
     if (out == NULL) return RESULT_INVALID;
     *out = NULL;
     if (builder == NULL || *builder == NULL) return RESULT_INVALID;
-    *out = (*builder)->result;
+    result_t *result = (*builder)->result;
+    /* builder 구조체는 여기서 사라지므로 그 몫은 돌려주고, 나머지는 결과가 쥔다 */
+    if (result->accounted >= sizeof(result_builder_t)) {
+        result->accounted -= sizeof(result_builder_t);
+        mem_release(&result->ledger, result->scope, sizeof(result_builder_t));
+    }
+    *out = result;
     free(*builder);
     *builder = NULL;
     return RESULT_OK;
@@ -498,7 +579,7 @@ result_status_t result_builder_finish(result_builder_t **builder, result_t **out
 void result_builder_destroy(result_builder_t **builder)
 {
     if (builder == NULL || *builder == NULL) return;
-    result_release(&(*builder)->result);
+    result_release(&(*builder)->result);  /* 계상 전체(builder 구조체 포함)를 돌려준다 */
     free(*builder);
     *builder = NULL;
 }
@@ -564,6 +645,26 @@ void result_release(result_t **result)
 {
     if (result == NULL || *result == NULL) return;
     close_source(*result);
+    mem_ledger_t ledger = (*result)->ledger;
+    mem_release(&ledger, (*result)->scope, (*result)->accounted);
     free(*result);
+    mem_ledger_drop(&ledger);
     *result = NULL;
+}
+
+size_t result_accounted_bytes(const result_t *result)
+{
+    assert(result != NULL);
+    return result->accounted;
+}
+
+void result_rebind_ledger(result_t *result, const mem_ledger_t *ledger, mem_scope_t scope)
+{
+    assert(result != NULL);
+    if (!mem_ledger_enabled(&result->ledger) || !mem_ledger_enabled(ledger)) return;
+    mem_ledger_retain(ledger);
+    mem_ledger_t old = result->ledger;
+    result->ledger = *ledger;
+    result->scope = scope;
+    mem_ledger_drop(&old);
 }
