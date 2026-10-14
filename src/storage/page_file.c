@@ -612,6 +612,11 @@ const page_file_control_t *page_file_control(const page_file_t *file)
     return file != NULL ? &file->committed : NULL;
 }
 
+uint32_t page_file_allocated_pages(const page_file_t *file)
+{
+    return file != NULL ? file->page_count : 0;
+}
+
 bool page_file_is_published(const page_file_t *file)
 {
     return file != NULL && file->published;
