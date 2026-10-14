@@ -27,6 +27,11 @@ CFLAGS  = $(WARNFLAGS) -g $(INCLUDES) $(SANITIZE_FLAGS)
 LDFLAGS = $(SANITIZE_FLAGS)
 LDLIBS  = -lpthread -lm
 DEPFLAGS = -MMD -MP
+PYTHON ?= python3
+PYTEST ?= $(PYTHON) -m pytest
+TEST_TIMEOUT ?= 60
+FAULT_SEED ?= 1
+TEST_RUNNER = $(PYTHON) tests/fault_runner.py --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED)
 .DEFAULT_GOAL := all
 
 SRC_DIR   = src
@@ -66,15 +71,17 @@ $(BUILD_DIR)/tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o \
-               $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o
+               $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o
 BASIC_TESTS = test_all test_record test_record_fault test_overflow \
               test_overflow_fault test_value test_value_fault test_parser_boundary \
-              test_http_input
+              test_http_input test_io test_io_lock test_catalog test_catalog_fault
 TEST_BINS = $(addprefix $(BUILD_DIR)/,$(BASIC_TESTS))
 
 $(BUILD_DIR)/test_all: $(BUILD_DIR)/tests/test_all.o $(OBJS)
 $(BUILD_DIR)/test_parser_boundary: $(BUILD_DIR)/tests/test_parser_boundary.o $(OBJS)
 $(BUILD_DIR)/test_http_input: $(BUILD_DIR)/tests/test_http_input.o $(OBJS)
+$(BUILD_DIR)/test_io: $(BUILD_DIR)/tests/test_io.o $(OBJS)
+$(BUILD_DIR)/test_io_lock: $(BUILD_DIR)/tests/test_io_lock.o $(OBJS)
 $(BUILD_DIR)/test_record: $(BUILD_DIR)/tests/test_record.o $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o
 $(BUILD_DIR)/test_overflow: $(BUILD_DIR)/tests/test_overflow.o $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/record_page.o
 $(BUILD_DIR)/test_overflow_file: $(BUILD_DIR)/tests/test_overflow_file.o $(BUILD_DIR)/storage/overflow.o
@@ -84,6 +91,8 @@ $(BUILD_DIR)/test_value_sqlite: LDLIBS += -lsqlite3
 $(BUILD_DIR)/test_record_fault: $(BUILD_DIR)/tests/test_record_fault.o $(BUILD_DIR)/storage/record_fault.o $(BUILD_DIR)/storage/record_page_fault.o
 $(BUILD_DIR)/test_overflow_fault: $(BUILD_DIR)/tests/test_overflow_fault.o $(BUILD_DIR)/storage/overflow_fault.o
 $(BUILD_DIR)/test_value_fault: $(BUILD_DIR)/tests/test_value_fault.o $(BUILD_DIR)/storage/value_fault.o
+$(BUILD_DIR)/test_catalog: $(BUILD_DIR)/tests/test_catalog.o $(BUILD_DIR)/storage/catalog.o
+$(BUILD_DIR)/test_catalog_fault: $(BUILD_DIR)/tests/test_catalog_fault.o $(BUILD_DIR)/storage/catalog_fault.o
 
 $(TEST_BINS) $(BUILD_DIR)/test_overflow_file $(BUILD_DIR)/test_value_sqlite:
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -104,16 +113,22 @@ $(BUILD_DIR)/storage/value_fault.o: src/storage/value.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=value_test_malloc -c -o $@ $<
 
+$(BUILD_DIR)/storage/catalog_fault.o: src/storage/catalog.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=catalog_test_malloc -Drealloc=catalog_test_realloc -Dfree=catalog_test_free -c -o $@ $<
+
 test: $(TEST_BINS)
-	@set -e; for binary in $(TEST_BINS); do "$$binary"; done
+	@set -e; for binary in $(TEST_BINS); do \
+		$(TEST_RUNNER) --report "$(BUILD_DIR)/fault/$${binary##*/}.json" -- "$$binary"; \
+	done
 
 test-overflow-file: $(BUILD_DIR)/test_overflow_file
 	@directory=$$(mktemp -d "$(BUILD_DIR)/overflow.XXXXXX") && \
 	trap 'rmdir "$$directory" 2>/dev/null || true' EXIT HUP INT TERM && \
-	./$(BUILD_DIR)/test_overflow_file "$$directory/roundtrip.db"
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_overflow_file.json -- ./$(BUILD_DIR)/test_overflow_file "$$directory/roundtrip.db"
 
 test-value-sqlite: $(BUILD_DIR)/test_value_sqlite
-	./$(BUILD_DIR)/test_value_sqlite
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_value_sqlite.json -- ./$(BUILD_DIR)/test_value_sqlite
 
 # ── data generator ──
 $(BUILD_DIR)/gen_data: tools/gen_data.c $(OBJS)
@@ -172,35 +187,35 @@ $(BUILD_DIR)/test_step0: $(BUILD_DIR)/tests/test_step0_db_execute.o $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-step0: $(BUILD_DIR)/test_step0
-	./$(BUILD_DIR)/test_step0
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_step0.json -- ./$(BUILD_DIR)/test_step0
 
 $(BUILD_DIR)/test_step1: $(BUILD_DIR)/tests/test_step1_sql_ext.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-step1: $(BUILD_DIR)/test_step1
-	./$(BUILD_DIR)/test_step1
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_step1.json -- ./$(BUILD_DIR)/test_step1
 
 $(BUILD_DIR)/test_prop: $(BUILD_DIR)/tests/test_bptree_property.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-prop: $(BUILD_DIR)/test_prop
-	./$(BUILD_DIR)/test_prop
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_prop.json -- ./$(BUILD_DIR)/test_prop
 
 $(BUILD_DIR)/test_step2: $(BUILD_DIR)/tests/test_step2_concurrency.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-step2: $(BUILD_DIR)/test_step2
-	./$(BUILD_DIR)/test_step2
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_step2.json -- ./$(BUILD_DIR)/test_step2
 
 $(BUILD_DIR)/test_step3: $(BUILD_DIR)/tests/test_step3_regression.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-step3: $(BUILD_DIR)/test_step3
-	./$(BUILD_DIR)/test_step3
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_step3.json -- ./$(BUILD_DIR)/test_step3
 
 $(BUILD_DIR)/sql_probe: $(BUILD_DIR)/tests/sql_probe.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
@@ -210,14 +225,23 @@ test-pg-compat: $(BUILD_DIR)/sql_probe
 	python3 tests/pg_compat.py --probe ./$(BUILD_DIR)/sql_probe
 
 test-legacy-adopt: $(BUILD_DIR)/minidb
-	python3 tests/test_legacy_adopt.py --minidb ./$(BUILD_DIR)/minidb
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_legacy_adopt.json -- $(PYTHON) tests/test_legacy_adopt.py --minidb ./$(BUILD_DIR)/minidb
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite
+test-repl-boundary: $(BUILD_DIR)/minidb
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_repl_boundary.json -- $(PYTHON) tests/test_repl_boundary.py --minidb ./$(BUILD_DIR)/minidb
+
+test-io-cli: $(BUILD_DIR)/minidb
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_io_cli.json -- $(PYTHON) tests/test_io_cli.py --minidb ./$(BUILD_DIR)/minidb
+
+test-runner:
+	$(PYTEST) -q tests/test_fault_runner.py --basetemp=$(BUILD_DIR)/runner-tests -p no:cacheprovider
+
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
 
-.PHONY: test-overflow-file test-value-sqlite
+.PHONY: test-runner test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
 -include $(OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BUILD_DIR)/main.d
 -include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d)
