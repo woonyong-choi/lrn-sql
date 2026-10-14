@@ -320,7 +320,10 @@ ifeq ($(SANITIZE),thread)
 	$(PYTHON) -c 'from pathlib import Path; import sys; text = Path(sys.argv[1]).read_text(); sys.exit(0 if "WARNING: ThreadSanitizer: lock-order-inversion" in text else 1)' $(BUILD_DIR)/fault/test_order_detector.json.stderr
 endif
 
-DATABASE_OBJS = $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store.o $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/sql/sql_statement.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/sql/result.o
+DATABASE_OBJS = $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store.o $(BUILD_DIR)/storage/wal.o \
+                $(BUILD_DIR)/storage/durable_pair.o $(BUILD_DIR)/storage/transaction.o \
+                $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/sql/database_txn.o \
+                $(BUILD_DIR)/sql/sql_statement.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/sql/result.o
 DATABASE_TESTS = test_sql_statement test_heap_store test_database test_database_sqlite test_database_fault test_database_bounded_open
 DATABASE_BINS = $(addprefix $(BUILD_DIR)/,$(DATABASE_TESTS))
 DATABASE_AUDIT_OBJS = $(patsubst $(BUILD_DIR)/%.o,$(BUILD_DIR)/audit/%.o,$(DATABASE_OBJS))
@@ -402,9 +405,25 @@ $(BUILD_DIR)/test_transaction: $(BUILD_DIR)/tests/test_transaction.o $(BUILD_DIR
 $(BUILD_DIR)/test_transaction_fault: $(BUILD_DIR)/tests/test_transaction_fault.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-test-transaction: $(BUILD_DIR)/test_transaction $(BUILD_DIR)/test_transaction_fault
+$(BUILD_DIR)/test_page_file_durable: $(BUILD_DIR)/tests/test_page_file_durable.o $(STORAGE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/test_durable_pair: $(BUILD_DIR)/tests/test_durable_pair.o $(BUILD_DIR)/storage/durable_pair.o $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/wal.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/test_database_txn: $(BUILD_DIR)/tests/test_database_txn.o $(DATABASE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/test_session_txn: $(BUILD_DIR)/tests/test_session_txn.o $(BUILD_DIR)/sql/session.o $(DATABASE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-transaction: $(BUILD_DIR)/test_transaction $(BUILD_DIR)/test_transaction_fault $(BUILD_DIR)/test_page_file_durable $(BUILD_DIR)/test_durable_pair $(BUILD_DIR)/test_database_txn $(BUILD_DIR)/test_session_txn
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_transaction.json -- ./$(BUILD_DIR)/test_transaction
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_transaction_fault.json -- ./$(BUILD_DIR)/test_transaction_fault
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_page_file_durable.json -- ./$(BUILD_DIR)/test_page_file_durable
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_durable_pair.json -- ./$(BUILD_DIR)/test_durable_pair
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_database_txn.json -- ./$(BUILD_DIR)/test_database_txn
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_session_txn.json -- ./$(BUILD_DIR)/test_session_txn
 
 $(BUILD_DIR)/test_wal: $(BUILD_DIR)/tests/test_wal.o $(BUILD_DIR)/storage/wal.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
