@@ -56,7 +56,11 @@ typedef struct {
     bool is_message_truncated;
 } result_error_t;
 
-/* 컬럼 metadata. name은 비어 있지 않은 UTF-8이며 결과가 복사한다. 셀은 type이거나 is_nullable일 때 NULL. */
+/*
+ * 컬럼 metadata. name은 비어 있지 않은 UTF-8이며 결과가 복사한다. 셀은 type이거나 is_nullable일 때 NULL.
+ * 모든 행의 셀은 value.h의 유효한 view여야 한다: TEXT는 UTF-8, REAL은 유한값(NaN·무한대 거절),
+ * TEXT·BLOB은 VALUE_MAX_BYTES 이하. 어기면 builder는 INVALID·LIMIT, source 행은 INTERNAL·LIMIT 실패다.
+ */
 typedef struct {
     const uint8_t *name;
     size_t name_len;
@@ -71,7 +75,11 @@ typedef struct {
     size_t tag_len;
 } result_command_t;
 
-/* 0인 필드는 기본값이다. max_row_bytes <= max_total_bytes여야 한다. */
+/*
+ * 0인 필드는 기본값이다. max_row_bytes <= max_total_bytes여야 한다. SIZE_MAX도 허용하며 합산은 오버플로 없이
+ * LIMIT로 거절한다. 셀 하나의 VALUE_MAX_BYTES 상한은 이 한도와 별개로 항상 적용된다.
+ * max_total_bytes는 builder 결과에만 적용된다.
+ */
 typedef struct {
     size_t max_row_bytes;
     size_t max_total_bytes;
@@ -162,7 +170,10 @@ result_status_t result_open_command(const result_command_t *command, result_t **
 result_status_t result_open_error(const result_error_t *error, result_t **out);
 
 /*
- * 메모리 결과 builder. 한도는 metadata·셀 배열·복사한 TEXT/BLOB 바이트·행 관리 비용을 합산한다.
+ * 메모리 결과 builder. max_total_bytes는 결과·builder 구조체와 컬럼 metadata 같은 고정 할당, 셀 배열,
+ * 복사한 TEXT/BLOB 바이트, 행 슬롯 배열 증가분을 합산한다. 고정 할당만으로 한도를 넘으면 create가 LIMIT다.
+ * source 기반 결과의 고정 할당(결과 구조체, 컬럼, 이름)은 한도 밖이며 RESULT_MAX_COLUMNS와
+ * RESULT_MAX_NAME_BYTES로 상한이 정해진 상수 크기다.
  * add_row와 create가 실패하면 builder는 이전 상태 그대로 계속 쓸 수 있다.
  * finish는 실패하지 않는 경우에만 builder를 소비하고 *builder를 NULL로 만든다. 인자 오류(INVALID)면 builder는 그대로다.
  * destroy는 *builder가 NULL이면 아무것도 하지 않고, 아니면 정확히 한 번 해제한 뒤 NULL로 만든다.
