@@ -379,8 +379,12 @@ $(BUILD_DIR)/test_wal: $(BUILD_DIR)/tests/test_wal.o $(BUILD_DIR)/storage/wal.o
 $(BUILD_DIR)/test_wal_crash: $(BUILD_DIR)/tests/test_wal_crash.o $(BUILD_DIR)/storage/wal.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-test-wal: $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_wal_crash
+$(BUILD_DIR)/test_wal_alloc: $(BUILD_DIR)/tests/test_wal_alloc.o
+	$(CC) $^ -o $@ $(LDFLAGS)
+
+test-wal: $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_wal_crash $(BUILD_DIR)/test_wal_alloc
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED) --report fault/test_wal.json -- ./test_wal
+	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED) --report fault/test_wal_alloc.json -- ./test_wal_alloc
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout 180 --seed $(FAULT_SEED) --report fault/test_wal_crash.json -- ./test_wal_crash
 
 test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open test-transaction test-wal
