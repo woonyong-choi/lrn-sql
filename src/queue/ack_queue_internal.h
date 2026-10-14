@@ -33,7 +33,7 @@ uint64_t ackq_now(const ackq_t *queue);
 /* 호출자의 txn을 쓰거나(given) 자기 트랜잭션을 연다. write가 false면 given이 NULL일 때 트랜잭션 없이 읽는다. */
 ackq_status_t ackq_scope_open(ackq_t *queue, database_txn_t *given, bool write, ackq_scope_t *scope);
 /* result가 ACKQ_OK이고 dirty이면 commit해 그 결과를 돌려준다. 아니면 rollback하고 result를 그대로 돌려준다. */
-ackq_status_t ackq_scope_close(ackq_t *queue, ackq_scope_t *scope, ackq_status_t result);
+ackq_status_t ackq_scope_close(ackq_scope_t *scope, ackq_status_t result);
 
 /*
  * 문장을 실행한다. 성공(ROWS·COMMAND)이면 *out에 결과를 주고 ACKQ_OK다. 오류 결과이면 결과를 해제하고 매핑한 상태를

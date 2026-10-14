@@ -71,6 +71,8 @@ ackq_status_t ackq_scope_open(ackq_t *queue, database_txn_t *given, bool write, 
 {
     *scope = (ackq_scope_t){NULL, false, false};
     if (given != NULL) {
+        /* 다른 database의 트랜잭션으로 이 큐의 SQL을 실행하지 않는다. 어떤 문장도 실행하기 전에 거절한다. */
+        if (!database_txn_belongs_to(given, queue->db)) return ACKQ_INVALID;
         if (database_txn_state(given) != TXN_STATE_ACTIVE) return ACKQ_INVALID;
         if (database_txn_failed(given)) return ACKQ_TXN_FAILED;
         scope->txn = given;
@@ -83,19 +85,20 @@ ackq_status_t ackq_scope_open(ackq_t *queue, database_txn_t *given, bool write, 
                                    .guarantee = queue->guarantee,
                                    .timeout_ms = queue->begin_timeout_ms};
     txn_status_t status = database_txn_begin(queue->db, &options, &scope->txn);
+    /* 트랜잭션 계층이 없는 database(읽기 전용으로 열었거나 database_open으로 연 것)는 쓰기를 할 수 없다 */
+    if (status == TXN_INVALID) return ACKQ_UNSUPPORTED;
     if (status != TXN_OK) return map_txn_status(status);
     scope->own = true;
     return ACKQ_OK;
 }
 
-ackq_status_t ackq_scope_close(ackq_t *queue, ackq_scope_t *scope, ackq_status_t result)
+ackq_status_t ackq_scope_close(ackq_scope_t *scope, ackq_status_t result)
 {
     if (!scope->own || scope->txn == NULL) return result;
     ackq_status_t final = result;
     if (result == ACKQ_OK && scope->dirty) {
         txn_status_t status = database_txn_commit(scope->txn, NULL);
-        final = map_txn_status(status);
-        if (final == ACKQ_OK && database_is_poisoned(queue->db)) final = ACKQ_UNCERTAIN;
+        final = map_txn_status(status);   /* TXN_OK면 승인된 commit이므로 그 결과를 그대로 돌려준다 */
     } else {
         database_txn_rollback(scope->txn);
     }
