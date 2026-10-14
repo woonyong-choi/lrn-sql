@@ -1975,6 +1975,26 @@ static int validate_numeric_inputs(const db_header_t *hdr, const statement_t *st
     return 0;
 }
 
+/* 행을 읽거나 잠그기 전에 WHERE 컬럼 이름을 해석한다. UPDATE는 기존 오류 우선순위를 유지한다 */
+static int validate_predicate_column(const db_header_t *hdr, const statement_t *stmt,
+                                     exec_result_t *res)
+{
+    if (stmt->predicate_kind != PREDICATE_FIELD_EQ
+        && stmt->predicate_kind != PREDICATE_FIELD_CMP) {
+        return 0;
+    }
+    if (stmt->type == STMT_UPDATE && validate_update_target(hdr, stmt, res) < 0) {
+        return -1;
+    }
+    if (find_column_index(hdr, stmt->pred_field) < 0) {
+        res->status = -1;
+        snprintf(res->message, sizeof(res->message),
+                 "오류: 컬럼 '%s'을(를) 찾을 수 없습니다", stmt->pred_field);
+        return -1;
+    }
+    return 0;
+}
+
 static exec_result_t execute_statement(pager_t *pager, statement_t *stmt)
 {
     exec_result_t invalid = {0, "", NULL, 0};
@@ -1998,6 +2018,7 @@ static exec_result_t execute_statement(pager_t *pager, statement_t *stmt)
     if (stmt->type == STMT_EXPLAIN) {
         return exec_explain(pager, stmt);
     }
+    if (validate_predicate_column(&pager->header, stmt, &invalid) != 0) return invalid;
 
     plan_t plan = planner_create_plan(stmt);
 
