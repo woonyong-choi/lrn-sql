@@ -149,7 +149,8 @@ def _frame_for_cursor(cursor: sqlite3.Cursor, sql: str) -> list[str]:
         frame = [f"ROWS {len(names)}"]
         frame += [f"COL {hex_encode(name.encode('utf-8'))} D" for name in names]
         frame += [
-            "ROW " + " ".join(_from_python(value) for value in row) for row in cursor.fetchall()
+            "ROW " + " ".join(_from_python(value) for value in row)
+            for row in cursor.fetchall()
         ]
         return frame
     words = sql.strip().split()

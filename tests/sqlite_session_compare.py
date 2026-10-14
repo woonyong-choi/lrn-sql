@@ -68,7 +68,9 @@ def _show_row(row: Sequence[Cell]) -> str:
     return "(" + ", ".join(_show_cell(cell) for cell in row) + ")"
 
 
-def _rows_difference(reference: Outcome, subject: Outcome, *, ordered: bool) -> str | None:
+def _rows_difference(
+    reference: Outcome, subject: Outcome, *, ordered: bool
+) -> str | None:
     if ordered:
         if reference.rows == subject.rows:
             return None
@@ -112,7 +114,9 @@ def compare_outcomes(
     if reference.kind != subject.kind:
         return [f"kind differs: reference {reference.kind}, subject {subject.kind}"]
     names = compare if compare is not None else DEFAULT_COMPARE[reference.kind]
-    differences = [_field_difference(name, reference, subject, ordered=ordered) for name in names]
+    differences = [
+        _field_difference(name, reference, subject, ordered=ordered) for name in names
+    ]
     return [text for text in differences if text is not None]
 
 
@@ -141,7 +145,10 @@ def _declared_rows_match(outcome: Outcome, declared: dict[str, Any], key: str) -
 
 
 def judge_difference(
-    difference: dict[str, Any], reference: Outcome, subject: Outcome, differences: list[str]
+    difference: dict[str, Any],
+    reference: Outcome,
+    subject: Outcome,
+    differences: list[str],
 ) -> tuple[str, str]:
     """선언된 지원 차이를 확인한다. (판정, 설명)."""
     if not differences:
@@ -159,7 +166,9 @@ def judge_difference(
 
 @dataclass
 class Tally:
-    steps: dict[str, int] = field(default_factory=lambda: {verdict: 0 for verdict in VERDICTS})
+    steps: dict[str, int] = field(
+        default_factory=lambda: {verdict: 0 for verdict in VERDICTS}
+    )
 
     def add(self, verdict: str) -> None:
         self.steps[verdict] += 1
