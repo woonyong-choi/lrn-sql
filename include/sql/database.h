@@ -139,4 +139,23 @@ database_exec_status_t database_exec_ex(database_t *db, const database_exec_opti
 database_status_t database_attach_ledger(database_t *db, const mem_ledger_t *resident);
 size_t database_resident_bytes(const database_t *db);
 
+/*
+ * 상한을 지키는 열기·만들기. 열기가 쓰는 임시 메모리까지 보장하려고 할당보다 먼저 admission을 reserve한다
+ * (모두 MEM_SCOPE_RESIDENT). 열기(open)는 경로 이름을 따로 조회하지 않는다. 파일을 열고 잠근 뒤 같은 fd의
+ * fstat 크기로 핸들·경로 사본·해제 목록 상한을 reserve한 다음에야 핸들을 할당하고, 제어 페이지가 약속한
+ * 카탈로그 크기(CATALOG_MAX_ENCODED_BYTES를 넘으면 할당 없이 DATABASE_CORRUPT)를 안 뒤 읽기 buffer를 할당하기
+ * 전에 읽기·복호화 임시와
+ * 상주 카탈로그 상한을 reserve한다. 따라서 조회와 열기 사이에 경로의 파일이 교체되거나 자라도 상한은 열린
+ * 그 fd의 파일에 대해 계산된다. 사후 보정으로 상한을 보장하지 않는다. 거절되면 DATABASE_NOMEM이고 핸들을
+ * 만들지 않았다. 열기나 만들기가 실패하면 reserve한 몫을 모두 돌려준다. 성공하면 임시 몫을 돌려주고 상주
+ * 몫만 남기며(database_attach_ledger와 같은 상태) 핸들이 ledger를 쥔다. 실제 상주 몫이 admission을 넘으면
+ * 상한 계산의 오류이므로 닫고 DATABASE_INVALID로 거절한다. resident가 NULL이거나 ops가 NULL이면
+ * database_open·database_create와 같다. 한계: 파일 잠금은 권고(advisory)라 잠금을 지키지 않는 외부 쓰기가
+ * 열기 도중 파일 내용을 바꾸는 경우(예: 카탈로그 체인의 내용)는 막지 못한다. 크기는 제어 페이지의 값을 쓰므로
+ * 내용이 바뀌어도 할당 크기는 커지지 않는다. 만들기는 크기에 의존하지 않는 상수 admission을 쓴다.
+ */
+database_status_t database_open_bounded(const char *path, bool writable, const mem_ledger_t *resident,
+                                        database_t **out);
+database_status_t database_create_bounded(const char *path, const mem_ledger_t *resident, database_t **out);
+
 #endif

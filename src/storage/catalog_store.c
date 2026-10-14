@@ -105,9 +105,19 @@ catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *ca
 
 catalog_store_status_t catalog_store_load(page_file_t *file, catalog_t **out)
 {
+    return catalog_store_load_admitted(file, NULL, NULL, out);
+}
+
+catalog_store_status_t catalog_store_load_admitted(page_file_t *file, catalog_store_admit_fn admit,
+                                                   void *admit_ctx, catalog_t **out)
+{
     if (file == NULL || out == NULL) return CATALOG_STORE_INVALID;
     const page_file_control_t *control = page_file_control(file);
     if (control->catalog_head == PAGE_FILE_NO_PAGE) return CATALOG_STORE_EMPTY;
+    if (admit != NULL) {
+        if (control->catalog_size > CATALOG_MAX_ENCODED_BYTES) return CATALOG_STORE_LIMIT;
+        if (!admit(admit_ctx, control->catalog_size)) return CATALOG_STORE_NOMEM;
+    }
 
     page_file_overflow_ctx_t ctx;
     overflow_io_t io = page_file_overflow_io(&ctx, file, CATALOG_TABLE_ID);
