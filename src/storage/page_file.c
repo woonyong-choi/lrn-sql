@@ -767,7 +767,10 @@ page_file_status_t page_file_commit(page_file_t *file)
      * commit한 뒤에야 재사용한다.
      */
     for (size_t i = 0; i < file->aging_len; i++) file->reusable[file->reusable_len++] = file->aging[i];
-    memcpy(file->aging, file->pending, file->pending_len * sizeof(*file->pending));
+    /* 놓은 페이지가 없으면 두 목록이 NULL일 수 있어 길이 0이어도 memcpy를 부르지 않는다 */
+    if (file->pending_len > 0) {
+        memcpy(file->aging, file->pending, file->pending_len * sizeof(*file->pending));
+    }
     file->aging_len = file->pending_len;
     file->pending_len = 0;
     return PAGE_FILE_OK;
