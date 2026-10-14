@@ -511,6 +511,314 @@ static void http_chunked_multibyte_split_across_chunks_runs(void)
     CHECK(row_count() == rows + 1, "multibyte chunked request ran once");
 }
 
+/* ── #126: HTTP 본문 길이 경계와 거절 뒤 연결 정책 ──
+ *
+ * 본문 한도는 HTTP_MAX_BODY_BYTES(4095)이며 PARSER_MAX_INPUT_LEN과 같다. 한도 안의 유효한 문장은
+ * 실행하고, 한도를 넘거나 나쁜 꼬리가 붙은 문장은 앞부분이 유효한 INSERT·UPDATE·DELETE여도 한 번도
+ * 실행하지 않는다. 실행 여부는 users 전체 SELECT 응답 본문의 동일성으로 판정한다.
+ * 프레이밍 오류(413)는 연결을 닫고, 한도 안의 SQL 오류(400)는 연결을 유지한다. 두 경우 모두 앞 요청의
+ * 남은 바이트가 다음 요청에 섞여 실행되지 않는다.
+ */
+#define B126_RAW_CAP (2 * HTTP_MAX_BODY_BYTES + 1024)
+#define B126_FOLLOW_SQL "UPDATE users SET age = 77 WHERE id = 2"
+
+typedef struct {
+    const char *label;
+    const char *head;    /* 유효한 문장 전체 */
+    const char *before;  /* head를 공백 하나 자리에서 둘로 나눈 앞부분 */
+    const char *after;   /* 뒷부분. 공백으로 늘려도 같은 문장이다 */
+    const char *effect;  /* 실행되면 SELECT 응답에 나타나거나(appears) 사라지는 문자열 */
+    bool        appears;
+} b126_kind_t;
+
+static const b126_kind_t B126_KINDS[] = {
+    {"INSERT", "INSERT INTO users VALUES ('mallory', 99)",
+     "INSERT INTO users VALUES", "('mallory', 99)", "mallory", true},
+    {"UPDATE", "UPDATE users SET name = 'hijacked' WHERE id = 1",
+     "UPDATE users SET name = 'hijacked'", "WHERE id = 1", "hijacked", true},
+    {"DELETE", "DELETE FROM users WHERE id = 1",
+     "DELETE FROM users", "WHERE id = 1", "alice", false},
+};
+#define B126_KIND_COUNT (sizeof(B126_KINDS) / sizeof(B126_KINDS[0]))
+
+static char g_b126_raw[B126_RAW_CAP];
+static char g_b126_sql[B126_RAW_CAP];
+
+/* Content-Length를 본문 길이로 선언한 POST를 만들고 전체 바이트 수를 돌려준다 */
+static size_t build_post(char *out, size_t cap, const char *body, size_t body_len)
+{
+    int head = snprintf(out, cap, "POST /query HTTP/1.1\r\nHost: t\r\nContent-Length: %zu\r\n\r\n",
+                        body_len);
+    assert(head > 0 && (size_t)head + body_len < cap);
+    memcpy(out + head, body, body_len);
+    return (size_t)head + body_len;
+}
+
+/* head 뒤를 공백으로 채워 tail을 포함한 전체를 total 바이트로 맞춘 SQL을 g_b126_sql에 만든다 */
+static size_t pad_statement(const char *head, size_t total, const char *tail)
+{
+    size_t head_len = strlen(head), tail_len = strlen(tail);
+    assert(head_len + tail_len <= total && total < sizeof(g_b126_sql));
+    memcpy(g_b126_sql, head, head_len);
+    memset(g_b126_sql + head_len, ' ', total - head_len - tail_len);
+    memcpy(g_b126_sql + total - tail_len, tail, tail_len);
+    g_b126_sql[total] = '\0';
+    return total;
+}
+
+/*
+ * before와 after 사이를 공백으로 채워 전체를 total 바이트로 맞춘 SQL을 g_b126_sql에 만든다.
+ * HTTP 경로는 본문 끝의 공백·세미콜론을 실행 전에 잘라내므로, 끝 공백으로 채운 문장은 parser에
+ * 한도보다 짧게 보인다. 문장 가운데를 채워야 parser가 4094·4095바이트를 그대로 본다.
+ */
+static size_t pad_inner(const char *before, const char *after, size_t total)
+{
+    size_t before_len = strlen(before), after_len = strlen(after);
+    assert(before_len + after_len + 1 <= total && total < sizeof(g_b126_sql));
+    memcpy(g_b126_sql, before, before_len);
+    memset(g_b126_sql + before_len, ' ', total - before_len - after_len);
+    memcpy(g_b126_sql + total - after_len, after, after_len);
+    g_b126_sql[total] = '\0';
+    return total;
+}
+
+/* sql 바이트를 요청 하나로 보내고 상태를 돌려준다. body가 있으면 응답 본문을 담는다 */
+static int post_sql(const char *sql, size_t len, char *body, size_t body_cap)
+{
+    size_t total = build_post(g_b126_raw, sizeof(g_b126_raw), sql, len);
+    return exchange(g_b126_raw, total, body, body_cap);
+}
+
+static int post_text(const char *sql)
+{
+    return post_sql(sql, strlen(sql), NULL, 0);
+}
+
+static void snapshot(char *out, size_t cap)
+{
+    static const char select[] = "SELECT * FROM users";
+    int status = post_sql(select, sizeof(select) - 1, out, cap);
+    CHECK(status == 200, "snapshot SELECT answered 200");
+    if (status != 200) out[0] = '\0';
+}
+
+/* users를 alice(1)·bob(2) 두 행으로 되돌린다 */
+static void b126_reseed(void)
+{
+    static const char *const stmts[] = {
+        "DROP TABLE users",
+        "CREATE TABLE users (name VARCHAR(32), age INT)",
+        "INSERT INTO users VALUES ('alice', 20)",
+        "INSERT INTO users VALUES ('bob', 30)",
+    };
+    for (size_t i = 0; i < sizeof(stmts) / sizeof(stmts[0]); i++)
+        CHECK(post_text(stmts[i]) == 200, stmts[i]);
+}
+
+/* 4094·4095바이트의 유효한 INSERT·UPDATE·DELETE는 parser가 그 길이로 보고도 실행하며 효과가 나타난다 */
+static void http_126_statements_inside_limit_run(void)
+{
+    static char before[RESPONSE_CAP], after[RESPONSE_CAP];
+    static const size_t totals[] = {HTTP_MAX_BODY_BYTES - 1, HTTP_MAX_BODY_BYTES};
+
+    for (size_t k = 0; k < B126_KIND_COUNT; k++) {
+        for (size_t t = 0; t < sizeof(totals) / sizeof(totals[0]); t++) {
+            char label[96];
+            snprintf(label, sizeof(label), "%s at %zu bytes", B126_KINDS[k].label, totals[t]);
+            b126_reseed();
+            snapshot(before, sizeof(before));
+            size_t n = pad_inner(B126_KINDS[k].before, B126_KINDS[k].after, totals[t]);
+            CHECK(post_sql(g_b126_sql, n, NULL, 0) == 200, label);
+            snapshot(after, sizeof(after));
+            CHECK(strcmp(before, after) != 0, label);
+            CHECK((strstr(after, B126_KINDS[k].effect) != NULL) == B126_KINDS[k].appears, label);
+        }
+    }
+}
+
+/* 4096바이트 이상은 앞부분이 유효해도 413이며 한 번도 실행하지 않는다 */
+static void http_126_over_limit_runs_no_statement(void)
+{
+    static char before[RESPONSE_CAP], after[RESPONSE_CAP];
+    static const size_t totals[] = {HTTP_MAX_BODY_BYTES + 1, HTTP_MAX_BODY_BYTES + 2,
+                                    HTTP_MAX_BODY_BYTES + 17, 2 * HTTP_MAX_BODY_BYTES + 50};
+    static const char *const tails[] = {"", "ZZZ", "; DELETE FROM users"};
+
+    b126_reseed();
+    snapshot(before, sizeof(before));
+    for (size_t k = 0; k < B126_KIND_COUNT; k++) {
+        for (size_t t = 0; t < sizeof(totals) / sizeof(totals[0]); t++) {
+            for (size_t x = 0; x < sizeof(tails) / sizeof(tails[0]); x++) {
+                char label[128];
+                snprintf(label, sizeof(label), "%s over limit at %zu bytes, tail '%s'",
+                         B126_KINDS[k].label, totals[t], tails[x]);
+                size_t n = pad_statement(B126_KINDS[k].head, totals[t], tails[x]);
+                CHECK(post_sql(g_b126_sql, n, NULL, 0) == 413, label);
+                snapshot(after, sizeof(after));
+                CHECK(strcmp(before, after) == 0, label);
+            }
+        }
+    }
+}
+
+/* 한도 안이라도 나쁜 꼬리가 붙은 문장은 400이며 앞부분을 실행하지 않는다 */
+static void http_126_bad_tail_inside_limit_runs_no_statement(void)
+{
+    static char before[RESPONSE_CAP], after[RESPONSE_CAP];
+    static const size_t totals[] = {HTTP_MAX_BODY_BYTES - 1, HTTP_MAX_BODY_BYTES};
+    static const char *const tails[] = {"ZZZ", "; DELETE FROM users"};
+
+    b126_reseed();
+    snapshot(before, sizeof(before));
+    for (size_t k = 0; k < B126_KIND_COUNT; k++) {
+        for (size_t t = 0; t < sizeof(totals) / sizeof(totals[0]); t++) {
+            for (size_t x = 0; x < sizeof(tails) / sizeof(tails[0]); x++) {
+                char label[128];
+                snprintf(label, sizeof(label), "%s bad tail ending at %zu bytes, tail '%s'",
+                         B126_KINDS[k].label, totals[t], tails[x]);
+                size_t n = pad_statement(B126_KINDS[k].head, totals[t], tails[x]);
+                CHECK(post_sql(g_b126_sql, n, NULL, 0) == 400, label);
+                snapshot(after, sizeof(after));
+                CHECK(strcmp(before, after) == 0, label);
+            }
+        }
+    }
+}
+
+/* 다중 바이트 문자가 본문 한도에 걸쳐도 조각난 값이 실행되거나 저장되지 않는다 */
+static void http_126_multibyte_at_limit_is_never_split(void)
+{
+    static const char hangul[] = "\xEA\xB0\x80"; /* U+AC00, 3바이트 */
+    static char before[RESPONSE_CAP], after[RESPONSE_CAP];
+    static const char *const head = "UPDATE users SET age = 55 WHERE id = 1";
+
+    b126_reseed();
+    snapshot(before, sizeof(before));
+
+    /* 한글이 본문 끝(4094~4098바이트)에 걸린다. 한도 안은 구문 오류 400, 넘으면 413이다 */
+    for (size_t end = HTTP_MAX_BODY_BYTES - 1; end <= HTTP_MAX_BODY_BYTES + 3; end++) {
+        char label[96];
+        snprintf(label, sizeof(label), "hangul tail ending at byte %zu", end);
+        size_t n = pad_statement(head, end, hangul);
+        CHECK(post_sql(g_b126_sql, n, NULL, 0) == (end <= HTTP_MAX_BODY_BYTES ? 400 : 413), label);
+        snapshot(after, sizeof(after));
+        CHECK(strcmp(before, after) == 0, label);
+    }
+
+    /* 본문이 정확히 한도에서 한글의 첫 1·2바이트로 끝나면 잘못된 UTF-8이라 400이다 */
+    static const char *const cut[] = {"\xEA", "\xEA\xB0"};
+    for (size_t i = 0; i < sizeof(cut) / sizeof(cut[0]); i++) {
+        char label[96];
+        snprintf(label, sizeof(label), "multibyte cut after %zu bytes at the limit", i + 1);
+        size_t n = pad_statement(head, HTTP_MAX_BODY_BYTES, cut[i]);
+        CHECK(post_sql(g_b126_sql, n, NULL, 0) == 400, label);
+        snapshot(after, sizeof(after));
+        CHECK(strcmp(before, after) == 0, label);
+    }
+
+    /* 한도 안의 유효한 다중 바이트 리터럴은 4094·4095바이트에서도 통째로 저장된다 */
+    for (size_t total = HTTP_MAX_BODY_BYTES - 1; total <= HTTP_MAX_BODY_BYTES; total++) {
+        char label[96];
+        snprintf(label, sizeof(label), "valid hangul literal at %zu bytes", total);
+        b126_reseed();
+        size_t n = pad_inner("UPDATE users SET name = '\xEA\xB0\x80\xEB\x82\x98'", "WHERE id = 1", total);
+        CHECK(post_sql(g_b126_sql, n, NULL, 0) == 200, label);
+        snapshot(after, sizeof(after));
+        CHECK(strstr(after, "\xEA\xB0\x80\xEB\x82\x98") != NULL, label);
+    }
+}
+
+/* 한도를 넘어 413으로 거절된 연결은 닫히고, 같은 연결의 뒤따르는 정상 문장은 실행되지 않는다 */
+static void http_126_over_limit_closes_connection_and_follow_up_is_not_run(void)
+{
+    static char before[RESPONSE_CAP], after[RESPONSE_CAP];
+    char follow[256];
+
+    build_post(follow, sizeof(follow), B126_FOLLOW_SQL, strlen(B126_FOLLOW_SQL));
+    for (size_t k = 0; k < B126_KIND_COUNT; k++) {
+        char label[96];
+        client_t c;
+
+        b126_reseed();
+        snapshot(before, sizeof(before));
+
+        /* 응답을 받은 뒤 같은 연결로 정상 문장을 보낸다 */
+        snprintf(label, sizeof(label), "%s over limit, follow-up after the response", B126_KINDS[k].label);
+        size_t n = pad_statement(B126_KINDS[k].head, HTTP_MAX_BODY_BYTES + 1, "");
+        size_t total = build_post(g_b126_raw, sizeof(g_b126_raw), g_b126_sql, n);
+        assert(connect_client(&c) == 0);
+        send_bytes(&c, g_b126_raw, total);
+        CHECK(read_response(&c, NULL, 0) == 413, label);
+        CHECK(server_closed(&c), label);
+        send_bytes(&c, follow, strlen(follow));
+        CHECK(read_response(&c, NULL, 0) != 200, label);
+        close(c.fd);
+        snapshot(after, sizeof(after));
+        CHECK(strcmp(before, after) == 0, label);
+
+        /* 거절된 요청 바로 뒤에 정상 문장을 이어 보내도 섞이거나 실행되지 않는다 */
+        snprintf(label, sizeof(label), "%s over limit, follow-up pipelined behind it", B126_KINDS[k].label);
+        total = build_post(g_b126_raw, sizeof(g_b126_raw), g_b126_sql, n);
+        size_t both = total;
+        memcpy(g_b126_raw + both, follow, strlen(follow));
+        both += strlen(follow);
+        assert(connect_client(&c) == 0);
+        send_bytes(&c, g_b126_raw, both);
+        CHECK(read_response(&c, NULL, 0) == 413, label);
+        CHECK(read_response(&c, NULL, 0) != 200, label);
+        close(c.fd);
+        snapshot(after, sizeof(after));
+        CHECK(strcmp(before, after) == 0, label);
+
+        /* 새 연결의 같은 정상 문장은 정확히 한 번 실행된다 */
+        CHECK(post_text(B126_FOLLOW_SQL) == 200, label);
+        snapshot(after, sizeof(after));
+        CHECK(strstr(after, "77") != NULL && strcmp(before, after) != 0, label);
+    }
+}
+
+/* 한도 안의 SQL 오류(400)는 연결을 유지하며, 다음 정상 문장은 한 번만 온전히 실행된다 */
+static void http_126_sql_error_keeps_connection_and_next_statement_runs_once(void)
+{
+    static char before[RESPONSE_CAP], after[RESPONSE_CAP];
+    char follow[256];
+
+    build_post(follow, sizeof(follow), B126_FOLLOW_SQL, strlen(B126_FOLLOW_SQL));
+    for (size_t k = 0; k < B126_KIND_COUNT; k++) {
+        char label[96];
+        client_t c;
+
+        b126_reseed();
+        snapshot(before, sizeof(before));
+        size_t n = pad_statement(B126_KINDS[k].head, HTTP_MAX_BODY_BYTES, "ZZZ");
+        size_t total = build_post(g_b126_raw, sizeof(g_b126_raw), g_b126_sql, n);
+
+        snprintf(label, sizeof(label), "%s bad tail, follow-up after the response", B126_KINDS[k].label);
+        assert(connect_client(&c) == 0);
+        send_bytes(&c, g_b126_raw, total);
+        CHECK(read_response(&c, NULL, 0) == 400, label);
+        send_bytes(&c, follow, strlen(follow));
+        CHECK(read_response(&c, NULL, 0) == 200, label);
+        close(c.fd);
+        snapshot(after, sizeof(after));
+        CHECK(strstr(after, "77") != NULL, label);
+        CHECK((strstr(after, B126_KINDS[k].effect) != NULL) != B126_KINDS[k].appears, label);
+
+        b126_reseed();
+        snprintf(label, sizeof(label), "%s bad tail, follow-up pipelined behind it", B126_KINDS[k].label);
+        total = build_post(g_b126_raw, sizeof(g_b126_raw), g_b126_sql, n);
+        memcpy(g_b126_raw + total, follow, strlen(follow));
+        assert(connect_client(&c) == 0);
+        send_bytes(&c, g_b126_raw, total + strlen(follow));
+        CHECK(read_response(&c, NULL, 0) == 400, label);
+        CHECK(read_response(&c, NULL, 0) == 200, label);
+        close(c.fd);
+        snapshot(after, sizeof(after));
+        CHECK(strstr(after, "77") != NULL, label);
+        CHECK((strstr(after, B126_KINDS[k].effect) != NULL) != B126_KINDS[k].appears, label);
+    }
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -537,6 +845,12 @@ int main(void)
     http_chunked_request_cut_at_any_point_is_not_executed();
     http_chunked_request_followed_by_pipelined_requests_runs_each();
     http_chunked_multibyte_split_across_chunks_runs();
+    http_126_statements_inside_limit_run();
+    http_126_over_limit_runs_no_statement();
+    http_126_bad_tail_inside_limit_runs_no_statement();
+    http_126_multibyte_at_limit_is_never_split();
+    http_126_over_limit_closes_connection_and_follow_up_is_not_run();
+    http_126_sql_error_keeps_connection_and_next_statement_runs_once();
 
     pthread_kill(server, SIGINT);
     pthread_join(server, NULL);
