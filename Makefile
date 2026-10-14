@@ -236,6 +236,13 @@ $(BUILD_DIR)/test_step2: $(BUILD_DIR)/tests/test_step2_concurrency.o $(OBJS)
 test-step2: $(BUILD_DIR)/test_step2
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_step2.json -- ./$(BUILD_DIR)/test_step2
 
+$(BUILD_DIR)/test_lock_table_waiters: tests/test_lock_table_waiters.c src/server/lock_table.c include/server/lock_table.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_lock_table_waiters.c $(LDLIBS)
+
+test-lock-waiters: $(BUILD_DIR)/test_lock_table_waiters
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_lock_table_waiters.json -- ./$(BUILD_DIR)/test_lock_table_waiters
+
 $(BUILD_DIR)/test_step3: $(BUILD_DIR)/tests/test_step3_regression.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -413,7 +420,7 @@ test-wal: $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_wal_crash $(BUILD_DIR)/test_wa
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED) --report fault/test_wal_alloc.json -- ./test_wal_alloc
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout 180 --seed $(FAULT_SEED) --report fault/test_wal_crash.json -- ./test_wal_crash
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open test-transaction test-wal test-session
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
@@ -431,6 +438,6 @@ clean:
 -include $(BUILD_DIR)/storage/transaction.d
 -include $(BUILD_DIR)/storage/wal.d
 
-.PHONY: test-database test-corrupt-open test-transaction test-wal test-session
+.PHONY: test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
