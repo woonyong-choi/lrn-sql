@@ -372,9 +372,12 @@ int server_run(pager_t *pager, int port)
     /* Row Lock 테이블 정리 */
     db_destroy();
 
-    /* DB flush */
-    pager_flush_all(pager);
-    pager_close(pager);
+    /* DB flush. 실패하면 변경 사항이 디스크에 없을 수 있으므로 성공으로 끝내지 않는다 */
+    if (pager_close(pager) != 0) {
+        fprintf(stderr, "[server] 오류: 변경 사항을 디스크에 기록하지 못했습니다 (%s)\n",
+                strerror(errno));
+        return 1;
+    }
 
     fprintf(stderr, "[server] done\n");
     return 0;
