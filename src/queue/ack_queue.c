@@ -306,7 +306,7 @@ static ackq_status_t create_table(ackq_t *queue)
              queue->table);
     status = ackq_run(queue, &scope, true, sql, NULL, 0, &result, NULL);
     if (status == ACKQ_OK) result_release(&result);
-    return ackq_scope_close(queue, &scope, status);
+    return ackq_scope_close(&scope, status);
 }
 
 ackq_status_t ackq_install(database_t *db, const ackq_options_t *options, ackq_t **out)
@@ -440,7 +440,12 @@ ackq_status_t ackq_enqueue(ackq_t *queue, database_txn_t *txn, const uint8_t *pa
     status = ackq_scope_open(queue, txn, true, &scope);
     if (status != ACKQ_OK) return status;
     status = enqueue_in(queue, &scope, payload, size, idem_key, id, duplicate);
-    return ackq_scope_close(queue, &scope, status);
+    status = ackq_scope_close(&scope, status);
+    if (status != ACKQ_OK) {
+        *id = 0;
+        if (duplicate != NULL) *duplicate = false;
+    }
+    return status;
 }
 
 /* ── claim ── */
@@ -516,11 +521,14 @@ ackq_status_t ackq_claim(ackq_t *queue, database_txn_t *txn, size_t max_items, u
     status = ackq_scope_open(queue, txn, true, &scope);
     if (status != ACKQ_OK) return status;
     status = claim_in(queue, &scope, max_items, now_value, lease_until, items, count);
+    if (status == ACKQ_OK) status = ackq_scope_close(&scope, status);
+    else ackq_scope_close(&scope, status);
+    /* commit이 실패하거나 불확실하면 claim은 없던 일이다. 가져온 항목을 호출자에게 주지 않는다. */
     if (status != ACKQ_OK) {
         ackq_claims_release(items, *count);
         *count = 0;
     }
-    return ackq_scope_close(queue, &scope, status);
+    return status;
 }
 
 ackq_status_t ackq_claim_id(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t lease_ms, ackq_claim_t *item)
@@ -542,7 +550,9 @@ ackq_status_t ackq_claim_id(ackq_t *queue, database_txn_t *txn, uint64_t id, uin
                                                   : meta.state == ACKQ_STATE_LEASED && lease_expired(&meta, &filter);
         status = due ? claim_one(queue, &scope, &meta, lease_until, item) : ACKQ_STALE;
     }
-    return ackq_scope_close(queue, &scope, status);
+    status = ackq_scope_close(&scope, status);
+    if (status != ACKQ_OK) ackq_claims_release(item, 1);
+    return status;
 }
 
 void ackq_claims_release(ackq_claim_t *items, size_t count)
@@ -586,7 +596,7 @@ static ackq_status_t finish_claim(ackq_t *queue, database_txn_t *txn, uint64_t i
         else if (meta.state != ACKQ_STATE_LEASED) status = ACKQ_STALE;
         else status = set_terminal(queue, &scope, id, target, note);
     }
-    return ackq_scope_close(queue, &scope, status);
+    return ackq_scope_close(&scope, status);
 }
 
 ackq_status_t ackq_ack(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t fence)
@@ -642,7 +652,7 @@ ackq_status_t ackq_nack(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_
     if (status == ACKQ_OK) {
         status = nack_in(queue, &scope, &meta, fence, retry_delay_ms, reason != NULL ? reason : "", terminal);
     }
-    return ackq_scope_close(queue, &scope, status);
+    return ackq_scope_close(&scope, status);
 }
 
 ackq_status_t ackq_update(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t fence, const uint8_t *payload,
@@ -668,7 +678,7 @@ ackq_status_t ackq_update(ackq_t *queue, database_txn_t *txn, uint64_t id, uint6
             status = run_one_row(queue, &scope, sql, params, 2);
         }
     }
-    return ackq_scope_close(queue, &scope, status);
+    return ackq_scope_close(&scope, status);
 }
 
 /* ── 회복·정리·조회 ── */
@@ -716,7 +726,7 @@ static ackq_status_t return_leases(ackq_t *queue, database_txn_t *txn, size_t li
     }
     free(top.items);
     if (status == ACKQ_OK && processed != NULL) *processed = done;
-    return ackq_scope_close(queue, &scope, status);
+    return ackq_scope_close(&scope, status);
 }
 
 ackq_status_t ackq_recover(ackq_t *queue, database_txn_t *txn, size_t limit, size_t *recovered)
@@ -755,7 +765,7 @@ ackq_status_t ackq_purge(ackq_t *queue, database_txn_t *txn, bool include_failed
     }
     free(top.items);
     if (status == ACKQ_OK && purged != NULL) *purged = done;
-    return ackq_scope_close(queue, &scope, status);
+    return ackq_scope_close(&scope, status);
 }
 
 ackq_status_t ackq_stats(ackq_t *queue, database_txn_t *txn, ackq_stats_t *stats)
@@ -786,7 +796,7 @@ ackq_status_t ackq_stats(ackq_t *queue, database_txn_t *txn, ackq_stats_t *stats
         if (status == ACKQ_OK) status = finished;
     }
     if (status == ACKQ_OK) *stats = counted;
-    return ackq_scope_close(queue, &scope, status);
+    return ackq_scope_close(&scope, status);
 }
 
 static ackq_status_t fill_item(ackq_t *queue, ackq_scope_t *scope, const meta_t *meta, bool with_payload,
@@ -843,7 +853,7 @@ ackq_status_t ackq_list(ackq_t *queue, database_txn_t *txn, uint64_t after_id, s
         filled = 0;
     }
     *count = filled;
-    return ackq_scope_close(queue, &scope, status);
+    return ackq_scope_close(&scope, status);
 }
 
 void ackq_list_release(ackq_item_t *items, size_t count)
