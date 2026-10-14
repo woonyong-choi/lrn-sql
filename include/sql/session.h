@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "sql/database.h"
+#include "sql/database_txn.h"
 #include "sql/mem_ledger.h"
 #include "sql/result.h"
 
@@ -107,6 +108,15 @@ session_status_t session_pool_create_database(session_pool_t *pool, const char *
                                               database_status_t *database_status);
 /* 열린 세션이 있으면 SESSION_BUSY다. 닫으면 상주 몫이 shared로 돌아간다. 결과가 남아 있어도 닫을 수 있다. */
 session_status_t session_pool_close_database(session_db_t *db, database_status_t *database_status);
+/*
+ * 트랜잭션 계층(database_txn.h)을 붙여 연다. 상주 몫은 이 풀의 shared 예산으로 계상한다(options->resident는
+ * 무시하고 풀의 ledger를 쓴다). 문장과 commit의 임시 메모리, 작업 카탈로그 몫도 같은 예산이며 열린 트랜잭션이 쥔 작업
+ * 카탈로그와 페이지 목록은 상주 몫으로 남는다. 한계: 열기 중의 임시 메모리는 열린 뒤에 상주 몫을 붙이는 방식이라
+ * database_open_bounded의 사전 admission을 받지 않는다. info는 NULL 가능이다.
+ */
+session_status_t session_pool_open_transactional(session_pool_t *pool, const char *path,
+                                                 const database_txn_options_t *options, session_db_t **out,
+                                                 database_status_t *database_status, database_txn_info_t *info);
 /* 상태 확인용 핸들. 호출자가 닫으면 안 된다. 세션 밖에서 직접 exec하면 직렬화·회계 계약을 우회한다. */
 database_t *session_db_handle(session_db_t *db);
 
@@ -123,6 +133,13 @@ typedef struct {
 } session_exec_options_t;
 
 /*
+ * 트랜잭션 계층이 붙은 데이터베이스에서 BEGIN 문장이 다른 세션의 writer를 기다리는 시간(ms). 기본 0은 기다리지 않고
+ * RESULT_E_BUSY 오류 결과다. 기다리는 동안 데이터베이스 실행 잠금을 쥐지 않으므로 쓰고 있는 세션이 commit·rollback할 수
+ * 있다. session_cancel이 오면 기다림을 멈추고 BUSY 결과를 돌려준다. 실행 중이 아닐 때 호출한다.
+ */
+void session_set_begin_timeout(session_t *session, uint32_t timeout_ms);
+
+/*
  * 문장 하나를 실행한다(database_exec_ex와 같은 반환 계약). 반환된 결과는 session에 이전된 몫으로 계상되며
  * 호출자가 result_release한다. 예산을 넘거나 할당이 거절되면 RESULT_E_NOMEM 오류 결과이고 그 결과조차 만들 수
  * 없으면 DATABASE_EXEC_NOMEM이다. 이미 실행 중인 세션이면 DATABASE_EXEC_INVALID다.
@@ -130,5 +147,25 @@ typedef struct {
 database_exec_status_t session_exec(session_t *session, const session_exec_options_t *options,
                                     const uint8_t *sql, size_t size, const lexer_binding_t *binding,
                                     result_t **out);
+
+/*
+ * 세션의 트랜잭션(C API). BEGIN·COMMIT·ROLLBACK 문장과 같은 database_conn의 트랜잭션을 쓴다. 세션은 열린 트랜잭션을
+ * 최대 하나 쥐고, 세션 안의 session_exec는 열린 트랜잭션 안에서 실행된다(없으면 자동 commit). 트랜잭션 계층이 없는
+ * 데이터베이스의 세션은 TXN_UNSUPPORTED다. session_close는 열린 트랜잭션을 rollback한다. 실행 중인 세션은 TXN_INVALID다.
+ *   begin: timeout_ms만큼 다른 세션의 writer를 기다린다. 기다리는 동안 실행 잠금을 쥐지 않는다. guarantee는
+ *          transaction.h를 따른다(DURABLE은 WAL이 있어야 한다)
+ *   commit: 실패 상태(session_txn_failed)면 TXN_INVALID이고 그대로다. 그 밖에는 결과와 무관하게 트랜잭션이 끝난다
+ *   rollback: 열린 트랜잭션이 없으면 TXN_NOT_ACTIVE
+ */
+typedef struct {
+    txn_guarantee_t guarantee;
+    uint32_t timeout_ms;
+} session_txn_options_t;
+
+txn_status_t session_txn_begin(session_t *session, const session_txn_options_t *options);
+txn_status_t session_txn_commit(session_t *session, txn_commit_info_t *info);
+txn_status_t session_txn_rollback(session_t *session);
+bool session_txn_active(const session_t *session);
+bool session_txn_failed(const session_t *session);
 
 #endif
