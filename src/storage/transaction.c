@@ -161,19 +161,32 @@ static void wait_slice(txn_manager_t *manager)
  * 않는다. 자동 발급은 상한 + 1이고, 지정 번호는 상한보다 클 때만 채택하며 채택하면 상한이 그 값으로 오른다.
  * 따라서 이 프로세스에서 한 번 쓴 번호와 그 이하의 번호는 다시 쓰이지 않는다(작은 번호를 나중에 지정하는 것도
  * 거절한다). 프로세스를 넘는 유일성은 이 상한이 보장하지 못한다. 재시작하면 자동 발급은 1부터 다시 시작하므로,
- * 재시작 경계에서는 호출자가 backend에 저장한 증가하는 세대 번호를 넘겨야 하고, 같은 프로세스에서 자동 발급과
- * 지정을 섞는 호출자는 둘의 번호 범위를 스스로 조율해야 한다.
+ * 재시작 경계에서는 호출자가 backend에 저장한 가장 큰 세대를 epoch_floor로 넘겨 ABOVE_FLOOR로 받고
+ * (max(상한, floor) + 1을 한 잠금 안에서 고른다) 그 값을 저장해야 한다. 지정 번호와 자동 발급을 섞는 호출자는
+ * 둘의 번호 범위를 스스로 조율해야 한다.
  */
 static pthread_mutex_t epoch_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t epoch_high_water;   /* 0이면 아직 발급 없음. UINT32_MAX이면 자동 발급이 소진된 것이다 */
 
-/* requested가 0이면 자동 발급. 상한 이하의 지정은 INVALID, 자동 발급 소진은 LIMIT이다. */
-static txn_status_t epoch_reserve(uint32_t requested, uint32_t *out)
+/*
+ * requested가 0이면 자동 발급. 상한 이하의 지정은 INVALID, 자동 발급 소진은 LIMIT이다.
+ * above_floor면 requested를 쓰지 않고 max(상한, floor) + 1을 같은 잠금 안에서 고르고 상한을 올린다.
+ */
+static txn_status_t epoch_reserve(uint32_t requested, bool above_floor, uint32_t floor, uint32_t *out)
 {
     txn_status_t status = TXN_OK;
 
     pthread_mutex_lock(&epoch_mutex);
-    if (requested != 0) {
+    if (above_floor) {
+        uint64_t base = epoch_high_water > floor ? epoch_high_water : floor;
+
+        if (base >= UINT32_MAX) {
+            status = TXN_LIMIT;
+        } else {
+            epoch_high_water = base + 1;
+            *out = (uint32_t)epoch_high_water;
+        }
+    } else if (requested != 0) {
         if (requested <= epoch_high_water) {
             status = TXN_INVALID;
         } else {
@@ -294,6 +307,10 @@ txn_status_t txn_manager_open(const txn_manager_spec_t *spec, txn_manager_t **ou
         spec->commit_ring > TXN_MAX_COMMIT_RING || spec->initial_seq == UINT64_MAX) {
         return TXN_INVALID;
     }
+    if ((spec->epoch_mode != TXN_EPOCH_DEFAULT && spec->epoch_mode != TXN_EPOCH_ABOVE_FLOOR) ||
+        (spec->epoch_mode == TXN_EPOCH_ABOVE_FLOOR && spec->epoch != 0)) {
+        return TXN_INVALID;
+    }
     ring_cap = spec->commit_ring != 0 ? spec->commit_ring : TXN_DEFAULT_COMMIT_RING;
     max_readers = spec->max_readers != 0 ? spec->max_readers : TXN_DEFAULT_MAX_READERS;
     manager = calloc(1, sizeof(*manager));
@@ -316,7 +333,7 @@ txn_status_t txn_manager_open(const txn_manager_spec_t *spec, txn_manager_t **ou
         goto fail_cond;
     }
     /* 마지막에 예약한다. 앞선 할당이 실패해도 세대 번호를 소모하지 않는다. */
-    status = epoch_reserve(spec->epoch, &epoch);
+    status = epoch_reserve(spec->epoch, spec->epoch_mode == TXN_EPOCH_ABOVE_FLOOR, spec->epoch_floor, &epoch);
     if (status != TXN_OK) {
         goto fail_reclaim_mutex;
     }
@@ -717,6 +734,8 @@ txn_status_t txn_release(txn_t **txn_ptr)
     *txn_ptr = NULL;
     return TXN_OK;
 }
+
+uint32_t txn_manager_epoch(const txn_manager_t *manager) { return manager == NULL ? 0 : manager->epoch; }
 
 txn_state_t txn_state(const txn_t *txn) { return txn == NULL ? TXN_STATE_NONE : txn->state; }
 
