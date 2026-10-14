@@ -9,9 +9,10 @@
   - `.exit`/EOF 종료에서 pager_close가 실패하면 종료 코드 1, "종료합니다."를 출력하지 않는다.
   - 서버 종료에서 pager_close가 실패하면 종료 코드 1, "[server] done"을 출력하지 않는다.
   - 다른 프로세스가 열고 있는 파일은 열기 오류와 종료 코드 1로 거부한다.
-  - 읽을 수 없는 페이지를 만나도 `.pages`가 죽지 않고 오류를 알린다.
+  - 마지막 페이지가 잘린 파일은 열 때 손상으로 거절되며 죽지 않는다(#130).
 
-한계: 이 검사는 쓰기 실패와 EOF만 다룬다. 읽기 EIO 주입은 tests/test_io.c가 맡는다.
+한계: 이 검사는 쓰기 실패와 EOF만 다룬다. 읽기 EIO 주입은 tests/test_io.c가, 손상 파일 열기는
+tests/test_corrupt_open.c와 test_corrupt_open_cli.py가 맡는다.
 """
 
 import argparse
@@ -106,14 +107,20 @@ def test_second_open_refused(binary, tmp):
 
 
 def test_pages_survives_unreadable_page(binary, tmp):
+    """마지막 페이지가 잘린 파일은 열 때 손상(#130)으로 거절되고 죽지 않는다.
+
+    열린 뒤 읽을 수 없게 되는 페이지는 tests/test_io.c의 읽기 오류 주입이 맡는다.
+    """
     db = tmp / "pages.db"
     build_db(binary, db)
     size = db.stat().st_size
     with open(db, "r+b") as f:  # 3페이지(헤더·힙·리프) 중 마지막 리프를 잘라 낸다
         f.truncate(size // 3 * 2)
+    head = db.read_bytes()
     res = run(binary, db, ".pages\n.exit\n")
-    check("읽을 수 없습니다" in res.stderr, ".pages가 읽을 수 없는 페이지를 오류로 알림")
-    check(res.returncode >= 0, f"시그널로 죽지 않음 (실제 {res.returncode})")
+    check("손상된 데이터베이스 파일입니다" in res.stderr, "잘린 파일을 손상으로 거절")
+    check(res.returncode == 1, f"손상 거절은 종료 코드 1, 시그널로 죽지 않음 (실제 {res.returncode})")
+    check(db.read_bytes() == head, "거절한 파일은 바이트가 그대로")
 
 
 def free_port():
