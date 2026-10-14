@@ -72,8 +72,20 @@ static long g_realloc_calls;
 static long g_live_bufs;         /* 할당됐고 아직 해제도 이전도 되지 않은 버퍼 수 */
 static long g_transferred_bufs;  /* 호출자에게 넘긴 버퍼 수 */
 
+static pthread_once_t g_env_once = PTHREAD_ONCE_INIT;
+
+/* 실제 REPL·서버 바이너리에 실패를 주입하는 경로: 환경 변수로 n번째 호출을 지정한다 */
+static void load_fail_env(void)
+{
+    const char *m = getenv("MINIDB_TEST_FAIL_OUT_MALLOC");
+    const char *r = getenv("MINIDB_TEST_FAIL_OUT_REALLOC");
+    if (m != NULL) g_fail_malloc_at = atol(m);
+    if (r != NULL) g_fail_realloc_at = atol(r);
+}
+
 void executor_test_fail_out_alloc(long malloc_at, long realloc_at)
 {
+    pthread_once(&g_env_once, load_fail_env);   /* 이후 환경 변수가 이 호출을 덮어쓰지 않게 */
     g_fail_malloc_at  = malloc_at;
     g_fail_realloc_at = realloc_at;
     g_malloc_calls    = 0;
@@ -87,8 +99,8 @@ void executor_test_out_stats(long *mallocs, long *reallocs, long *live, long *tr
     *live        = g_live_bufs;
     *transferred = g_transferred_bufs;
 }
-#define OUT_LIVE_ADD(n)        (g_live_bufs += (n))
-#define OUT_TRANSFERRED_ADD(n) (g_transferred_bufs += (n))
+#define OUT_LIVE_ADD(n)        ((void)__atomic_add_fetch(&g_live_bufs, (n), __ATOMIC_RELAXED))
+#define OUT_TRANSFERRED_ADD(n) ((void)__atomic_add_fetch(&g_transferred_bufs, (n), __ATOMIC_RELAXED))
 #else
 #define OUT_LIVE_ADD(n)        ((void)0)
 #define OUT_TRANSFERRED_ADD(n) ((void)0)
@@ -97,8 +109,9 @@ void executor_test_out_stats(long *mallocs, long *reallocs, long *live, long *tr
 static void *out_malloc(size_t n)
 {
 #ifdef MINIDB_TEST_HOOKS
-    if (g_fail_malloc_at != 0 && ++g_malloc_calls == g_fail_malloc_at) return NULL;
-    if (g_fail_malloc_at == 0) g_malloc_calls++;
+    pthread_once(&g_env_once, load_fail_env);
+    long nth = __atomic_add_fetch(&g_malloc_calls, 1, __ATOMIC_RELAXED);
+    if (g_fail_malloc_at != 0 && nth == g_fail_malloc_at) return NULL;
 #endif
     return malloc(n);
 }
@@ -106,8 +119,9 @@ static void *out_malloc(size_t n)
 static void *out_realloc(void *p, size_t n)
 {
 #ifdef MINIDB_TEST_HOOKS
-    if (g_fail_realloc_at != 0 && ++g_realloc_calls == g_fail_realloc_at) return NULL;
-    if (g_fail_realloc_at == 0) g_realloc_calls++;
+    pthread_once(&g_env_once, load_fail_env);
+    long nth = __atomic_add_fetch(&g_realloc_calls, 1, __ATOMIC_RELAXED);
+    if (g_fail_realloc_at != 0 && nth == g_fail_realloc_at) return NULL;
 #endif
     return realloc(p, n);
 }
