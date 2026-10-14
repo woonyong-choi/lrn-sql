@@ -59,18 +59,23 @@ static uint64_t get_u64(const uint8_t *p)
 /* 부호화한 크기. 넘치면 false */
 static bool payload_size(size_t sql_size, const lexer_binding_t *binding, size_t *size)
 {
-    size_t total = 2 + 4 + sql_size + 4;
+    if (sql_size > WAL_MAX_PAYLOAD - 10u) return false;
+    size_t total = 10u + sql_size;
     size_t count = binding != NULL ? binding->count : 0;
+    if (count > WAL_MAX_PAYLOAD - total || (count > 0 && binding->values == NULL)) return false;
     for (size_t i = 0; i < count; i++) {
         const value_view_t *v = &binding->values[i];
         total += 1;
         switch (v->type) {
             case VALUE_NULL: break;
             case VALUE_INTEGER:
-            case VALUE_REAL: total += 8; break;
+            case VALUE_REAL:
+                if (total > WAL_MAX_PAYLOAD - 8u) return false;
+                total += 8;
+                break;
             case VALUE_TEXT:
             case VALUE_BLOB:
-                if (v->size_bytes > WAL_MAX_PAYLOAD) return false;
+                if (total > WAL_MAX_PAYLOAD - 4u || v->size_bytes > WAL_MAX_PAYLOAD - total - 4u) return false;
                 total += 4 + v->size_bytes;
                 break;
             default: return false;
