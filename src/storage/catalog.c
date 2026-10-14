@@ -1,0 +1,601 @@
+#include <stdlib.h>
+#include <string.h>
+
+#include "storage/catalog.h"
+
+#define FORMAT_VERSION 1u
+#define HEADER_BYTES 28u
+#define CHECKSUM_BYTES 4u
+#define TABLE_FIXED_BYTES 35u
+#define COLUMN_FIXED_BYTES 4u
+#define MIN_TABLE_BYTES (TABLE_FIXED_BYTES + 1u + COLUMN_FIXED_BYTES + 1u)
+#define IDENTITY_END ((uint64_t)INT64_MAX + 1u)
+#define FLAG_IDENTITY 1u
+#define FLAG_NOT_NULL 1u
+
+typedef struct {
+    catalog_table_id_t id;
+    char *names;                 /* 소유: 테이블 이름 뒤에 컬럼 이름이 이어진다 */
+    catalog_column_t *columns;   /* 소유: 이름 포인터는 names 안을 가리킨다 */
+    size_t name_bytes;
+    size_t column_count;
+    uint16_t primary_key_column;
+    bool has_identity;
+    uint64_t row_count;
+    uint64_t next_identity;
+    uint32_t heap_root;
+    uint32_t primary_root;
+    size_t encoded_bytes;
+} table_t;
+
+struct catalog {
+    table_t *tables;
+    size_t count;
+    size_t capacity;
+    uint32_t next_table_id;
+    uint64_t generation;
+    size_t encoded_bytes;  /* 지금 encode하면 나올 바이트 수 */
+};
+
+typedef struct {
+    const char *name;
+    size_t size;
+} name_ref_t;
+
+static bool name_valid(const char *name, size_t size)
+{
+    return name != NULL && size >= 1 && size <= CATALOG_NAME_MAX_BYTES &&
+           memchr(name, 0, size) == NULL;
+}
+
+static int compare_names(const void *left, const void *right)
+{
+    const name_ref_t *a = left, *b = right;
+    size_t common = a->size < b->size ? a->size : b->size;
+    int result = memcmp(a->name, b->name, common);
+    if (result != 0) return result;
+    return (a->size > b->size) - (a->size < b->size);
+}
+
+/* 정렬해 이웃을 비교하므로 컬럼 수가 많아도 O(n log n)이다. */
+static catalog_status_t check_unique_names(const name_ref_t *refs, size_t count)
+{
+    name_ref_t *sorted = malloc(count * sizeof(*sorted));
+    if (sorted == NULL) return CATALOG_NOMEM;
+    memcpy(sorted, refs, count * sizeof(*sorted));
+    qsort(sorted, count, sizeof(*sorted), compare_names);
+    catalog_status_t status = CATALOG_OK;
+    for (size_t i = 1; i < count && status == CATALOG_OK; i++) {
+        if (compare_names(&sorted[i - 1], &sorted[i]) == 0) status = CATALOG_EXISTS;
+    }
+    free(sorted);
+    return status;
+}
+
+static bool column_type_valid(value_type_t type)
+{
+    return type >= VALUE_INTEGER && type <= VALUE_BLOB;
+}
+
+static size_t table_encoded_bytes(size_t name_bytes, const catalog_column_t *columns,
+                                  size_t column_count)
+{
+    size_t total = TABLE_FIXED_BYTES + name_bytes;
+    for (size_t i = 0; i < column_count; i++) total += COLUMN_FIXED_BYTES + columns[i].name_bytes;
+    return total;
+}
+
+/* spec 모양과 identity 규칙을 검사한다. 이름 중복 검사는 할당이 필요해 따로 한다. */
+static catalog_status_t check_spec(const catalog_table_spec_t *spec)
+{
+    if (spec == NULL || !name_valid(spec->name, spec->name_bytes)) return CATALOG_INVALID;
+    if (spec->column_count < 1 || spec->column_count > CATALOG_MAX_COLUMNS) return CATALOG_INVALID;
+    if (spec->columns == NULL) return CATALOG_INVALID;
+    for (size_t i = 0; i < spec->column_count; i++) {
+        const catalog_column_spec_t *column = &spec->columns[i];
+        if (!name_valid(column->name, column->name_bytes) || !column_type_valid(column->type)) {
+            return CATALOG_INVALID;
+        }
+    }
+    uint16_t key = spec->primary_key_column;
+    if (key != CATALOG_NO_COLUMN && key >= spec->column_count) return CATALOG_INVALID;
+    if (spec->has_identity &&
+        (key == CATALOG_NO_COLUMN || spec->columns[key].type != VALUE_INTEGER)) {
+        return CATALOG_INVALID;
+    }
+    return CATALOG_OK;
+}
+
+static catalog_status_t check_spec_names(const catalog_table_spec_t *spec)
+{
+    name_ref_t *refs = malloc(spec->column_count * sizeof(*refs));
+    if (refs == NULL) return CATALOG_NOMEM;
+    for (size_t i = 0; i < spec->column_count; i++) {
+        refs[i] = (name_ref_t){spec->columns[i].name, spec->columns[i].name_bytes};
+    }
+    catalog_status_t status = check_unique_names(refs, spec->column_count);
+    free(refs);
+    /* 컬럼 이름 중복은 카탈로그의 이름 충돌이 아니라 schema 오류다. */
+    return status == CATALOG_EXISTS ? CATALOG_INVALID : status;
+}
+
+static void release_table(table_t *table)
+{
+    free(table->names);
+    free(table->columns);
+    memset(table, 0, sizeof(*table));
+}
+
+static catalog_status_t build_table(table_t *out, catalog_table_id_t id,
+                                    const catalog_table_spec_t *spec)
+{
+    size_t names_bytes = spec->name_bytes;
+    for (size_t i = 0; i < spec->column_count; i++) names_bytes += spec->columns[i].name_bytes;
+    table_t table = {0};
+    table.names = malloc(names_bytes);
+    table.columns = malloc(spec->column_count * sizeof(*table.columns));
+    if (table.names == NULL || table.columns == NULL) {
+        release_table(&table);
+        return CATALOG_NOMEM;
+    }
+    memcpy(table.names, spec->name, spec->name_bytes);
+    size_t offset = spec->name_bytes;
+    for (size_t i = 0; i < spec->column_count; i++) {
+        const catalog_column_spec_t *column = &spec->columns[i];
+        memcpy(table.names + offset, column->name, column->name_bytes);
+        table.columns[i] = (catalog_column_t){table.names + offset, column->name_bytes,
+                                              column->type, column->not_null};
+        offset += column->name_bytes;
+    }
+    table.id = id;
+    table.name_bytes = spec->name_bytes;
+    table.column_count = spec->column_count;
+    table.primary_key_column = spec->primary_key_column;
+    table.has_identity = spec->has_identity;
+    table.next_identity = spec->has_identity ? 1 : 0;
+    table.encoded_bytes = table_encoded_bytes(spec->name_bytes, table.columns, spec->column_count);
+    *out = table;
+    return CATALOG_OK;
+}
+
+static void fill_view(const table_t *table, catalog_table_view_t *view)
+{
+    *view = (catalog_table_view_t){table->id, table->names, table->name_bytes, table->columns,
+                                   table->column_count, table->primary_key_column,
+                                   table->has_identity, table->row_count, table->next_identity,
+                                   table->heap_root, table->primary_root};
+}
+
+catalog_status_t catalog_open_empty(catalog_t **out)
+{
+    if (out == NULL) return CATALOG_INVALID;
+    catalog_t *catalog = malloc(sizeof(*catalog));
+    if (catalog == NULL) return CATALOG_NOMEM;
+    *catalog = (catalog_t){.next_table_id = 1, .encoded_bytes = HEADER_BYTES + CHECKSUM_BYTES};
+    *out = catalog;
+    return CATALOG_OK;
+}
+
+void catalog_close(catalog_t *catalog)
+{
+    if (catalog == NULL) return;
+    for (size_t i = 0; i < catalog->count; i++) release_table(&catalog->tables[i]);
+    free(catalog->tables);
+    free(catalog);
+}
+
+static const table_t *find_by_id(const catalog_t *catalog, catalog_table_id_t id)
+{
+    size_t low = 0, high = catalog->count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (catalog->tables[middle].id < id) low = middle + 1;
+        else high = middle;
+    }
+    if (low < catalog->count && catalog->tables[low].id == id) return &catalog->tables[low];
+    return NULL;
+}
+
+static table_t *find_mutable(catalog_t *catalog, catalog_table_id_t id)
+{
+    return (table_t *)find_by_id(catalog, id);
+}
+
+static const table_t *find_by_name(const catalog_t *catalog, const char *name, size_t size)
+{
+    for (size_t i = 0; i < catalog->count; i++) {
+        const table_t *table = &catalog->tables[i];
+        if (table->name_bytes == size && memcmp(table->names, name, size) == 0) return table;
+    }
+    return NULL;
+}
+
+static catalog_status_t reserve_slot(catalog_t *catalog)
+{
+    if (catalog->count < catalog->capacity) return CATALOG_OK;
+    size_t capacity = catalog->capacity == 0 ? 4 : catalog->capacity * 2;
+    if (capacity > SIZE_MAX / sizeof(table_t)) return CATALOG_LIMIT;
+    table_t *grown = realloc(catalog->tables, capacity * sizeof(*grown));
+    if (grown == NULL) return CATALOG_NOMEM;
+    catalog->tables = grown;
+    catalog->capacity = capacity;
+    return CATALOG_OK;
+}
+
+static catalog_status_t check_can_mutate(const catalog_t *catalog)
+{
+    return catalog->generation == UINT64_MAX ? CATALOG_LIMIT : CATALOG_OK;
+}
+
+/* 모든 검사와 할당을 끝낸 뒤에만 상태를 바꾼다. */
+static catalog_status_t add_table(catalog_t *catalog, const catalog_table_spec_t *spec,
+                                  const catalog_legacy_table_t *legacy, catalog_table_id_t *id)
+{
+    if (id == NULL) return CATALOG_INVALID;
+    catalog_status_t status = check_spec(spec);
+    if (status != CATALOG_OK) return status;
+    if (legacy != NULL && spec->has_identity &&
+        (legacy->next_identity < 1 || legacy->next_identity > IDENTITY_END)) {
+        return CATALOG_INVALID;
+    }
+    status = check_spec_names(spec);
+    if (status != CATALOG_OK) return status;
+    if (find_by_name(catalog, spec->name, spec->name_bytes) != NULL) return CATALOG_EXISTS;
+    if (catalog->next_table_id == UINT32_MAX) return CATALOG_LIMIT;
+    status = check_can_mutate(catalog);
+    if (status != CATALOG_OK) return status;
+
+    table_t table;
+    status = build_table(&table, catalog->next_table_id, spec);
+    if (status != CATALOG_OK) return status;
+    if (table.encoded_bytes > CATALOG_MAX_ENCODED_BYTES - catalog->encoded_bytes) {
+        release_table(&table);
+        return CATALOG_LIMIT;
+    }
+    status = reserve_slot(catalog);
+    if (status != CATALOG_OK) {
+        release_table(&table);
+        return status;
+    }
+    if (legacy != NULL) {
+        table.row_count = legacy->row_count;
+        if (spec->has_identity) table.next_identity = legacy->next_identity;
+        table.heap_root = legacy->heap_root;
+        table.primary_root = legacy->primary_root;
+    }
+    catalog->tables[catalog->count++] = table;
+    catalog->next_table_id++;
+    catalog->generation++;
+    catalog->encoded_bytes += table.encoded_bytes;
+    *id = table.id;
+    return CATALOG_OK;
+}
+
+catalog_status_t catalog_create_table(catalog_t *catalog, const catalog_table_spec_t *spec,
+                                      catalog_table_id_t *id)
+{
+    if (catalog == NULL) return CATALOG_INVALID;
+    return add_table(catalog, spec, NULL, id);
+}
+
+catalog_status_t catalog_import_legacy(catalog_t *catalog, const catalog_legacy_table_t *legacy,
+                                       catalog_table_id_t *id)
+{
+    if (catalog == NULL || legacy == NULL) return CATALOG_INVALID;
+    return add_table(catalog, &legacy->table, legacy, id);
+}
+
+catalog_status_t catalog_drop_table(catalog_t *catalog, catalog_table_id_t id)
+{
+    if (catalog == NULL) return CATALOG_INVALID;
+    table_t *table = find_mutable(catalog, id);
+    if (table == NULL) return CATALOG_NOT_FOUND;
+    catalog_status_t status = check_can_mutate(catalog);
+    if (status != CATALOG_OK) return status;
+    size_t index = (size_t)(table - catalog->tables);
+    catalog->encoded_bytes -= table->encoded_bytes;
+    release_table(table);
+    memmove(table, table + 1, (catalog->count - index - 1) * sizeof(*table));
+    catalog->count--;
+    catalog->generation++;
+    return CATALOG_OK;
+}
+
+catalog_status_t catalog_find(const catalog_t *catalog, const char *name, size_t name_bytes,
+                              catalog_table_id_t *id)
+{
+    if (catalog == NULL || id == NULL || name == NULL) return CATALOG_INVALID;
+    const table_t *table = find_by_name(catalog, name, name_bytes);
+    if (table == NULL) return CATALOG_NOT_FOUND;
+    *id = table->id;
+    return CATALOG_OK;
+}
+
+catalog_status_t catalog_describe(const catalog_t *catalog, catalog_table_id_t id,
+                                  catalog_table_view_t *view)
+{
+    if (catalog == NULL || view == NULL) return CATALOG_INVALID;
+    const table_t *table = find_by_id(catalog, id);
+    if (table == NULL) return CATALOG_NOT_FOUND;
+    fill_view(table, view);
+    return CATALOG_OK;
+}
+
+size_t catalog_table_count(const catalog_t *catalog)
+{
+    return catalog == NULL ? 0 : catalog->count;
+}
+
+catalog_status_t catalog_table_at(const catalog_t *catalog, size_t index,
+                                  catalog_table_view_t *view)
+{
+    if (catalog == NULL || view == NULL) return CATALOG_INVALID;
+    if (index >= catalog->count) return CATALOG_NOT_FOUND;
+    fill_view(&catalog->tables[index], view);
+    return CATALOG_OK;
+}
+
+catalog_status_t catalog_set_row_count(catalog_t *catalog, catalog_table_id_t id,
+                                       uint64_t row_count)
+{
+    if (catalog == NULL) return CATALOG_INVALID;
+    table_t *table = find_mutable(catalog, id);
+    if (table == NULL) return CATALOG_NOT_FOUND;
+    catalog_status_t status = check_can_mutate(catalog);
+    if (status != CATALOG_OK) return status;
+    table->row_count = row_count;
+    catalog->generation++;
+    return CATALOG_OK;
+}
+
+catalog_status_t catalog_set_locators(catalog_t *catalog, catalog_table_id_t id,
+                                      uint32_t heap_root, uint32_t primary_root)
+{
+    if (catalog == NULL) return CATALOG_INVALID;
+    table_t *table = find_mutable(catalog, id);
+    if (table == NULL) return CATALOG_NOT_FOUND;
+    catalog_status_t status = check_can_mutate(catalog);
+    if (status != CATALOG_OK) return status;
+    table->heap_root = heap_root;
+    table->primary_root = primary_root;
+    catalog->generation++;
+    return CATALOG_OK;
+}
+
+catalog_status_t catalog_reserve_identity(catalog_t *catalog, catalog_table_id_t id,
+                                          uint64_t *value)
+{
+    if (catalog == NULL || value == NULL) return CATALOG_INVALID;
+    table_t *table = find_mutable(catalog, id);
+    if (table == NULL) return CATALOG_NOT_FOUND;
+    if (!table->has_identity) return CATALOG_INVALID;
+    if (table->next_identity >= IDENTITY_END) return CATALOG_LIMIT;
+    catalog_status_t status = check_can_mutate(catalog);
+    if (status != CATALOG_OK) return status;
+    *value = table->next_identity++;
+    catalog->generation++;
+    return CATALOG_OK;
+}
+
+uint64_t catalog_generation(const catalog_t *catalog)
+{
+    return catalog == NULL ? 0 : catalog->generation;
+}
+
+static void put_u16(uint8_t *bytes, uint16_t value)
+{
+    for (unsigned i = 0; i < 2; i++) bytes[i] = (uint8_t)(value >> (i * 8));
+}
+
+static void put_u32(uint8_t *bytes, uint32_t value)
+{
+    for (unsigned i = 0; i < 4; i++) bytes[i] = (uint8_t)(value >> (i * 8));
+}
+
+static void put_u64(uint8_t *bytes, uint64_t value)
+{
+    for (unsigned i = 0; i < 8; i++) bytes[i] = (uint8_t)(value >> (i * 8));
+}
+
+static uint32_t checksum(const uint8_t *bytes, size_t size)
+{
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < size; i++) hash = (hash ^ bytes[i]) * 16777619u;
+    return hash;
+}
+
+static uint8_t *encode_table(uint8_t *at, const table_t *table)
+{
+    put_u32(at, table->id);
+    put_u16(at + 4, (uint16_t)table->name_bytes);
+    put_u16(at + 6, table->primary_key_column);
+    put_u16(at + 8, (uint16_t)table->column_count);
+    at[10] = table->has_identity ? FLAG_IDENTITY : 0;
+    put_u64(at + 11, table->row_count);
+    put_u64(at + 19, table->next_identity);
+    put_u32(at + 27, table->heap_root);
+    put_u32(at + 31, table->primary_root);
+    at += TABLE_FIXED_BYTES;
+    memcpy(at, table->names, table->name_bytes);
+    at += table->name_bytes;
+    for (size_t i = 0; i < table->column_count; i++) {
+        const catalog_column_t *column = &table->columns[i];
+        at[0] = (uint8_t)column->type;
+        at[1] = column->not_null ? FLAG_NOT_NULL : 0;
+        put_u16(at + 2, (uint16_t)column->name_bytes);
+        memcpy(at + COLUMN_FIXED_BYTES, column->name, column->name_bytes);
+        at += COLUMN_FIXED_BYTES + column->name_bytes;
+    }
+    return at;
+}
+
+catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_t *size)
+{
+    if (catalog == NULL || bytes == NULL || size == NULL) return CATALOG_INVALID;
+    size_t total = catalog->encoded_bytes;
+    uint8_t *buffer = malloc(total);
+    if (buffer == NULL) return CATALOG_NOMEM;
+    memcpy(buffer, "LRCT", 4);
+    put_u16(buffer + 4, FORMAT_VERSION);
+    put_u16(buffer + 6, 0);
+    put_u32(buffer + 8, (uint32_t)total);
+    put_u64(buffer + 12, catalog->generation);
+    put_u32(buffer + 20, catalog->next_table_id);
+    put_u32(buffer + 24, (uint32_t)catalog->count);
+    uint8_t *at = buffer + HEADER_BYTES;
+    for (size_t i = 0; i < catalog->count; i++) at = encode_table(at, &catalog->tables[i]);
+    put_u32(at, checksum(buffer, (size_t)(at - buffer)));
+    *bytes = buffer;
+    *size = total;
+    return CATALOG_OK;
+}
+
+typedef struct {
+    const uint8_t *at;
+    size_t left;
+} reader_t;
+
+static bool take(reader_t *reader, size_t count, const uint8_t **out)
+{
+    if (reader->left < count) return false;
+    *out = reader->at;
+    reader->at += count;
+    reader->left -= count;
+    return true;
+}
+
+static uint64_t get_le(const uint8_t *bytes, unsigned width)
+{
+    uint64_t value = 0;
+    for (unsigned i = 0; i < width; i++) value |= (uint64_t)bytes[i] << (i * 8);
+    return value;
+}
+
+/* 컬럼 하나를 읽어 spec에 옮긴다. 이름 포인터는 입력 buffer를 빌린다. */
+static catalog_status_t read_column(reader_t *reader, catalog_column_spec_t *column)
+{
+    const uint8_t *fixed, *name;
+    if (!take(reader, COLUMN_FIXED_BYTES, &fixed)) return CATALOG_CORRUPT;
+    size_t name_bytes = (size_t)get_le(fixed + 2, 2);
+    if (fixed[1] > FLAG_NOT_NULL || !column_type_valid((value_type_t)fixed[0])) {
+        return CATALOG_CORRUPT;
+    }
+    if (!take(reader, name_bytes, &name) || !name_valid((const char *)name, name_bytes)) {
+        return CATALOG_CORRUPT;
+    }
+    *column = (catalog_column_spec_t){(const char *)name, name_bytes, (value_type_t)fixed[0],
+                                      fixed[1] == FLAG_NOT_NULL};
+    return CATALOG_OK;
+}
+
+/* 한 테이블을 검증하며 catalog에 붙인다. 길이는 남은 바이트와 대조한 뒤에만 할당에 쓴다. */
+static catalog_status_t read_table(reader_t *reader, catalog_t *catalog)
+{
+    const uint8_t *fixed, *name;
+    if (!take(reader, TABLE_FIXED_BYTES, &fixed)) return CATALOG_CORRUPT;
+    catalog_table_id_t id = (catalog_table_id_t)get_le(fixed, 4);
+    size_t name_bytes = (size_t)get_le(fixed + 4, 2);
+    size_t column_count = (size_t)get_le(fixed + 8, 2);
+    if (fixed[10] > FLAG_IDENTITY) return CATALOG_CORRUPT;
+    bool has_identity = fixed[10] == FLAG_IDENTITY;
+    uint64_t next_identity = get_le(fixed + 19, 8);
+    if (id == CATALOG_NO_TABLE || id >= catalog->next_table_id) return CATALOG_CORRUPT;
+    if (catalog->count > 0 && catalog->tables[catalog->count - 1].id >= id) return CATALOG_CORRUPT;
+    if (column_count < 1 || column_count > CATALOG_MAX_COLUMNS) return CATALOG_CORRUPT;
+    if (reader->left / COLUMN_FIXED_BYTES < column_count) return CATALOG_CORRUPT;
+    if (!take(reader, name_bytes, &name) || !name_valid((const char *)name, name_bytes)) {
+        return CATALOG_CORRUPT;
+    }
+    catalog_column_spec_t *columns = malloc(column_count * sizeof(*columns));
+    if (columns == NULL) return CATALOG_NOMEM;
+    catalog_status_t status = CATALOG_OK;
+    for (size_t i = 0; i < column_count && status == CATALOG_OK; i++) {
+        status = read_column(reader, &columns[i]);
+    }
+    catalog_table_spec_t spec = {(const char *)name, name_bytes, columns, column_count,
+                                 (uint16_t)get_le(fixed + 6, 2), has_identity};
+    if (status == CATALOG_OK) status = check_spec(&spec) == CATALOG_OK ? CATALOG_OK : CATALOG_CORRUPT;
+    if (status == CATALOG_OK) {
+        bool identity_ok = has_identity ? next_identity >= 1 && next_identity <= IDENTITY_END
+                                        : next_identity == 0;
+        if (!identity_ok) status = CATALOG_CORRUPT;
+    }
+    if (status == CATALOG_OK) {
+        status = check_spec_names(&spec);
+        if (status == CATALOG_INVALID) status = CATALOG_CORRUPT;
+    }
+    if (status == CATALOG_OK) status = reserve_slot(catalog);
+    table_t table = {0};
+    if (status == CATALOG_OK) status = build_table(&table, id, &spec);
+    free(columns);
+    if (status != CATALOG_OK) return status;
+    table.row_count = get_le(fixed + 11, 8);
+    table.next_identity = next_identity;
+    table.heap_root = (uint32_t)get_le(fixed + 27, 4);
+    table.primary_root = (uint32_t)get_le(fixed + 31, 4);
+    catalog->tables[catalog->count++] = table;
+    catalog->encoded_bytes += table.encoded_bytes;
+    return CATALOG_OK;
+}
+
+static catalog_status_t check_table_names_unique(const catalog_t *catalog)
+{
+    if (catalog->count < 2) return CATALOG_OK;
+    name_ref_t *refs = malloc(catalog->count * sizeof(*refs));
+    if (refs == NULL) return CATALOG_NOMEM;
+    for (size_t i = 0; i < catalog->count; i++) {
+        refs[i] = (name_ref_t){catalog->tables[i].names, catalog->tables[i].name_bytes};
+    }
+    catalog_status_t status = check_unique_names(refs, catalog->count);
+    free(refs);
+    return status == CATALOG_EXISTS ? CATALOG_CORRUPT : status;
+}
+
+static catalog_status_t check_envelope(const uint8_t *bytes, size_t size)
+{
+    if (size < HEADER_BYTES + CHECKSUM_BYTES) return CATALOG_CORRUPT;
+    if (size > CATALOG_MAX_ENCODED_BYTES) return CATALOG_LIMIT;
+    if (memcmp(bytes, "LRCT", 4) != 0) return CATALOG_CORRUPT;
+    if (get_le(bytes + 4, 2) != FORMAT_VERSION) return CATALOG_UNSUPPORTED;
+    if (get_le(bytes + 6, 2) != 0) return CATALOG_CORRUPT;
+    if (get_le(bytes + 8, 4) != size) return CATALOG_CORRUPT;
+    if (get_le(bytes + size - CHECKSUM_BYTES, 4) != checksum(bytes, size - CHECKSUM_BYTES)) {
+        return CATALOG_CORRUPT;
+    }
+    return CATALOG_OK;
+}
+
+catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **out)
+{
+    if (out == NULL || (bytes == NULL && size > 0)) return CATALOG_INVALID;
+    catalog_status_t status = check_envelope(bytes, size);
+    if (status != CATALOG_OK) return status;
+    size_t table_count = (size_t)get_le(bytes + 24, 4);
+    size_t payload = size - HEADER_BYTES - CHECKSUM_BYTES;
+    if (table_count > payload / MIN_TABLE_BYTES) return CATALOG_CORRUPT;
+    catalog_t *catalog;
+    status = catalog_open_empty(&catalog);
+    if (status != CATALOG_OK) return status;
+    catalog->generation = get_le(bytes + 12, 8);
+    catalog->next_table_id = (uint32_t)get_le(bytes + 20, 4);
+    if (catalog->next_table_id == CATALOG_NO_TABLE) status = CATALOG_CORRUPT;
+    if (status == CATALOG_OK && table_count > 0) {
+        catalog->tables = malloc(table_count * sizeof(*catalog->tables));
+        if (catalog->tables == NULL) status = CATALOG_NOMEM;
+        else catalog->capacity = table_count;
+    }
+    reader_t reader = {bytes + HEADER_BYTES, payload};
+    for (size_t i = 0; i < table_count && status == CATALOG_OK; i++) {
+        status = read_table(&reader, catalog);
+    }
+    if (status == CATALOG_OK && (reader.left != 0 || catalog->encoded_bytes != size)) {
+        status = CATALOG_CORRUPT;
+    }
+    if (status == CATALOG_OK) status = check_table_names_unique(catalog);
+    if (status != CATALOG_OK) {
+        catalog_close(catalog);
+        return status;
+    }
+    *out = catalog;
+    return CATALOG_OK;
+}
