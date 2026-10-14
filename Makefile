@@ -74,7 +74,7 @@ STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o 
                $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o \
                $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/catalog_store.o $(BUILD_DIR)/storage/legacy_migrate.o
 BASIC_TESTS = test_all test_record test_record_fault test_overflow \
-              test_overflow_fault test_value test_value_fault test_parser_boundary \
+              test_overflow_fault test_value test_value_fault test_value_legacy_varchar test_parser_boundary \
               test_http_input test_io test_io_lock test_catalog test_catalog_fault \
               test_lexer test_lexer_fault test_page_file test_catalog_store test_legacy_migrate
 TEST_BINS = $(addprefix $(BUILD_DIR)/,$(BASIC_TESTS))
@@ -88,6 +88,14 @@ $(BUILD_DIR)/test_record: $(BUILD_DIR)/tests/test_record.o $(BUILD_DIR)/storage/
 $(BUILD_DIR)/test_overflow: $(BUILD_DIR)/tests/test_overflow.o $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/record_page.o
 $(BUILD_DIR)/test_overflow_file: $(BUILD_DIR)/tests/test_overflow_file.o $(BUILD_DIR)/storage/overflow.o
 $(BUILD_DIR)/test_value: $(BUILD_DIR)/tests/test_value.o $(BUILD_DIR)/storage/value.o
+$(BUILD_DIR)/test_value_legacy_varchar: $(BUILD_DIR)/tests/test_value_legacy_varchar.o $(OBJS)
+$(BUILD_DIR)/storage/value_varchar_hook.o: src/storage/value.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=value_test_malloc -c -o $@ $<
+
+$(BUILD_DIR)/test_value_varchar: $(BUILD_DIR)/tests/test_value_varchar.o $(BUILD_DIR)/storage/value_varchar_hook.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 $(BUILD_DIR)/test_value_sqlite: $(BUILD_DIR)/tests/test_value_sqlite.o $(BUILD_DIR)/storage/value.o
 $(BUILD_DIR)/test_value_sqlite: LDLIBS += -lsqlite3
 $(BUILD_DIR)/test_record_fault: $(BUILD_DIR)/tests/test_record_fault.o $(BUILD_DIR)/storage/record_fault.o $(BUILD_DIR)/storage/record_page_fault.o
@@ -154,6 +162,9 @@ test-overflow-file: $(BUILD_DIR)/test_overflow_file
 
 test-value-sqlite: $(BUILD_DIR)/test_value_sqlite
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_value_sqlite.json -- ./$(BUILD_DIR)/test_value_sqlite
+
+test-value-varchar: $(BUILD_DIR)/test_value_varchar
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_value_varchar.json -- ./$(BUILD_DIR)/test_value_varchar
 
 # ── data generator ──
 $(BUILD_DIR)/gen_data: tools/gen_data.c $(OBJS)
@@ -265,6 +276,9 @@ test-repl-boundary: $(BUILD_DIR)/minidb
 
 test-io-cli: $(BUILD_DIR)/minidb
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_io_cli.json -- $(PYTHON) tests/test_io_cli.py --minidb ./$(BUILD_DIR)/minidb
+
+test-http-boundary-cli: $(BUILD_DIR)/minidb
+	$(TEST_RUNNER) --timeout 240 --report $(BUILD_DIR)/fault/test_http_boundary_cli.json -- $(PYTHON) tests/test_http_boundary_cli.py --minidb ./$(BUILD_DIR)/minidb --workdir $(BUILD_DIR)/http-boundary-cli
 
 test-runner:
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_runner.json -- $(PYTEST) -q tests/test_fault_runner.py tests/test_fault_oracle.py --basetemp=$(BUILD_DIR)/runner-tests -p no:cacheprovider
@@ -439,12 +453,12 @@ test-wal: $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_wal_crash $(BUILD_DIR)/test_wa
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED) --report fault/test_wal_alloc.json -- ./test_wal_alloc
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout 180 --seed $(FAULT_SEED) --report fault/test_wal_crash.json -- ./test_wal_crash
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
 
-.PHONY: test-runner test-fault test-concurrency test-result test-result-allocation test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
+.PHONY: test-runner test-fault test-concurrency test-result test-result-allocation test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli
 
 -include $(OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BUILD_DIR)/main.d
 -include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d $(BUILD_DIR)/sql/lexer*.d)
