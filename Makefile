@@ -373,10 +373,14 @@ $(BUILD_DIR)/test_session_audit: $(BUILD_DIR)/tests/test_session_audit.o $(BUILD
 $(BUILD_DIR)/test_result_ledger: $(BUILD_DIR)/tests/test_result_ledger.o $(BUILD_DIR)/tests/alloc_audit.o $(BUILD_DIR)/audit/sql/result.o $(BUILD_DIR)/storage/value.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-test-session: $(BUILD_DIR)/test_session $(BUILD_DIR)/test_session_audit $(BUILD_DIR)/test_result_ledger
+$(BUILD_DIR)/test_heap_ledger: $(BUILD_DIR)/tests/test_heap_ledger.o $(BUILD_DIR)/tests/alloc_audit.o $(BUILD_DIR)/audit/storage/heap_store.o $(BUILD_DIR)/audit/storage/record.o $(filter-out $(BUILD_DIR)/storage/record.o,$(STORAGE_OBJS))
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-session: $(BUILD_DIR)/test_session $(BUILD_DIR)/test_session_audit $(BUILD_DIR)/test_result_ledger $(BUILD_DIR)/test_heap_ledger
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_session.json -- ./$(BUILD_DIR)/test_session
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_session_audit.json -- ./$(BUILD_DIR)/test_session_audit
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_result_ledger.json -- ./$(BUILD_DIR)/test_result_ledger
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_heap_ledger.json -- ./$(BUILD_DIR)/test_heap_ledger
 
 $(BUILD_DIR)/test_corrupt_open: $(BUILD_DIR)/tests/test_corrupt_open.o $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
