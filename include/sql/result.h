@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sql/mem_ledger.h"
 #include "storage/value.h"
 
 /* 고정 한도. 넘으면 RESULT_LIMIT(생성·builder) 또는 RESULT_E_LIMIT(source 행)다. */
@@ -133,6 +134,13 @@ typedef struct {
     const result_limits_t *limits;
 } result_rows_spec_t;
 
+/*
+ * result_builder_create_ex의 ledger는 선택이다. NULL이거나 ops가 NULL이면 계상하지 않는다. 있으면 builder와 그 결과의 모든
+ * 할당(결과 구조체·컬럼·행·행 슬롯 배열)을 MEM_SCOPE_QUERY로 reserve한 뒤 할당한다. create·add_row가
+ * reserve에 실패하면 RESULT_NOMEM이고 builder는 이전 상태 그대로다. 행 슬롯 배열을 늘릴 때는 새 크기를
+ * 먼저 reserve하고 복사한 뒤 옛 크기를 release하므로 순간 최대치는 old+new다. 결과가 ledger를 쥘 때
+ * retain하고 놓을 때 drop한다. 구조체는 복사하므로 spec이 반환 뒤 사라져도 된다.
+ */
 typedef struct {
     const result_column_t *columns;
     size_t column_count;
@@ -168,6 +176,11 @@ typedef struct result_builder result_builder_t;
 result_status_t result_open_rows(const result_rows_spec_t *spec, result_t **out);
 result_status_t result_open_command(const result_command_t *command, result_t **out);
 result_status_t result_open_error(const result_error_t *error, result_t **out);
+/* 위 둘과 같고 결과 구조체를 ledger(MEM_SCOPE_QUERY)에 계상한다. reserve가 거절하면 RESULT_NOMEM이다. */
+result_status_t result_open_command_ex(const result_command_t *command, const mem_ledger_t *ledger,
+                                       result_t **out);
+result_status_t result_open_error_ex(const result_error_t *error, const mem_ledger_t *ledger,
+                                     result_t **out);
 
 /*
  * 메모리 결과 builder. max_total_bytes는 결과·builder 구조체와 컬럼 metadata 같은 고정 할당, 셀 배열,
@@ -179,6 +192,8 @@ result_status_t result_open_error(const result_error_t *error, result_t **out);
  * destroy는 *builder가 NULL이면 아무것도 하지 않고, 아니면 정확히 한 번 해제한 뒤 NULL로 만든다.
  */
 result_status_t result_builder_create(const result_builder_spec_t *spec, result_builder_t **out);
+result_status_t result_builder_create_ex(const result_builder_spec_t *spec, const mem_ledger_t *ledger,
+                                         result_builder_t **out);
 result_status_t result_builder_add_row(result_builder_t *builder, const value_view_t *cells,
                                        size_t cell_count);
 result_status_t result_builder_finish(result_builder_t **builder, result_t **out);
@@ -205,6 +220,18 @@ result_outcome_t result_outcome(const result_t *result);
  */
 void result_cancel(result_t *result);
 bool result_cancel_requested(const result_cancel_t *cancel);
+
+/*
+ * 이 결과가 쥔 계상 바이트(builder·command·error 결과의 구조체와 행 전부). ledger 없이 만들었거나
+ * source 기반 결과면 0이다. builder의 add_row가 늘리며 result_release가 이만큼을 ledger에 돌려준다.
+ */
+size_t result_accounted_bytes(const result_t *result);
+/*
+ * 결과가 바이트를 돌려줄 ledger와 scope를 바꾼다(문장이 끝나 query 몫이 호출자에게 이전될 때).
+ * 새 ledger를 retain하고 옛 ledger를 drop한다. 계상 바이트는 그대로이며 옮긴 카운터를 맞추는 일은
+ * 호출한 쪽 책임이다(reserve는 부르지 않는다). 계상하지 않는 결과에는 아무 일도 하지 않는다.
+ */
+void result_rebind_ledger(result_t *result, const mem_ledger_t *ledger, mem_scope_t scope);
 
 /* 단일 소비 스레드 전용. *result가 NULL이면 무동작이고 아니면 한 번 해제하고 NULL로 만든다. */
 void result_release(result_t **result);
