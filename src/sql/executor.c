@@ -193,6 +193,16 @@ static int parse_integer_value(const char *input, int64_t min, int64_t max,
  *  id는 시스템 컬럼으로 자동 추가된다 (사용자가 명시해도 건너뜀).
  *  현재 단일 테이블만 지원하며, 이미 테이블이 있으면 오류를 반환한다.
  * ══════════════════════════════════════════════════════════════════════ */
+/* 디스크 입출력 실패를 사용자에게 돌려줄 결과로 만든다 */
+static exec_result_t io_failure(pager_t *pager, const char *what)
+{
+    exec_result_t res = {-1, "", NULL, 0};
+    snprintf(res.message, sizeof(res.message),
+             "오류: %s 중 디스크 입출력에 실패했습니다 (%s)",
+             what, strerror(pager_last_io_errno(pager)));
+    return res;
+}
+
 static exec_result_t exec_create_table(pager_t *pager, statement_t *stmt)
 {
     exec_result_t res = {0, "", NULL, 0};
@@ -360,9 +370,16 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
     row_serialize(hdr, values, row_buf);
 
     row_ref_t ref = heap_insert(pager, row_buf, hdr->row_size);
-    int rc = bptree_insert(pager, my_id, ref);
     free(row_buf);
+    if (ref.page_id == 0) {
+        return io_failure(pager, "INSERT");
+    }
+    int rc = bptree_insert(pager, my_id, ref);
 
+    if (rc == BPTREE_ERR_IO) {
+        heap_delete(pager, ref); /* 인덱스에 없는 행이 남지 않게 되돌린다 */
+        return io_failure(pager, "INSERT");
+    }
     if (rc != 0) {
         res.status = -1;
         snprintf(res.message, sizeof(res.message), "오류: 중복된 키입니다");
@@ -556,6 +573,7 @@ static exec_result_t exec_index_lookup(pager_t *pager, statement_t *stmt)
     db_header_t *hdr = &pager->header;
 
     /* B+ tree에서 id로 검색 → 힙 위치(row_ref_t) 획득 */
+    uint64_t io_errors_before = pager_io_error_seq(pager);
     row_ref_t ref;
     if (bptree_search(pager, stmt->pred_id, &ref) == false) {
         snprintf(res.message, sizeof(res.message),
@@ -567,6 +585,9 @@ static exec_result_t exec_index_lookup(pager_t *pager, statement_t *stmt)
     /* 힙에서 행 데이터 읽기 */
     const uint8_t *row_data = heap_fetch(pager, ref, hdr->row_size);
     if (row_data == NULL) {
+        if (pager_io_error_seq(pager) != io_errors_before) {
+            return io_failure(pager, "SELECT");
+        }
         res.status = -1;
         snprintf(res.message, sizeof(res.message), "오류: 행 데이터를 읽지 못했습니다");
         return res;
@@ -651,10 +672,14 @@ static exec_result_t exec_index_range_scan(pager_t *pager, statement_t *stmt)
         .limit = stmt->has_limit ? stmt->limit_count : 0,
         .alloc_failed = false
     };
-    bptree_range_scan(pager,
+    int scan_rc = bptree_range_scan(pager,
                       stmt->has_lo, stmt->range_lo, stmt->lo_inclusive,
                       stmt->has_hi, stmt->range_hi, stmt->hi_inclusive,
                       range_collect_cb, &rc);
+    if (scan_rc != 0) {
+        free(rc.refs);
+        return io_failure(pager, "INDEX_RANGE");
+    }
     if (rc.alloc_failed) {
         free(rc.refs);
         res.status = -1;
@@ -684,7 +709,9 @@ static exec_result_t exec_index_range_scan(pager_t *pager, statement_t *stmt)
             cur_page = pager_get_page_rlatch(pager, ref.page_id);
             cur_pid = ref.page_id;
             if (cur_page == NULL) {
-                continue;
+                free(rc.refs);
+                buf_free(&buf);
+                return io_failure(pager, "INDEX_RANGE");
             }
         }
 
@@ -1270,8 +1297,12 @@ static exec_result_t exec_index_delete(pager_t *pager, statement_t *stmt)
     }
 
     /* 힙 삭제 (톰스톤) + B+ tree 삭제 */
-    heap_delete(pager, ref);
-    bptree_delete(pager, stmt->pred_id);
+    if (heap_delete(pager, ref) != 0) {
+        return io_failure(pager, "DELETE");
+    }
+    if (bptree_delete(pager, stmt->pred_id) != 0) {
+        return io_failure(pager, "DELETE");
+    }
 
     pthread_mutex_lock(&pager->header_lock);
     pager->header.row_count--;
@@ -1308,7 +1339,10 @@ static exec_result_t exec_delete_scan(pager_t *pager, statement_t *stmt)
     };
 
     /* 1차: 조건에 맞는 id 수집 */
-    heap_scan(pager, pager->header.row_size, delete_scan_cb, &dc);
+    if (heap_scan(pager, pager->header.row_size, delete_scan_cb, &dc) != 0) {
+        free(dc.ids_to_delete);
+        return io_failure(pager, "DELETE");
+    }
     if (dc.alloc_failed) {
         free(dc.ids_to_delete);
         res.status = -1;
@@ -1391,6 +1425,7 @@ static exec_result_t exec_index_update(pager_t *pager, statement_t *stmt)
         return res;
     }
 
+    uint64_t io_errors_before = pager_io_error_seq(pager);
     row_ref_t ref;
     if (!bptree_search(pager, stmt->pred_id, &ref)) {
         snprintf(res.message, sizeof(res.message),
@@ -1400,6 +1435,9 @@ static exec_result_t exec_index_update(pager_t *pager, statement_t *stmt)
 
     const uint8_t *row_data = heap_fetch(pager, ref, hdr->row_size);
     if (!row_data) {
+        if (pager_io_error_seq(pager) != io_errors_before) {
+            return io_failure(pager, "UPDATE");
+        }
         res.status = -1;
         snprintf(res.message, sizeof(res.message), "오류: 행 데이터를 읽지 못했습니다");
         return res;
@@ -1416,6 +1454,10 @@ static exec_result_t exec_index_update(pager_t *pager, statement_t *stmt)
     row_serialize(hdr, values, new_buf);
 
     uint8_t *page = pager_get_page_wlatch(pager, ref.page_id);
+    if (page == NULL) {
+        free(new_buf);
+        return io_failure(pager, "UPDATE");
+    }
     slot_t slot;
     size_t slot_off = sizeof(heap_page_header_t) + ref.slot_id * sizeof(slot_t);
     memcpy(&slot, page + slot_off, sizeof(slot));
@@ -1477,7 +1519,10 @@ static exec_result_t exec_update_scan(pager_t *pager, statement_t *stmt)
         .ids = NULL, .ids_cap = 0, .ids_len = 0,
         .alloc_failed = false
     };
-    heap_scan(pager, hdr->row_size, update_scan_cb, &uc);
+    if (heap_scan(pager, hdr->row_size, update_scan_cb, &uc) != 0) {
+        free(uc.ids);
+        return io_failure(pager, "UPDATE");
+    }
     if (uc.alloc_failed) {
         free(uc.ids);
         res.status = -1;
@@ -1511,6 +1556,11 @@ static exec_result_t exec_update_scan(pager_t *pager, statement_t *stmt)
         row_serialize(hdr, values, new_buf);
 
         uint8_t *page = pager_get_page_wlatch(pager, ref.page_id);
+        if (page == NULL) {
+            free(new_buf);
+            free(uc.ids);
+            return io_failure(pager, "UPDATE");
+        }
         size_t slot_off = sizeof(heap_page_header_t) + ref.slot_id * sizeof(slot_t);
         slot_t slot;
         memcpy(&slot, page + slot_off, sizeof(slot));
@@ -1546,6 +1596,11 @@ static exec_result_t exec_drop_table(pager_t *pager, statement_t *stmt)
      * DDL(wrlock)이므로 다른 DML이 없어 래치 불필요 */
     for (uint32_t i = 1; i < hdr->next_page_id; i++) {
         uint8_t *page = pager_get_page(pager, i);
+        if (page == NULL) {
+            /* 일부만 해제된 상태를 되돌릴 수 없어 이후 접근과 flush를 막는다 */
+            pager_poison(pager, pager_last_io_errno(pager));
+            return io_failure(pager, "DROP TABLE");
+        }
         uint32_t ptype;
         memcpy(&ptype, page, sizeof(uint32_t));
         pager_unpin(pager, i);
@@ -1557,8 +1612,13 @@ static exec_result_t exec_drop_table(pager_t *pager, statement_t *stmt)
     /* 새 빈 힙 페이지 + B+ tree 루트 리프 할당 (free list에서 재활용)
      * DDL wrlock 아래이므로 래치 불필요 */
     uint32_t new_heap = pager_alloc_page(pager);
+    uint8_t *heap_page = new_heap ? pager_get_page(pager, new_heap) : NULL;
+    if (heap_page == NULL) {
+        pager_poison(pager, pager_last_io_errno(pager));
+        return io_failure(pager, "DROP TABLE");
+    }
     {
-        uint8_t *page = pager_get_page(pager, new_heap);
+        uint8_t *page = heap_page;
         heap_page_header_t hph = {
             .page_type = PAGE_TYPE_HEAP, .next_heap_page_id = 0,
             .slot_count = 0, .free_slot_head = SLOT_NONE,
@@ -1569,8 +1629,13 @@ static exec_result_t exec_drop_table(pager_t *pager, statement_t *stmt)
         pager_unpin(pager, new_heap);
     }
     uint32_t new_root = pager_alloc_page(pager);
+    uint8_t *root_page = new_root ? pager_get_page(pager, new_root) : NULL;
+    if (root_page == NULL) {
+        pager_poison(pager, pager_last_io_errno(pager));
+        return io_failure(pager, "DROP TABLE");
+    }
     {
-        uint8_t *page = pager_get_page(pager, new_root);
+        uint8_t *page = root_page;
         leaf_page_header_t lph = {
             .page_type = PAGE_TYPE_LEAF, .parent_page_id = 0,
             .key_count = 0, .next_leaf_page_id = 0,
@@ -1713,7 +1778,7 @@ static int validate_numeric_inputs(const db_header_t *hdr, const statement_t *st
     return 0;
 }
 
-exec_result_t execute(pager_t *pager, statement_t *stmt)
+static exec_result_t execute_statement(pager_t *pager, statement_t *stmt)
 {
     exec_result_t invalid = {0, "", NULL, 0};
     if (stmt->type != STMT_CREATE_TABLE) {
@@ -1765,5 +1830,23 @@ exec_result_t execute(pager_t *pager, statement_t *stmt)
     }
 
     exec_result_t res = { -1, "오류: 알 수 없는 접근 경로입니다", NULL, 0 };
+    return res;
+}
+
+/*
+ * 문장을 실행한다. 실행 중 pager에 I/O 실패가 기록됐다면 성공으로 끝난 문장도
+ * 오류로 바꾼다. "행 없음"이나 일부만 훑은 SELECT처럼 실패가 정상 결과로 보이는
+ * 경로를 막기 위해서다. 동시에 실행되는 다른 문장의 실패도 함께 잡을 수 있는데,
+ * 성공을 잘못 알리는 것보다 안전하다고 보고 그대로 둔다.
+ * WAL이 없어 실패한 문장이 이미 바꾼 페이지는 되돌리지 않는다.
+ */
+exec_result_t execute(pager_t *pager, statement_t *stmt)
+{
+    uint64_t io_errors_before = pager_io_error_seq(pager);
+    exec_result_t res = execute_statement(pager, stmt);
+    if (res.status == 0 && pager_io_error_seq(pager) != io_errors_before) {
+        free(res.out_buf);
+        return io_failure(pager, "문장 실행");
+    }
     return res;
 }
