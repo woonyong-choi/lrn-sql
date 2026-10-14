@@ -31,6 +31,6 @@ $(QUEUE_SHARED_LIB): $(QUEUE_SHARED_SRCS) $(wildcard include/*/*.h) $(wildcard s
 ACKQ_PYTHON ?= $(PYTHON)
 
 test-ack-queue-python: $(QUEUE_SHARED_LIB)
-	LRN_ACKQ_LIB=$(abspath $(QUEUE_SHARED_LIB)) PYTHONPATH=python $(ACKQ_PYTHON) -m pytest -q tests/test_ack_queue_python.py
+	LRN_ACKQ_LIB=$(abspath $(QUEUE_SHARED_LIB)) PYTHONPATH=python $(ACKQ_PYTHON) -m pytest -q tests/test_ack_queue_python.py tests/test_ack_queue_markchain_contract.py
 
 .PHONY: test-ack-queue-python
