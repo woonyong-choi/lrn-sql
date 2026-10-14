@@ -40,6 +40,7 @@
  */
 
 #include "storage/pager.h"
+#include "storage/schema.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -47,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /*
@@ -401,6 +403,176 @@ static int open_fail(pager_t* pager, int fd) {
   return -1;
 }
 
+/* 손상된 파일은 EINVAL, 읽기 자체의 실패(EIO 등)는 원래 errno를 유지해 구분한다 */
+static int open_corrupt(pager_t* pager, int fd, const char* why) {
+  fprintf(stderr, "pager: 손상된 데이터베이스 파일입니다: %s\n", why);
+  errno = EINVAL;
+  return open_fail(pager, fd);
+}
+
+/*
+ * 헤더 필드가 사용해도 안전한지 검사한다 (값을 고치지 않는다).
+ * pages_in_file은 파일 크기 / page_size다. 링크 후보는 이 범위 안에 있어야 읽기 전에 거절된다.
+ */
+static const char* check_header_fields(const db_header_t* h, uint32_t ps,
+                                       uint64_t pages_in_file) {
+  const char* why = NULL;
+  if (h->page_size != ps) return "헤더 page_size가 처음 읽은 값과 다릅니다";
+  if (pages_in_file < 3) return "파일이 헤더·힙·루트 페이지보다 짧습니다";
+  if (!schema_validate_header(h, ps, &why)) return why;
+  if (h->first_heap_page_id == 0 || h->first_heap_page_id >= h->next_page_id
+      || h->first_heap_page_id >= pages_in_file)
+    return "첫 힙 페이지 번호가 범위 밖입니다";
+  if (h->root_index_page_id == 0 || h->root_index_page_id >= h->next_page_id
+      || h->root_index_page_id >= pages_in_file)
+    return "B+ tree 루트 페이지 번호가 범위 밖입니다";
+  if (h->first_heap_page_id == h->root_index_page_id)
+    return "첫 힙 페이지와 B+ tree 루트가 같은 페이지입니다";
+  if (h->free_page_head != 0
+      && (h->free_page_head >= h->next_page_id || h->free_page_head >= pages_in_file))
+    return "빈 페이지 목록의 시작이 범위 밖입니다";
+  return NULL;
+}
+
+/* 힙 페이지 하나의 헤더·슬롯 디렉터리·슬롯 offset·빈 슬롯 체인을 검사한다 */
+static const char* check_heap_page(const uint8_t* page, uint32_t ps, uint16_t row_size) {
+  heap_page_header_t hph;
+  memcpy(&hph, page, sizeof(hph));
+  if (hph.page_type != PAGE_TYPE_HEAP) return "힙 체인이 힙이 아닌 페이지를 가리킵니다";
+  size_t dir_end = sizeof(hph) + (size_t)hph.slot_count * sizeof(slot_t);
+  if (dir_end > ps) return "슬롯 디렉터리가 페이지를 넘습니다";
+  if (hph.free_space_offset > ps - dir_end) return "행 데이터 영역이 슬롯 디렉터리와 겹칩니다";
+  size_t data_start = ps - hph.free_space_offset;
+  if (hph.free_slot_head != SLOT_NONE && hph.free_slot_head >= hph.slot_count)
+    return "빈 슬롯 체인의 시작이 범위 밖입니다";
+  for (uint32_t i = 0; i < hph.slot_count; i++) {
+    slot_t slot;
+    memcpy(&slot, page + sizeof(hph) + (size_t)i * sizeof(slot), sizeof(slot));
+    if (slot.status != SLOT_ALIVE && slot.status != SLOT_FREE)
+      return "슬롯 상태가 올바르지 않습니다";
+    if (slot.offset < data_start || (size_t)slot.offset + row_size > ps)
+      return "슬롯 offset이 행 데이터 영역을 벗어납니다";
+    if (slot.status == SLOT_FREE && slot.next_free != SLOT_NONE
+        && slot.next_free >= hph.slot_count)
+      return "빈 슬롯의 다음 링크가 범위 밖입니다";
+  }
+  uint32_t steps = 0;
+  for (uint32_t cur = hph.free_slot_head; cur != SLOT_NONE;) {
+    if (++steps > hph.slot_count) return "빈 슬롯 체인이 순환합니다";
+    slot_t slot;
+    memcpy(&slot, page + sizeof(hph) + (size_t)cur * sizeof(slot), sizeof(slot));
+    if (slot.status != SLOT_FREE) return "빈 슬롯 체인이 사용 중인 슬롯을 가리킵니다";
+    cur = slot.next_free;
+  }
+  return NULL;
+}
+
+#define SEEN_TEST(bits, id) ((bits)[(id) >> 3] & (uint8_t)(1u << ((id) & 7)))
+#define SEEN_SET(bits, id) ((bits)[(id) >> 3] |= (uint8_t)(1u << ((id) & 7)))
+
+/*
+ * 열기 검증: 힙 체인·빈 페이지 체인·루트를 읽기 전용으로 한 번씩만 방문한다.
+ * 방문 비트맵(파일 페이지 수 비트)이 순환과 겹침을 잡고, 순회 길이를 파일 크기로 한정한다.
+ * 같은 순회에서 마지막 힙 페이지와 빈 슬롯 힌트도 복원한다.
+ * 반환: 0 정상, -1 읽기 실패(errno 유지), -2 손상(*why). 잡은 pin은 모두 푼다.
+ */
+static int verify_page_graph(pager_t* pager, uint64_t pages_in_file, const char** why) {
+  const db_header_t* h = &pager->header;
+  uint8_t* seen = (uint8_t*)calloc((size_t)((pages_in_file + 7) / 8), 1);
+  if (seen == NULL) {
+    errno = ENOMEM;
+    return -1;
+  }
+  int rc = 0;
+  SEEN_SET(seen, 0u); /* 헤더 페이지는 링크 대상이 될 수 없다 */
+
+  pager->last_heap_page_id = h->first_heap_page_id;
+  pager->heap_may_have_free_slots = false;
+  uint32_t pid = h->first_heap_page_id;
+  while (pid != 0) {
+    if (pid >= h->next_page_id || pid >= pages_in_file) {
+      *why = "힙 체인 링크가 범위 밖입니다";
+      rc = -2;
+      break;
+    }
+    if (SEEN_TEST(seen, pid)) {
+      *why = "힙 체인이 순환하거나 다른 페이지와 겹칩니다";
+      rc = -2;
+      break;
+    }
+    SEEN_SET(seen, pid);
+    uint8_t* page = pager_get_page(pager, pid);
+    if (page == NULL) {
+      rc = -1;
+      break;
+    }
+    heap_page_header_t hph;
+    memcpy(&hph, page, sizeof(hph));
+    const char* bad = check_heap_page(page, pager->page_size, h->row_size);
+    pager_unpin(pager, pid);
+    if (bad != NULL) {
+      *why = bad;
+      rc = -2;
+      break;
+    }
+    if (hph.free_slot_head != SLOT_NONE) pager->heap_may_have_free_slots = true;
+    pager->last_heap_page_id = pid;
+    pid = hph.next_heap_page_id;
+  }
+
+  pid = (rc == 0) ? h->free_page_head : 0;
+  while (pid != 0) {
+    if (pid >= h->next_page_id || pid >= pages_in_file) {
+      *why = "빈 페이지 목록 링크가 범위 밖입니다";
+      rc = -2;
+      break;
+    }
+    if (SEEN_TEST(seen, pid)) {
+      *why = "빈 페이지 목록이 순환하거나 다른 페이지와 겹칩니다";
+      rc = -2;
+      break;
+    }
+    SEEN_SET(seen, pid);
+    uint8_t* page = pager_get_page(pager, pid);
+    if (page == NULL) {
+      rc = -1;
+      break;
+    }
+    free_page_header_t fph;
+    memcpy(&fph, page, sizeof(fph));
+    pager_unpin(pager, pid);
+    if (fph.page_type != PAGE_TYPE_FREE) {
+      *why = "빈 페이지 목록이 빈 페이지가 아닌 페이지를 가리킵니다";
+      rc = -2;
+      break;
+    }
+    pid = fph.next_free_page;
+  }
+
+  if (rc == 0) {
+    pid = h->root_index_page_id;
+    if (SEEN_TEST(seen, pid)) {
+      *why = "B+ tree 루트가 힙 또는 빈 페이지 목록과 겹칩니다";
+      rc = -2;
+    } else {
+      uint8_t* page = pager_get_page(pager, pid);
+      if (page == NULL) {
+        rc = -1;
+      } else {
+        uint32_t type;
+        memcpy(&type, page, sizeof(type));
+        pager_unpin(pager, pid);
+        if (type != PAGE_TYPE_LEAF && type != PAGE_TYPE_INTERNAL) {
+          *why = "B+ tree 루트 페이지의 타입이 올바르지 않습니다";
+          rc = -2;
+        }
+      }
+    }
+  }
+  free(seen);
+  return rc;
+}
+
 /* 헤더 page_size가 프레임 할당에 쓸 수 있는 값인지 확인한다 */
 static bool page_size_valid(uint32_t ps) {
   return ps >= sizeof(db_header_t) && ps <= (1u << 20) && (ps & (ps - 1)) == 0;
@@ -576,6 +748,15 @@ int pager_open(pager_t* pager, const char* path, bool create) {
      *     → 프레임을 4096 크기로 재할당해야 함
      */
     uint32_t initial_ps = ps;
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+      perror("pager: 파일 크기를 읽을 수 없습니다");
+      return open_fail(pager, fd);
+    }
+    uint64_t file_size = (uint64_t)st.st_size;
+    if (file_size < sizeof(db_header_t)) {
+      return open_corrupt(pager, fd, "헤더가 잘렸습니다");
+    }
     uint8_t tmp[4096];
     size_t probed = 0;
     int probe_err = 0;
@@ -598,6 +779,9 @@ int pager_open(pager_t* pager, const char* path, bool create) {
       fprintf(stderr, "pager: 지원하지 않는 데이터베이스 파일입니다\n");
       errno = EINVAL;
       return open_fail(pager, fd);
+    }
+    if (file_size < th.page_size) {
+      return open_corrupt(pager, fd, "헤더 페이지가 잘렸습니다");
     }
     pager->page_size = th.page_size;
     ps = pager->page_size;
@@ -636,35 +820,28 @@ int pager_open(pager_t* pager, const char* path, bool create) {
       return open_fail(pager, fd);
     }
 
+    const char* bad = check_header_fields(&pager->header, ps, file_size / ps);
+    if (bad != NULL) {
+      return open_corrupt(pager, fd, bad);
+    }
+
     if (pager->header.version == 1) {
       memset(pager->header.table_name, 0, sizeof(pager->header.table_name));
     }
 
     /*
-     * 마지막 힙 페이지를 한 번만 복원해 두면,
-     * 이후 순차 INSERT에서 매번 힙 체인 전체를 스캔하지 않아도 된다.
-     * 같은 순회에서 FREE 슬롯 보유 여부도 함께 확인해
-     * heap_may_have_free_slots 힌트를 정확한 값으로 복원한다.
+     * 힙 체인·빈 페이지 체인·루트를 쓰기 없이 검증하며 마지막 힙 페이지와
+     * FREE 슬롯 보유 힌트(heap_may_have_free_slots)를 복원한다.
+     * 마지막 힙 페이지를 한 번만 복원해 두면 이후 순차 INSERT가 매번 체인을 스캔하지 않는다.
      */
-    pager->last_heap_page_id = pager->header.first_heap_page_id;
-    pager->heap_may_have_free_slots = false;
-    if (pager->last_heap_page_id != 0) {
-      uint32_t pid = pager->last_heap_page_id;
-      while (pid != 0) {
-        uint8_t* page = pager_get_page(pager, pid);
-        if (page == NULL) {
-          perror("pager: 힙 페이지를 읽을 수 없습니다");
-          return open_fail(pager, fd);
-        }
-        heap_page_header_t hph;
-        memcpy(&hph, page, sizeof(hph));
-        pager_unpin(pager, pid);
-        if (hph.free_slot_head != SLOT_NONE) {
-          pager->heap_may_have_free_slots = true;
-        }
-        pager->last_heap_page_id = pid;
-        pid = hph.next_heap_page_id;
-      }
+    const char* why = NULL;
+    int vrc = verify_page_graph(pager, file_size / ps, &why);
+    if (vrc == -2) {
+      return open_corrupt(pager, fd, why);
+    }
+    if (vrc != 0) {
+      perror("pager: 페이지를 읽을 수 없습니다");
+      return open_fail(pager, fd);
     }
   }
 

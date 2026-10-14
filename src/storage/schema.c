@@ -46,6 +46,55 @@ uint16_t schema_compute_layout(db_header_t *hdr)
     return offset;
 }
 
+bool schema_validate_header(const db_header_t *hdr, uint32_t page_size, const char **why)
+{
+    if (hdr->column_count > MAX_COLUMNS) {
+        *why = "컬럼 수가 범위를 벗어났습니다";
+        return false;
+    }
+    uint32_t offset = 0;
+    for (uint16_t i = 0; i < hdr->column_count; i++) {
+        const column_meta_t *col = &hdr->columns[i];
+        if (col->name[0] == '\0' || memchr(col->name, '\0', sizeof(col->name)) == NULL) {
+            *why = "컬럼 이름이 비었거나 끝나지 않았습니다";
+            return false;
+        }
+        bool size_ok = false;
+        switch (col->type) {
+            case COL_TYPE_INT:     size_ok = col->size == 4; break;
+            case COL_TYPE_BIGINT:  size_ok = col->size == 8; break;
+            case COL_TYPE_VARCHAR: size_ok = col->size >= 1 && col->size <= 255; break;
+            default:
+                *why = "알 수 없는 컬럼 타입입니다";
+                return false;
+        }
+        if (!size_ok) {
+            *why = "컬럼 크기가 타입과 맞지 않습니다";
+            return false;
+        }
+        if (col->offset != offset) {
+            *why = "컬럼 offset이 앞 컬럼 크기의 합과 다릅니다";
+            return false;
+        }
+        offset += col->size;
+    }
+    if (hdr->row_size != offset || offset > UINT16_MAX) {
+        *why = "row_size가 컬럼 크기의 합과 다릅니다";
+        return false;
+    }
+    if (hdr->column_count != 0
+        && (size_t)hdr->row_size + sizeof(slot_t) + sizeof(heap_page_header_t) > page_size) {
+        *why = "행 하나가 힙 페이지에 들어가지 않습니다";
+        return false;
+    }
+    if (hdr->version == DB_VERSION
+        && memchr(hdr->table_name, '\0', sizeof(hdr->table_name)) == NULL) {
+        *why = "테이블 이름이 끝나지 않았습니다";
+        return false;
+    }
+    return true;
+}
+
 /*
  * row_serialize - row_value_t 배열을 바이트 버퍼로 직렬화한다.
  *
