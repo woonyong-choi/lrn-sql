@@ -1,6 +1,9 @@
 #include <assert.h>
+#include <float.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -374,10 +377,33 @@ static void failed_open_leaves_source_with_caller(void)
     assert(script.close_calls == 0 && script.next_calls == 0);
 }
 
+static bool can_create_builder(size_t max_total)
+{
+    result_limits_t limits = {1, max_total};
+    result_builder_spec_t spec = {columns, 3, &limits};
+    result_builder_t *builder = NULL;
+    result_status_t status = result_builder_create(&spec, &builder);
+    result_builder_destroy(&builder);
+    return status == RESULT_OK;
+}
+
+static size_t min_builder_total(void)
+{
+    size_t low = 1;
+    size_t high = (size_t)1 << 20;
+    assert(!can_create_builder(low) && can_create_builder(high));
+    while (low + 1 < high) {
+        size_t middle = low + (high - low) / 2;
+        if (can_create_builder(middle)) high = middle;
+        else low = middle;
+    }
+    return high;
+}
+
 /* 근거: #64 계약(메모리 한도). 한도 초과는 builder를 바꾸지 않고, 맞는 행은 계속 추가된다. */
 static void builder_limits_reject_without_changing_rows(void)
 {
-    result_limits_t limits = {400, 1200};
+    result_limits_t limits = {400, min_builder_total() + 1200};
     result_builder_spec_t spec = {columns, 3, &limits};
     result_builder_t *builder = NULL;
     assert(result_builder_create(&spec, &builder) == RESULT_OK);
@@ -484,6 +510,106 @@ static void consumers_read_typed_cells_and_clone_survives_release(void)
     for (size_t i = 0; i < 3; i++) value_clear(&kept[i]);
 }
 
+static const result_column_t real_column[1] = {
+    {(const uint8_t *)"x", 1, VALUE_REAL, false},
+};
+
+static value_view_t real_view(double real)
+{
+    return (value_view_t){VALUE_REAL, 0, real, NULL, 0};
+}
+
+typedef struct {
+    double real;
+    int close_calls;
+} real_source_t;
+
+static result_next_t next_real(void *ctx, result_step_t *step)
+{
+    static value_view_t cell;
+    cell = real_view(((real_source_t *)ctx)->real);
+    step->row = (result_row_t){&cell, 1};
+    return RESULT_NEXT_ROW;
+}
+
+static void close_real(void *ctx)
+{
+    ((real_source_t *)ctx)->close_calls++;
+}
+
+/* 근거: #64 완료 조건 1. value.h의 유효한 view는 유한한 REAL뿐이라 NaN·Inf는 builder와 source 모두 거절한다. */
+static void non_finite_real_is_rejected_by_builder_and_source(void)
+{
+    double bad[3] = {NAN, INFINITY, -INFINITY};
+    result_builder_spec_t spec = {real_column, 1, NULL};
+    result_builder_t *builder = NULL;
+    assert(result_builder_create(&spec, &builder) == RESULT_OK);
+    value_view_t good = real_view(-0.0);
+    assert(result_builder_add_row(builder, &good, 1) == RESULT_OK);
+    for (size_t i = 0; i < 3; i++) {
+        value_view_t cell = real_view(bad[i]);
+        assert(result_builder_add_row(builder, &cell, 1) == RESULT_INVALID);
+    }
+    good = real_view(DBL_MAX);
+    assert(result_builder_add_row(builder, &good, 1) == RESULT_OK);
+    result_t *result = NULL;
+    assert(result_builder_finish(&builder, &result) == RESULT_OK);
+    result_row_t row;
+    assert(result_next(result, &row) == RESULT_NEXT_ROW && signbit(row.cells[0].real));
+    assert(result_next(result, &row) == RESULT_NEXT_ROW && row.cells[0].real == DBL_MAX);
+    assert(result_next(result, &row) == RESULT_NEXT_DONE);
+    result_release(&result);
+
+    for (size_t i = 0; i < 3; i++) {
+        real_source_t source_ctx = {bad[i], 0};
+        result_source_ops_t ops = {next_real, close_real};
+        result_rows_spec_t source = {real_column, 1, &ops, &source_ctx, NULL};
+        assert(result_open_rows(&source, &result) == RESULT_OK);
+        assert(result_next(result, &row) == RESULT_NEXT_FAILED);
+        assert(result_outcome(result).error->error_class == RESULT_E_INTERNAL);
+        assert(result_outcome(result).rows_delivered == 0 && source_ctx.close_calls == 1);
+        result_release(&result);
+        assert(source_ctx.close_calls == 1);
+    }
+}
+
+/* 근거: #64 계약(한도). 행·전체 한도가 SIZE_MAX여도 value.h의 셀 최대 바이트를 넘는 TEXT·BLOB은 바이트를 읽기 전에 거절한다. */
+static void unbounded_limits_still_reject_cells_over_value_max_bytes(void)
+{
+    if (SIZE_MAX <= VALUE_MAX_BYTES) return;
+    result_limits_t limits = {SIZE_MAX, SIZE_MAX};
+    result_builder_spec_t spec = {columns, 3, &limits};
+    result_builder_t *builder = NULL;
+    assert(result_builder_create(&spec, &builder) == RESULT_OK);
+    uint8_t one = 0;
+    value_view_t huge[3] = {integer_view(1), null_view(),
+                            blob_view(&one, (size_t)VALUE_MAX_BYTES + 1)};
+    assert(result_builder_add_row(builder, huge, 3) == RESULT_LIMIT);
+    value_view_t ok[3] = {integer_view(2), text_view("ok", 2), null_view()};
+    assert(result_builder_add_row(builder, ok, 3) == RESULT_OK);
+    result_t *result = NULL;
+    assert(result_builder_finish(&builder, &result) == RESULT_OK);
+    result_row_t row;
+    assert(result_next(result, &row) == RESULT_NEXT_ROW && row.cells[0].integer == 2);
+    assert(result_next(result, &row) == RESULT_NEXT_DONE);
+    result_release(&result);
+
+    script_t script = {.end = RESULT_NEXT_DONE};
+    add_script_row(&script, integer_view(1), null_view(), blob_view(&one, (size_t)VALUE_MAX_BYTES + 1));
+    result = open_script(&script, &limits);
+    assert(result_next(result, &row) == RESULT_NEXT_FAILED);
+    assert(result_outcome(result).error->error_class == RESULT_E_LIMIT);
+    result_release(&result);
+}
+
+/* 근거: #64 계약(고정 할당). builder 한도는 결과 구조와 metadata 같은 고정 할당도 포함하므로 아주 작은 한도는 만들 때 거절된다. */
+static void builder_limit_includes_fixed_allocation(void)
+{
+    size_t floor_bytes = min_builder_total();
+    assert(floor_bytes >= RESULT_MAX_ERROR_MESSAGE_BYTES);
+    assert(!can_create_builder(floor_bytes - 1) && can_create_builder(floor_bytes));
+}
+
 int main(void)
 {
     builder_preserves_null_empty_and_nul_bytes();
@@ -503,6 +629,9 @@ int main(void)
     builder_finish_and_destroy_are_single_use();
     cancel_from_other_thread_reaches_blocked_source();
     consumers_read_typed_cells_and_clone_survives_release();
+    non_finite_real_is_rejected_by_builder_and_source();
+    unbounded_limits_still_reject_cells_over_value_max_bytes();
+    builder_limit_includes_fixed_allocation();
     puts("result: contract checks passed");
     return 0;
 }
