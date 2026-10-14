@@ -93,6 +93,8 @@ database_exec_status_t database_txn_exec(database_txn_t *txn, const database_exe
 
 /* 문장 오류 뒤 rollback이 필요한 상태인지 */
 bool database_txn_failed(const database_txn_t *txn);
+/* 큐처럼 호출자 거래를 받는 모듈이 다른 database의 거래를 거절할 때 쓴다. */
+bool database_txn_belongs_to(const database_txn_t *txn, const database_t *db);
 
 /* transaction.h와 같은 의미. 실패 상태의 commit은 TXN_INVALID이고 트랜잭션은 ACTIVE로 남아 rollback을 기다린다 */
 txn_status_t database_txn_commit(database_txn_t *txn, txn_commit_info_t *info);

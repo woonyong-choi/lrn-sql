@@ -403,6 +403,11 @@ bool database_txn_failed(const database_txn_t *txn)
     return txn != NULL && txn_state(txn->txn) == TXN_STATE_ACTIVE && database_work_failed(txn->layer->db);
 }
 
+bool database_txn_belongs_to(const database_txn_t *txn, const database_t *db)
+{
+    return txn != NULL && db != NULL && txn->layer == database_layer_ctx(db);
+}
+
 txn_status_t database_txn_commit(database_txn_t *txn, txn_commit_info_t *info)
 {
     if (txn == NULL) return TXN_INVALID;
