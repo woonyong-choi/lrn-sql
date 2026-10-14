@@ -385,6 +385,18 @@ static void select_forms(void)
     assert(is_text(&statement->select.where.value, "x", 1));
     free_clean(statement);
 
+    statement = parse_ok("SELECT a FROM t WHERE b > 1 ORDER BY c DESC LIMIT 20");
+    assert(statement->select.has_order && name_is(&statement->select.order_column, "c"));
+    assert(statement->select.order_desc && statement->select.has_limit);
+    assert(statement->select.limit == 20);
+    free_clean(statement);
+
+    value_view_t count = {VALUE_INTEGER, 2, 0.0, NULL, 0};
+    statement = parse_bound("SELECT * FROM t LIMIT ?1", &count, 1);
+    assert(!statement->select.has_order && statement->select.has_limit);
+    assert(statement->select.limit == 2);
+    free_clean(statement);
+
     struct {
         const char *sql;
         sqlstmt_op_t op;
@@ -560,12 +572,15 @@ static void select_and_where_errors(void)
     expect_syntax("SELECT * FROM t WHERE a == 1", SQLSTMT_REASON_EXPECTED_VALUE, 25);
     expect_syntax("SELECT * FROM t WHERE a = 1 WHERE b = 2", SQLSTMT_REASON_TRAILING_TOKENS, 28);
 
-    expect_unsupported("SELECT * FROM t ORDER BY a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
-    expect_unsupported("SELECT * FROM t LIMIT 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
+    expect_fail("SELECT * FROM t LIMIT -1", SQLSTMT_LIMIT,
+                SQLSTMT_REASON_NUMBER_OUT_OF_RANGE, at("SELECT * FROM t LIMIT -1", "-"));
+    expect_fail("SELECT * FROM t LIMIT 'x'", SQLSTMT_LIMIT,
+                SQLSTMT_REASON_NUMBER_OUT_OF_RANGE, at("SELECT * FROM t LIMIT 'x'", "'x'"));
+    expect_syntax("SELECT * FROM t ORDER BY", SQLSTMT_REASON_UNEXPECTED_END, 24);
     expect_unsupported("SELECT * FROM t GROUP BY a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t UNION SELECT * FROM u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
-    expect_unsupported("SELECT * FROM t WHERE a = 1 ORDER BY a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 28);
+    expect_unsupported("SELECT * FROM t ORDER BY a OFFSET 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 27);
     expect_unsupported("SELECT DISTINCT a FROM t", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 7);
     expect_unsupported("SELECT a AS b FROM t", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 9);
     expect_unsupported("SELECT * FROM t AS u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
@@ -711,6 +726,7 @@ static void allocation_failures(void)
         "INSERT INTO t VALUES (1, -2, 'long text value', NULL, X'ff')",
         "SELECT a, b, c, d, e FROM t WHERE a >= 'x'",
         "SELECT * FROM t WHERE a IS NOT NULL",
+        "SELECT a FROM t WHERE b = 1 ORDER BY c DESC LIMIT 2",
         "UPDATE t SET a = 1, b = ?1, c = X'01', d = -1.5 WHERE e <> ?2",
         "DELETE FROM t WHERE \"column name\" = 'v'",
         "DROP TABLE t",

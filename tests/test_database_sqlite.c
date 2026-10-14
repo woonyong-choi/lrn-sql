@@ -24,7 +24,7 @@
 #define DB_PATH DIR_NAME "/db.lrdb"
 #define SCRIPT_PATH DIR_NAME "/script.sql"
 
-typedef enum { STEP_OK, STEP_ERROR, STEP_SELECT, STEP_REOPEN } step_kind_t;
+typedef enum { STEP_OK, STEP_ERROR, STEP_SELECT, STEP_ORDERED, STEP_REOPEN } step_kind_t;
 
 typedef struct {
     step_kind_t kind;
@@ -46,6 +46,12 @@ static const step_t STEPS[] = {
     {STEP_OK, "INSERT INTO logs VALUES (1, 'boot')"},
     {STEP_OK, "INSERT INTO logs VALUES (NULL, 'no timestamp')"},
     {STEP_OK, "INSERT INTO logs (msg) VALUES ('only msg')"},
+    /* #160: ORDER BY/LIMIT의 행 순서와 정렬 키 비투영을 SQLite 결과와 대조한다. */
+    {STEP_ORDERED, "SELECT name FROM users ORDER BY score DESC LIMIT 2"},
+    {STEP_ORDERED, "SELECT name FROM users ORDER BY name ASC LIMIT 3"},
+    {STEP_ORDERED, "SELECT name FROM users ORDER BY score DESC LIMIT 0"},
+    {STEP_ORDERED, "SELECT name FROM users WHERE id >= 2 ORDER BY score DESC LIMIT 1"},
+    {STEP_ERROR, "SELECT name FROM users ORDER BY missing"},
     {STEP_ERROR, "INSERT INTO users (score) VALUES (1.0)"},
     {STEP_ERROR, "INSERT INTO users (name) VALUES (NULL)"},
     {STEP_ERROR, "INSERT INTO nothing VALUES (1)"},
@@ -150,9 +156,9 @@ static void canon_cell(buffer_t *line, const value_view_t *cell)
 
 static int compare_lines(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
-static char *join_sorted(char **lines, size_t count)
+static char *join_lines(char **lines, size_t count, bool sorted)
 {
-    qsort(lines, count, sizeof(*lines), compare_lines);
+    if (sorted) qsort(lines, count, sizeof(*lines), compare_lines);
     buffer_t out = {NULL, 0, 0};
     char head[32];
     snprintf(head, sizeof(head), "[%zu]", count);
@@ -167,7 +173,7 @@ static char *join_sorted(char **lines, size_t count)
 }
 
 /* database 쪽 SELECT 결과 */
-static char *ours_rows(result_t *result)
+static char *ours_rows(result_t *result, bool sorted)
 {
     char **lines = NULL;
     size_t count = 0, cap = 0;
@@ -186,7 +192,7 @@ static char *ours_rows(result_t *result)
         }
         lines[count++] = line.text;
     }
-    return join_sorted(lines, count);
+    return join_lines(lines, count, sorted);
 }
 
 /* sqlite .mode quote 한 줄을 표준 표기로 */
@@ -338,7 +344,7 @@ int main(void)
         if (strncmp(line, "'@@", 3) == 0) {
             size_t index = (size_t)strtoul(line + 3, NULL, 10);
             errored[index] = pending_error;
-            rows[index] = join_sorted(pending, pending_count);
+            rows[index] = join_lines(pending, pending_count, STEPS[index].kind != STEP_ORDERED);
             pending = NULL;
             pending_count = pending_cap = 0;
             pending_error = false;
@@ -376,9 +382,9 @@ int main(void)
         CHECK(ours_error == errored[i], "단계 %zu: %.60s -> 이쪽 오류 %d, sqlite 오류 %d", i, sql, ours_error, errored[i]);
         if (STEPS[i].kind == STEP_ERROR) CHECK(ours_error && errored[i], "단계 %zu: 둘 다 오류여야 함", i);
         if (STEPS[i].kind == STEP_OK) CHECK(!ours_error && !errored[i], "단계 %zu: 둘 다 성공이어야 함: %.60s", i, sql);
-        if (STEPS[i].kind == STEP_SELECT && !ours_error) {
+        if ((STEPS[i].kind == STEP_SELECT || STEPS[i].kind == STEP_ORDERED) && !ours_error) {
             selects++;
-            char *mine = ours_rows(result);
+            char *mine = ours_rows(result, STEPS[i].kind != STEP_ORDERED);
             CHECK(strcmp(mine, rows[i]) == 0, "단계 %zu: %s\n--- 이쪽\n%.600s\n--- sqlite\n%.600s", i, sql, mine, rows[i]);
             compared_rows += (size_t)atoi(mine + 1);
             free(mine);

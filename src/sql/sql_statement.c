@@ -21,7 +21,8 @@ typedef struct {
 /* 이름 자리에 쓸 수 없는 예약어. 따옴표로 감싸면 쓸 수 있다. */
 static const char *const RESERVED[] = {
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "UPDATE",
-    "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS", NULL};
+    "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
+    "ORDER", "BY", "ASC", "DESC", "LIMIT", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
@@ -191,6 +192,7 @@ void sqlstmt_free(sqlstmt_t *statement)
         case SQLSTMT_SELECT:
             names_clear(statement->select.columns, statement->select.column_count);
             where_clear(&statement->select.where);
+            name_clear(&statement->select.order_column);
             name_clear(&statement->select.table);
             break;
         case SQLSTMT_UPDATE:
@@ -457,6 +459,25 @@ static bool parse_select(parser_t *p, sqlstmt_t *statement)
     if (!expect_word(p, "FROM")) return false;
     if (!parse_name(p, &query->table, false)) return false;
     if (!parse_where(p, &query->where)) return false;
+    if (take_word(p, "ORDER")) {
+        query->has_order = true;
+        if (!expect_word(p, "BY") || !parse_name(p, &query->order_column, true)) return false;
+        if (take_word(p, "DESC")) query->order_desc = true;
+        else take_word(p, "ASC");
+    }
+    if (take_word(p, "LIMIT")) {
+        size_t offset = here_offset(p);
+        value_t count = {0};
+        if (!parse_value(p, &count)) return false;
+        if (count.view.type != VALUE_INTEGER || count.view.integer < 0 ||
+            (uint64_t)count.view.integer > SIZE_MAX) {
+            value_clear(&count);
+            return fail(p, SQLSTMT_LIMIT, SQLSTMT_REASON_NUMBER_OUT_OF_RANGE, offset);
+        }
+        query->has_limit = true;
+        query->limit = (size_t)count.view.integer;
+        value_clear(&count);
+    }
     return parse_end(p);
 }
 

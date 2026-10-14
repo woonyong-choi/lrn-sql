@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -23,6 +24,9 @@ static const lexer_limits_t LEXER_LIMITS = {
 };
 
 #define NO_COLUMN CATALOG_NO_COLUMN
+#ifndef SELECT_SORT_MAX_BYTES
+#define SELECT_SORT_MAX_BYTES ((size_t)128 << 20)
+#endif
 
 /* ── 열기·닫기 ── */
 
@@ -661,6 +665,95 @@ done:
 
 /* ── SELECT ── */
 
+typedef struct {
+    value_t *values;
+    value_t key;
+    size_t ordinal;
+    bool desc;
+} select_sort_row_t;
+
+typedef struct {
+    select_sort_row_t *rows;
+    size_t count;
+    size_t capacity;
+    size_t used_bytes;
+} select_sort_t;
+
+static void select_sort_clear(select_sort_t *sort, size_t selected)
+{
+    for (size_t i = 0; i < sort->count; i++) {
+        for (size_t j = 0; j < selected; j++) value_clear(&sort->rows[i].values[j]);
+        free(sort->rows[i].values);
+        value_clear(&sort->rows[i].key);
+    }
+    free(sort->rows);
+}
+
+static int select_sort_compare(const void *left_ptr, const void *right_ptr)
+{
+    const select_sort_row_t *left = left_ptr;
+    const select_sort_row_t *right = right_ptr;
+    int order = 0;
+    value_status_t status = value_compare(&left->key.view, &right->key.view, &order);
+    assert(status == VALUE_OK);
+    if (order != 0) return left->desc ? -order : order;
+    return (left->ordinal > right->ordinal) - (left->ordinal < right->ordinal);
+}
+
+// cost: time O(s + b), heap O(s + b), stack O(1), alloc O(s + 1)
+// vars: s = 선택 컬럼 수, b = 복사하는 값 바이트 수
+// basis: estimate
+static result_status_t select_sort_add(select_sort_t *sort, const value_t *row,
+                                       const size_t *picks, size_t selected, size_t key,
+                                       bool desc)
+{
+    if (selected > SELECT_SORT_MAX_BYTES / sizeof(value_t)) return RESULT_LIMIT;
+    size_t charge = selected * sizeof(value_t);
+    if (charge > SELECT_SORT_MAX_BYTES - sort->used_bytes) return RESULT_LIMIT;
+    for (size_t i = 0; i < selected; i++) {
+        size_t bytes = row[picks[i]].view.size_bytes;
+        if (bytes > SELECT_SORT_MAX_BYTES - sort->used_bytes - charge) return RESULT_LIMIT;
+        charge += bytes;
+    }
+    size_t key_bytes = row[key].view.size_bytes;
+    if (key_bytes > SELECT_SORT_MAX_BYTES - sort->used_bytes - charge) return RESULT_LIMIT;
+    charge += key_bytes;
+    if (sort->count == sort->capacity) {
+        size_t capacity = sort->capacity == 0 ? 8 : sort->capacity * 2;
+        if (capacity < sort->capacity || capacity > SELECT_SORT_MAX_BYTES / sizeof(*sort->rows)) {
+            return RESULT_LIMIT;
+        }
+        size_t growth = (capacity - sort->capacity) * sizeof(*sort->rows);
+        if (growth > SELECT_SORT_MAX_BYTES - sort->used_bytes - charge) return RESULT_LIMIT;
+        select_sort_row_t *grown = realloc(sort->rows, capacity * sizeof(*sort->rows));
+        if (grown == NULL) return RESULT_NOMEM;
+        sort->rows = grown;
+        sort->capacity = capacity;
+        sort->used_bytes += growth;
+    }
+    select_sort_row_t item = {0};
+    item.values = calloc(selected, sizeof(*item.values));
+    if (item.values == NULL) return RESULT_NOMEM;
+    item.ordinal = sort->count;
+    item.desc = desc;
+    value_status_t status = value_clone(&row[key].view, &item.key);
+    for (size_t i = 0; i < selected && status == VALUE_OK; i++) {
+        status = value_clone(&row[picks[i]].view, &item.values[i]);
+    }
+    if (status != VALUE_OK) {
+        for (size_t i = 0; i < selected; i++) value_clear(&item.values[i]);
+        value_clear(&item.key);
+        free(item.values);
+        return status == VALUE_NOMEM ? RESULT_NOMEM : RESULT_INVALID;
+    }
+    sort->rows[sort->count++] = item;
+    sort->used_bytes += charge;
+    return RESULT_OK;
+}
+
+// cost: time O(r²·k + b) worst, heap O(r·s + b), stack O(1), io O(p)
+// vars: r = 조건에 맞는 행 수, k = 정렬 키 비교 바이트, b = 선택 값 복사 바이트, s = 선택 컬럼 수, p = 힙 페이지 수
+// basis: estimate
 static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
 {
     database_exec_status_t status = DATABASE_EXEC_OK;
@@ -677,6 +770,11 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     heap_t *heap = NULL;
     heap_cursor_t *cursor = NULL;
     result_builder_t *builder = NULL;
+    result_t *rows = NULL;
+    result_status_t finished;
+    select_sort_t sorted = {0};
+    size_t delivered = 0;
+    size_t order_column = SIZE_MAX;
     where_t where;
     memset(&where, 0, sizeof(where));
     if (picks == NULL || columns == NULL || cells == NULL || row == NULL) {
@@ -695,6 +793,13 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
                                        !view.columns[column].not_null};
     }
     if (!compile_where(&view, &select->where, &where, out, &status)) goto done;
+    if (select->has_order) {
+        order_column = find_column(&view, &select->order_column);
+        if (order_column == SIZE_MAX) {
+            status = unknown_column(out, &select->order_column);
+            goto done;
+        }
+    }
 
     heap_status_t opened = open_heap(db, &view, id, &heap);
     if (opened != HEAP_OK) {
@@ -706,7 +811,10 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         status = heap_failure(db, out, made, "cursor");
         goto done;
     }
-    result_builder_spec_t spec = {columns, selected, NULL};
+    size_t max_row = SELECT_SORT_MAX_BYTES < RESULT_DEFAULT_MAX_ROW_BYTES
+                         ? SELECT_SORT_MAX_BYTES : RESULT_DEFAULT_MAX_ROW_BYTES;
+    result_limits_t limits = {max_row, SELECT_SORT_MAX_BYTES};
+    result_builder_spec_t spec = {columns, selected, select->has_order ? &limits : NULL};
     result_status_t created = result_builder_create(&spec, &builder);
     if (created == RESULT_NOMEM) {
         status = DATABASE_EXEC_NOMEM;
@@ -716,6 +824,7 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         status = fail_result(out, RESULT_E_LIMIT, 15, "결과 컬럼 한도를 넘습니다");
         goto done;
     }
+    if (select->has_limit && select->limit == 0) goto finish;
     for (;;) {
         heap_locator_t at;
         heap_status_t next = heap_cursor_next(cursor, row, &at);
@@ -725,8 +834,17 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
             goto done;
         }
         if (where_matches(&where, row)) {
-            for (size_t i = 0; i < selected; i++) cells[i] = row[picks[i]].view;
-            result_status_t added = result_builder_add_row(builder, cells, selected);
+            result_status_t added;
+            if (select->has_order) {
+                added = select_sort_add(&sorted, row, picks, selected, order_column,
+                                        select->order_desc);
+            } else if (!select->has_limit || delivered < select->limit) {
+                for (size_t i = 0; i < selected; i++) cells[i] = row[picks[i]].view;
+                added = result_builder_add_row(builder, cells, selected);
+                if (added == RESULT_OK) delivered++;
+            } else {
+                added = RESULT_OK;
+            }
             if (added == RESULT_NOMEM) {
                 status = DATABASE_EXEC_NOMEM;
                 goto done;
@@ -737,9 +855,29 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
             }
         }
         clear_cells(row, n);
+        if (!select->has_order && select->has_limit && delivered >= select->limit) break;
     }
-    result_t *rows = NULL;
-    result_status_t finished = result_builder_finish(&builder, &rows);
+    if (select->has_order) {
+        if (sorted.count > 1) {
+            qsort(sorted.rows, sorted.count, sizeof(*sorted.rows), select_sort_compare);
+        }
+        size_t count = sorted.count;
+        if (select->has_limit && select->limit < count) count = select->limit;
+        for (size_t i = 0; i < count; i++) {
+            for (size_t j = 0; j < selected; j++) cells[j] = sorted.rows[i].values[j].view;
+            result_status_t added = result_builder_add_row(builder, cells, selected);
+            if (added == RESULT_NOMEM) {
+                status = DATABASE_EXEC_NOMEM;
+                goto done;
+            }
+            if (added != RESULT_OK) {
+                status = fail_result(out, RESULT_E_LIMIT, 16, "결과가 한도를 넘습니다");
+                goto done;
+            }
+        }
+    }
+finish:
+    finished = result_builder_finish(&builder, &rows);
     if (finished == RESULT_NOMEM) {
         status = DATABASE_EXEC_NOMEM;
         goto done;
@@ -750,6 +888,7 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     }
     *out = rows;
 done:
+    select_sort_clear(&sorted, selected);
     result_builder_destroy(&builder);
     heap_cursor_close(cursor);
     heap_close(heap);

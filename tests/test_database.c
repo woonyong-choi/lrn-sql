@@ -398,7 +398,7 @@ static void test_failed_statements_keep_existing_data(void)
         {"DELETE FROM users WHERE id = 'abc'", RESULT_E_SEMANTIC},
         {"SELEC * FROM users", RESULT_E_SYNTAX},
         {"SELECT * FROM users; SELECT * FROM logs", RESULT_E_SYNTAX},
-        {"SELECT * FROM users ORDER BY id", RESULT_E_SEMANTIC},
+        {"SELECT * FROM users ORDER BY missing", RESULT_E_SEMANTIC},
         {"SELECT * FROM users WHERE name = ?", RESULT_E_SYNTAX},
         {"", RESULT_E_SYNTAX},
         {"INSERT INTO users (name) VALUES ('\x80')", RESULT_E_SYNTAX},
@@ -581,6 +581,28 @@ static void test_argument_errors(void)
     clean_dir();
 }
 
+#ifdef SELECT_SORT_BUDGET_TEST
+/* #160: 정렬 버퍼 한도 초과는 명시적 오류이며 뒤따르는 질의는 정상 실행된다. */
+static void test_select_sort_budget_returns_error(void)
+{
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE t (id INTEGER, note TEXT)");
+    char payload[1001];
+    memset(payload, 'x', sizeof(payload) - 1);
+    payload[sizeof(payload) - 1] = '\0';
+    for (int id = 1; id <= 5; id++) {
+        char sql[1100];
+        snprintf(sql, sizeof(sql), "INSERT INTO t VALUES (%d, '%s')", id, payload);
+        exec_ok(db, sql);
+    }
+
+    expect_class(db, "SELECT id, note FROM t ORDER BY id", RESULT_E_LIMIT);
+    expect_text(db, "SELECT id FROM t ORDER BY id LIMIT 1", "[1] 1");
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+#endif
+
 int main(void)
 {
     test_two_schemas_crud_and_reopen();
@@ -591,6 +613,9 @@ int main(void)
     test_identity_and_primary_key_rules();
     test_open_rejects_other_files_without_change();
     test_argument_errors();
+#ifdef SELECT_SORT_BUDGET_TEST
+    test_select_sort_budget_returns_error();
+#endif
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
     return g_fail == 0 ? 0 : 1;
