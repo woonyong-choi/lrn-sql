@@ -388,6 +388,31 @@ static void test_index_out_of_step_with_heap_is_not_used(void)
     CHECK(run(db, "SELECT id FROM t WHERE id = 5").rows == 0 && run(db, "SELECT id FROM t WHERE id = 777").rows == 1,
           "그 뒤의 쓰기도 맞음");
     assert(database_close(db) == DATABASE_OK);
+
+    page_file_t *file;
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    catalog_t *catalog;
+    assert(catalog_store_load(file, &catalog) == CATALOG_STORE_OK);
+    catalog_table_id_t id;
+    assert(catalog_find(catalog, "t", 1, &id) == CATALOG_OK);
+    catalog_table_view_t view;
+    assert(catalog_describe(catalog, id, &view) == CATALOG_OK);
+    value_type_t types[2] = {VALUE_INTEGER, VALUE_TEXT};
+    heap_schema_t schema = {types, 2};
+    heap_index_spec_t spec = {view.primary_key_column, view.primary_root, NULL};
+    heap_t *heap;
+    assert(heap_open_indexed(file, id, view.heap_root, &schema, &spec, NULL, &heap) == HEAP_OK);
+    CHECK(!heap_is_indexed(heap), "어긋난 색인은 조회에 사용하지 않음");
+    uint32_t *pages = NULL;
+    size_t count = 0;
+    assert(heap_collect_pages(heap, &pages, &count) == HEAP_OK);
+    bool has_index_root = false;
+    for (size_t i = 0; i < count; i++) has_index_root |= pages[i] == view.primary_root;
+    CHECK(has_index_root, "어긋난 색인도 DROP의 회수 대상에 포함");
+    heap_free_pages(heap, pages, count);
+    heap_close(heap);
+    catalog_close(catalog);
+    assert(page_file_close(file) == PAGE_FILE_OK);
 }
 
 /* ── 4. 색인이 가리키는 행이 틀리면 엉뚱한 행을 돌려주지 않는다 ── */
