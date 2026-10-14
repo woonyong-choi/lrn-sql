@@ -74,7 +74,8 @@ STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o 
                $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o
 BASIC_TESTS = test_all test_record test_record_fault test_overflow \
               test_overflow_fault test_value test_value_fault test_parser_boundary \
-              test_http_input test_io test_io_lock test_catalog test_catalog_fault
+              test_http_input test_io test_io_lock test_catalog test_catalog_fault \
+              test_lexer test_lexer_fault
 TEST_BINS = $(addprefix $(BUILD_DIR)/,$(BASIC_TESTS))
 
 $(BUILD_DIR)/test_all: $(BUILD_DIR)/tests/test_all.o $(OBJS)
@@ -93,6 +94,8 @@ $(BUILD_DIR)/test_overflow_fault: $(BUILD_DIR)/tests/test_overflow_fault.o $(BUI
 $(BUILD_DIR)/test_value_fault: $(BUILD_DIR)/tests/test_value_fault.o $(BUILD_DIR)/storage/value_fault.o
 $(BUILD_DIR)/test_catalog: $(BUILD_DIR)/tests/test_catalog.o $(BUILD_DIR)/storage/catalog.o
 $(BUILD_DIR)/test_catalog_fault: $(BUILD_DIR)/tests/test_catalog_fault.o $(BUILD_DIR)/storage/catalog_fault.o
+$(BUILD_DIR)/test_lexer: $(BUILD_DIR)/tests/test_lexer.o $(BUILD_DIR)/sql/lexer.o
+$(BUILD_DIR)/test_lexer_fault: $(BUILD_DIR)/tests/test_lexer_fault.o $(BUILD_DIR)/sql/lexer_fault.o
 
 $(TEST_BINS) $(BUILD_DIR)/test_overflow_file $(BUILD_DIR)/test_value_sqlite:
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -116,6 +119,10 @@ $(BUILD_DIR)/storage/value_fault.o: src/storage/value.c
 $(BUILD_DIR)/storage/catalog_fault.o: src/storage/catalog.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=catalog_test_malloc -Drealloc=catalog_test_realloc -Dfree=catalog_test_free -c -o $@ $<
+
+$(BUILD_DIR)/sql/lexer_fault.o: src/sql/lexer.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=lexer_test_malloc -Dfree=lexer_test_free -c -o $@ $<
 
 test: $(TEST_BINS)
 	@set -e; for binary in $(TEST_BINS); do \
@@ -244,6 +251,6 @@ clean:
 .PHONY: test-runner test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
 -include $(OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BUILD_DIR)/main.d
--include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d)
+-include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d $(BUILD_DIR)/sql/lexer*.d)
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
