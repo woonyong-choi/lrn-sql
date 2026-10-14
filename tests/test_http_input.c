@@ -189,8 +189,6 @@ static void http_malformed_request_is_rejected_without_execution(void)
     static const reject_case_t cases[] = {
         {"CL and TE conflict",
          "POST /query HTTP/1.1\r\nContent-Length: 33\r\nTransfer-Encoding: chunked\r\n\r\n" INSERT_SQL, 400},
-        {"TE chunked unsupported",
-         "POST /query HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 501},
         {"differing duplicate CL",
          "POST /query HTTP/1.1\r\nContent-Length: 33\r\nContent-Length: 5\r\n\r\n" INSERT_SQL, 400},
         {"negative CL",
@@ -320,7 +318,6 @@ static void http_connection_reuse_follows_headers_and_errors(void)
 
     send_bytes(&c, raw, strlen(raw));
     CHECK(read_response(&c, NULL, 0) == 200, "keep-alive request answered");
-    CHECK(strcasestr(raw, "keep-alive") != NULL, "request asked for keep-alive");
     send_bytes(&c, keep, strlen(keep));
     CHECK(read_response(&c, NULL, 0) == 200, "same connection reused");
     CHECK(server_closed(&c), "Connection: close closes after response");
@@ -329,8 +326,23 @@ static void http_connection_reuse_follows_headers_and_errors(void)
     make_insert(raw, sizeof(raw), "");
     assert(connect_client(&c) == 0);
     send_bytes(&c, raw, strlen(raw));
-    CHECK(read_response(&c, NULL, 0) == 200, "plain request answered");
-    CHECK(server_closed(&c), "no keep-alive header closes after response");
+    CHECK(read_response(&c, NULL, 0) == 200, "HTTP/1.1 request answered");
+    send_bytes(&c, raw, strlen(raw));
+    CHECK(read_response(&c, NULL, 0) == 200, "HTTP/1.1 connection persistent by default");
+    close(c.fd);
+
+    static const char http10[] = "GET /stats HTTP/1.0\r\n\r\n";
+    static const char http10_keep[] = "GET /stats HTTP/1.0\r\nConnection: keep-alive\r\n\r\n";
+    assert(connect_client(&c) == 0);
+    send_bytes(&c, http10, sizeof(http10) - 1);
+    CHECK(read_response(&c, NULL, 0) == 200, "HTTP/1.0 request answered");
+    CHECK(server_closed(&c), "HTTP/1.0 closes without explicit keep-alive");
+    close(c.fd);
+    assert(connect_client(&c) == 0);
+    send_bytes(&c, http10_keep, sizeof(http10_keep) - 1);
+    CHECK(read_response(&c, NULL, 0) == 200, "HTTP/1.0 keep-alive answered");
+    send_bytes(&c, http10_keep, sizeof(http10_keep) - 1);
+    CHECK(read_response(&c, NULL, 0) == 200, "HTTP/1.0 explicit keep-alive persists");
     close(c.fd);
 
     assert(connect_client(&c) == 0);
@@ -340,10 +352,170 @@ static void http_connection_reuse_follows_headers_and_errors(void)
     close(c.fd);
 }
 
+#define CHUNKED_HEAD "POST /query HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+#define CHUNKED_SQL  "11\r\nINSERT INTO users\r\n" "A;ext=1\r\n VALUES ('\r\n" "9\r\nch', 1)  \r\n"
+#define CHUNKED_END  "0\r\nX-Trailer: v\r\n\r\n"
+
+/* 합성 입력 자체가 올바른지 확인할 수 있게 같은 SQL의 CL 요청과 길이를 맞춘다 */
+static long chunk_rows(void)
+{
+    char body[1024];
+    static const char q[] = "POST /query HTTP/1.1\r\nContent-Length: 44\r\n\r\n"
+                            "SELECT COUNT(*) FROM users WHERE name = 'ch'";
+    if (exchange(q, sizeof(q) - 1, body, sizeof(body)) != 200) return -1;
+    char *p = strstr(body, "count = ");
+    return p ? atol(p + 8) : -1;
+}
+
+typedef struct {
+    const char *label;
+    const char *raw;
+    int         status;
+} chunk_case_t;
+
+/* #66: 청크 본문이 2·3조각으로 나뉘어 와도 SQL은 한 번, 같은 결과로 실행된다 */
+static void http_chunked_body_split_across_segments_runs_once_each(void)
+{
+    static const char raw[] = CHUNKED_HEAD CHUNKED_SQL CHUNKED_END;
+    size_t len = sizeof(raw) - 1;
+    long rows = row_count();
+    long named = chunk_rows();
+
+    for (size_t cut = 1; cut < len; cut++) {
+        client_t c;
+        assert(connect_client(&c) == 0);
+        send_bytes(&c, raw, cut);
+        usleep(1000);
+        size_t second = cut + (len - cut) / 2;
+        send_bytes(&c, raw + cut, second - cut);
+        usleep(1000);
+        send_bytes(&c, raw + second, len - second);
+        CHECK(read_response(&c, NULL, 0) == 200, "split chunked request answered 200");
+        close(c.fd);
+    }
+    CHECK(row_count() == rows + (long)(len - 1), "each split chunked request ran once");
+    CHECK(chunk_rows() == named + (long)(len - 1), "chunked SQL stored the same row");
+}
+
+/* #66: 청크 문법 위반·모호한 TE·한도 초과는 실행 없이 거절 */
+static void http_invalid_chunked_request_is_rejected_without_execution(void)
+{
+    static const chunk_case_t cases[] = {
+        {"duplicate TE headers",
+         "POST /query HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400},
+        {"TE list with chunked",
+         "POST /query HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n", 400},
+        {"TE unknown coding",
+         "POST /query HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n0\r\n\r\n", 501},
+        {"TE prefix of chunked",
+         "POST /query HTTP/1.1\r\nTransfer-Encoding: chunkedx\r\n\r\n0\r\n\r\n", 501},
+        {"TE in HTTP/1.0",
+         "POST /query HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400},
+        {"TE with CL", "POST /query HTTP/1.1\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400},
+        {"non-hex chunk size", CHUNKED_HEAD "g\r\nINSERT\r\n0\r\n\r\n", 400},
+        {"empty chunk size", CHUNKED_HEAD "\r\nINSERT\r\n0\r\n\r\n", 400},
+        {"signed chunk size", CHUNKED_HEAD "+5\r\nINSERT\r\n0\r\n\r\n", 400},
+        {"chunk size with space", CHUNKED_HEAD "6 \r\nINSERT\r\n0\r\n\r\n", 400},
+        {"hex size far over limit", CHUNKED_HEAD "FFFFFFFFFFFFFFFFFFFFFFFF\r\nINSERT\r\n0\r\n\r\n", 413},
+        {"chunk over body limit", CHUNKED_HEAD "1000\r\nINSERT\r\n0\r\n\r\n", 413},
+        {"chunk data longer than size", CHUNKED_HEAD "5\r\nINSERT\r\n0\r\n\r\n", 400},
+        {"bare LF framing", CHUNKED_HEAD "6\nINSERT\n0\n\n", 400},
+        {"control byte in extension", CHUNKED_HEAD "6;a\x01\r\nINSERT\r\n0\r\n\r\n", 400},
+        {"trailer without colon", CHUNKED_HEAD "0\r\nbad trailer\r\n\r\n", 400},
+        {"CL in trailer", CHUNKED_HEAD "0\r\nContent-Length: 5\r\n\r\n", 400},
+        {"invalid UTF-8 in chunk", CHUNKED_HEAD "2\r\n\xC3(\r\n0\r\n\r\n", 400},
+    };
+    long rows = row_count();
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        CHECK(exchange_str(cases[i].raw) == cases[i].status, cases[i].label);
+
+    static const char nul[] = CHUNKED_HEAD "27\r\nINSERT INTO users VALUES ('ch', 1)\0hid\r\n0\r\n\r\n";
+    CHECK(exchange(nul, sizeof(nul) - 1, NULL, 0) == 400, "NUL byte in chunk");
+
+    static char big[HTTP_MAX_CHUNKED_BYTES];
+    int n = snprintf(big, sizeof(big), CHUNKED_HEAD);
+    for (int i = 0; i < 5; i++) {
+        n += snprintf(big + n, sizeof(big) - (size_t)n, "3E8\r\n");
+        memset(big + n, ' ', 1000);
+        n += 1000;
+        n += snprintf(big + n, sizeof(big) - (size_t)n, "\r\n");
+    }
+    n += snprintf(big + n, sizeof(big) - (size_t)n, "0\r\n\r\n");
+    CHECK(exchange(big, (size_t)n, NULL, 0) == 413, "decoded body over limit rejected");
+
+    static char trailer[HTTP_MAX_TRAILER_BYTES + 256];
+    n = snprintf(trailer, sizeof(trailer), CHUNKED_HEAD "0\r\nX-Pad: ");
+    memset(trailer + n, 'a', HTTP_MAX_TRAILER_BYTES);
+    strcpy(trailer + n + HTTP_MAX_TRAILER_BYTES, "\r\n\r\n");
+    CHECK(exchange_str(trailer) == 431, "oversized trailer rejected");
+
+    CHECK(row_count() == rows, "invalid chunked requests ran no statement");
+    CHECK(exchange_str("GET /stats HTTP/1.1\r\nConnection: close\r\n\r\n") == 200,
+          "next connection works after rejections");
+}
+
+/* #66: 마지막 청크·트레일러가 오기 전에 끊기면 어느 지점에서도 실행하지 않는다 */
+static void http_chunked_request_cut_at_any_point_is_not_executed(void)
+{
+    static const char raw[] = CHUNKED_HEAD CHUNKED_SQL CHUNKED_END;
+    long rows = row_count();
+
+    for (size_t cut = 1; cut < sizeof(raw) - 1; cut++) {
+        client_t c;
+        assert(connect_client(&c) == 0);
+        send_bytes(&c, raw, cut);
+        shutdown(c.fd, SHUT_WR);
+        CHECK(read_response(&c, NULL, 0) != 200, "cut chunked request not answered 200");
+        close(c.fd);
+    }
+    CHECK(row_count() == rows, "cut chunked requests ran no statement");
+    CHECK(exchange_str("GET /stats HTTP/1.1\r\nConnection: close\r\n\r\n") == 200,
+          "next connection works after cut requests");
+}
+
+/* #66: 청크 요청 뒤에 이어 붙은 요청은 경계에서 정확히 나뉘어 각각 실행된다 */
+static void http_chunked_request_followed_by_pipelined_requests_runs_each(void)
+{
+    static const char chunked[] = CHUNKED_HEAD CHUNKED_SQL CHUNKED_END;
+    char plain[512], stream[2048];
+    make_insert(plain, sizeof(plain), "");
+    int n = snprintf(stream, sizeof(stream), "%s%s%s", chunked, plain, chunked);
+    long rows = row_count();
+    client_t c;
+    assert(connect_client(&c) == 0);
+
+    send_bytes(&c, stream, (size_t)n);
+    for (int i = 0; i < 3; i++)
+        CHECK(read_response(&c, NULL, 0) == 200, "pipelined response after chunked request");
+
+    size_t cut = sizeof(chunked) - 1 + strlen(plain) + 20;
+    send_bytes(&c, stream, cut);
+    usleep(5000);
+    send_bytes(&c, stream + cut, (size_t)n - cut);
+    for (int i = 0; i < 3; i++)
+        CHECK(read_response(&c, NULL, 0) == 200, "split pipelined response after chunked request");
+    close(c.fd);
+
+    CHECK(row_count() == rows + 6, "six pipelined requests ran six times");
+}
+
+/* #66: 청크 경계에 걸친 다중 바이트 문자는 이어 붙여 검증한다 */
+static void http_chunked_multibyte_split_across_chunks_runs(void)
+{
+    static const char raw[] = CHUNKED_HEAD "1C\r\nINSERT INTO users VALUES ('\xEA\r\n"
+                              "1\r\n\xB0\r\n" "1\r\n\x80\r\n" "5\r\n', 1)\r\n" "0\r\n\r\n";
+    long rows = row_count();
+
+    CHECK(exchange(raw, sizeof(raw) - 1, NULL, 0) == 200, "multibyte split across chunks runs");
+    CHECK(row_count() == rows + 1, "multibyte chunked request ran once");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     signal(SIGPIPE, SIG_IGN);
+    alarm(120); /* 멈추면 시간 초과로 실패 */
     g_port = 20000 + (int)(getpid() % 20000);
     unlink(TEST_DB_PATH);
     assert(pager_open(&g_pager, TEST_DB_PATH, true) == 0);
@@ -360,6 +532,11 @@ int main(void)
     http_two_requests_in_one_segment_run_once_each();
     http_oversized_input_is_rejected_without_execution();
     http_connection_reuse_follows_headers_and_errors();
+    http_chunked_body_split_across_segments_runs_once_each();
+    http_invalid_chunked_request_is_rejected_without_execution();
+    http_chunked_request_cut_at_any_point_is_not_executed();
+    http_chunked_request_followed_by_pipelined_requests_runs_each();
+    http_chunked_multibyte_split_across_chunks_runs();
 
     pthread_kill(server, SIGINT);
     pthread_join(server, NULL);

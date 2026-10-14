@@ -19,7 +19,9 @@
 typedef struct {
     int    has_length;
     size_t content_length;
-    int    has_transfer_encoding;
+    int    is_http11;
+    int    transfer_encoding_count;
+    int    transfer_encoding_status; /* 0 = 정확히 chunked, 400 = 모호, 501 = 미지원 코딩 */
     int    wants_keep_alive;
     int    wants_close;
 } headers_t;
@@ -78,7 +80,9 @@ static int apply_header(const char *name, size_t name_len,
         h->has_length = 1;
         h->content_length = length;
     } else if (token_equals(name, name_len, "Transfer-Encoding")) {
-        h->has_transfer_encoding = 1;
+        h->transfer_encoding_count++;
+        h->transfer_encoding_status = token_equals(value, value_len, "chunked") ? 0
+                                    : memchr(value, ',', value_len) != NULL ? 400 : 501;
     } else if (token_equals(name, name_len, "Connection")) {
         parse_connection_tokens(value, value_len, h);
     }
@@ -117,7 +121,7 @@ static int parse_headers(const char *p, const char *end, headers_t *h)
 }
 
 /* 요청 줄로 메서드·경로를 정한다. 쿼리 문자열은 경로 비교에서 제외 */
-static int parse_request_line(const char *line, size_t len, http_request_t *req)
+static int parse_request_line(const char *line, size_t len, http_request_t *req, headers_t *h)
 {
     const char *sp1 = memchr(line, ' ', len);
     if (sp1 == NULL || sp1 == line) return 400;
@@ -134,6 +138,7 @@ static int parse_request_line(const char *line, size_t len, http_request_t *req)
     const char *query = memchr(target, '?', path_len);
     if (query != NULL) path_len = (size_t)(query - target);
 
+    h->is_http11 = token_equals(version, version_len, "HTTP/1.1");
     int is_post = token_equals(line, method_len, "POST");
     int is_get = token_equals(line, method_len, "GET");
     if (path_len == 6 && memcmp(target, "/query", 6) == 0) {
@@ -179,13 +184,13 @@ static void trim_sql_tail(http_request_t *req)
     req->body_len = len;
 }
 
-static int copy_body(const char *body, size_t len, http_request_t *req)
+/* req->body[0, body_len)을 검사한다. NUL이나 잘못된 UTF-8이면 400 */
+static int finish_body(http_request_t *req)
 {
-    if (memchr(body, '\0', len) != NULL || !is_valid_utf8((const unsigned char *)body, len))
+    req->body[req->body_len] = '\0';
+    if (memchr(req->body, '\0', req->body_len) != NULL
+        || !is_valid_utf8((const unsigned char *)req->body, req->body_len))
         return 400;
-    memcpy(req->body, body, len);
-    req->body[len] = '\0';
-    req->body_len = len;
     trim_sql_tail(req);
     return 0;
 }
@@ -207,11 +212,14 @@ static int parse_head(const char *buf, size_t hdr_len, http_request_t *req, head
     for (const char *c = buf; c < line_end; c++) {
         if (*c == '\r' || *c == '\n') return 400;
     }
-    int status = parse_request_line(buf, (size_t)(line_end - buf), req);
+    int status = parse_request_line(buf, (size_t)(line_end - buf), req, h);
     if (status != 0) return status;
     if (line_end < block_end) status = parse_headers(line_end + 2, block_end, h);
     if (status != 0) return status;
-    if (h->has_transfer_encoding) return h->has_length ? 400 : 501;
+    if (h->transfer_encoding_count > 0) {
+        if (h->has_length || h->transfer_encoding_count > 1 || !h->is_http11) return 400;
+        return h->transfer_encoding_status;
+    }
     if (!h->has_length && req->route == ROUTE_QUERY) return 411;
     return 0;
 }
@@ -237,6 +245,120 @@ static int fill_buffer(http_conn_t *conn)
     }
 }
 
+static void consume(http_conn_t *conn, size_t n)
+{
+    memmove(conn->buf, conn->buf + n, conn->len - n);
+    conn->len -= n;
+    conn->buf[conn->len] = '\0';
+}
+
+/* 버퍼 앞의 CRLF 줄을 기다린다. max_line을 넘으면 too_long, CRLF 없는 LF가 있으면 400, 연결 종료면 -1 */
+static int read_line(http_conn_t *conn, size_t max_line, int too_long, size_t *line_len)
+{
+    for (;;) {
+        const char *lf = memchr(conn->buf, '\n', conn->len);
+        if (lf != NULL) {
+            size_t at = (size_t)(lf - conn->buf);
+            if (at == 0 || conn->buf[at - 1] != '\r') return 400;
+            *line_len = at - 1;
+            return *line_len > max_line ? too_long : 0;
+        }
+        if (conn->len > max_line + 1) return too_long;
+        if (fill_buffer(conn) != 0) return -1;
+    }
+}
+
+static int hex_value(char c)
+{
+    return isdigit((unsigned char)c) ? c - '0' : tolower((unsigned char)c) - 'a' + 10;
+}
+
+/* "크기[;확장]" 줄. 크기가 본문 한도를 넘으면 값을 끝까지 검증한 뒤 413 */
+static int parse_chunk_size(const char *line, size_t len, size_t *size)
+{
+    size_t i = 0;
+    size_t value = 0;
+    int too_large = 0;
+    while (i < len && isxdigit((unsigned char)line[i])) {
+        value = value * 16 + (size_t)hex_value(line[i++]);
+        if (value > HTTP_MAX_BODY_BYTES) {
+            too_large = 1;
+            value = HTTP_MAX_BODY_BYTES + 1;
+        }
+    }
+    if (i == 0 || (i < len && line[i] != ';')) return 400;
+    for (; i < len; i++) {
+        if (((unsigned char)line[i] < ' ' && line[i] != '\t') || line[i] == 0x7f) return 400;
+    }
+    *size = value;
+    return too_large ? 413 : 0;
+}
+
+/* 마지막 청크 뒤의 트레일러를 빈 줄까지 검증하며 버린다. 프레이밍 헤더는 허용하지 않는다 */
+static int skip_trailer(http_conn_t *conn)
+{
+    size_t total = 0;
+    for (;;) {
+        size_t len;
+        int status = read_line(conn, HTTP_MAX_TRAILER_BYTES, 431, &len);
+        if (status != 0) return status;
+        if (len == 0) {
+            consume(conn, 2);
+            return 0;
+        }
+        total += len + 2;
+        if (total > HTTP_MAX_TRAILER_BYTES) return 431;
+        headers_t ignored = {0};
+        if (memchr(conn->buf, '\0', len) != NULL || memchr(conn->buf, '\r', len) != NULL
+            || parse_header_line(conn->buf, len, &ignored) != 0
+            || ignored.has_length || ignored.transfer_encoding_count > 0) return 400;
+        consume(conn, len + 2);
+    }
+}
+
+/* 청크 본문을 req->body에 풀어 담는다. 마지막 청크와 트레일러까지 확인한 뒤에만 0을 반환한다 */
+static int decode_chunked(http_conn_t *conn, http_request_t *req)
+{
+    size_t raw = 0;
+    for (;;) {
+        size_t line_len;
+        size_t size;
+        int status = read_line(conn, HTTP_MAX_CHUNK_LINE_BYTES, 400, &line_len);
+        if (status == 0) status = parse_chunk_size(conn->buf, line_len, &size);
+        if (status != 0) return status;
+        raw += line_len + 2;
+        consume(conn, line_len + 2);
+        if (size == 0) return skip_trailer(conn);
+        if (req->body_len + size > HTTP_MAX_BODY_BYTES
+            || raw + size + 2 > HTTP_MAX_CHUNKED_BYTES) return 413;
+        while (conn->len < size + 2) {
+            if (fill_buffer(conn) != 0) return -1;
+        }
+        if (conn->buf[size] != '\r' || conn->buf[size + 1] != '\n') return 400;
+        memcpy(req->body + req->body_len, conn->buf, size);
+        req->body_len += size;
+        raw += size + 2;
+        consume(conn, size + 2);
+    }
+}
+
+/* 본문을 읽어 req->body에 담고 conn에는 다음 요청의 바이트만 남긴다. 0, 오류 상태, -1(연결 종료) */
+static int read_body(http_conn_t *conn, size_t hdr_len, const headers_t *h, http_request_t *req)
+{
+    if (h->transfer_encoding_count > 0) {
+        consume(conn, hdr_len);
+        return decode_chunked(conn, req);
+    }
+    size_t total = hdr_len + h->content_length;
+    while (conn->len < total) {
+        if (fill_buffer(conn) != 0) return -1;
+    }
+    memcpy(req->body, conn->buf + hdr_len, h->content_length);
+    req->body_len = h->content_length;
+    consume(conn, total);
+    return 0;
+}
+
 /* 헤더 끝(CRLF CRLF) 뒤까지의 길이. 아직 없으면 0, 한도 초과면 -1 */
 static long header_block_len(const http_conn_t *conn)
 {
@@ -259,18 +381,13 @@ int http_conn_read_request(http_conn_t *conn, http_request_t *req)
     int status = parse_head(conn->buf, (size_t)hdr_len, req, &h);
     if (status != 0) return reject(req, status);
 
-    size_t total = (size_t)hdr_len + h.content_length;
-    while (conn->len < total) {
-        if (fill_buffer(conn) != 0) return -1;
-    }
-    if (req->route == ROUTE_QUERY && copy_body(conn->buf + hdr_len, h.content_length, req) != 0)
-        return reject(req, 400);
+    status = read_body(conn, (size_t)hdr_len, &h, req);
+    if (status < 0) return -1;
+    if (status == 0 && req->route == ROUTE_QUERY) status = finish_body(req);
+    if (status != 0) return reject(req, status);
 
-    req->keep_alive = h.wants_keep_alive && !h.wants_close;
+    req->keep_alive = !h.wants_close && (h.is_http11 || h.wants_keep_alive);
     req->valid = 1;
-    memmove(conn->buf, conn->buf + total, conn->len - total);
-    conn->len -= total;
-    conn->buf[conn->len] = '\0';
     return 0;
 }
 

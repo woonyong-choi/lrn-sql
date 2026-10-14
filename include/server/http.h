@@ -13,6 +13,11 @@
 #define HTTP_MAX_HEADER_BYTES 8192
 #define HTTP_MAX_BODY_BYTES   4095
 
+/* chunked 본문의 한도: 청크 크기 줄, 트레일러, 청크 틀까지 포함한 원본 바이트 합 */
+#define HTTP_MAX_CHUNK_LINE_BYTES 256
+#define HTTP_MAX_TRAILER_BYTES    1024
+#define HTTP_MAX_CHUNKED_BYTES    65536
+
 /* 요청 라우트 */
 typedef enum {
     ROUTE_UNKNOWN = 0,
