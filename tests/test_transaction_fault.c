@@ -120,6 +120,58 @@ static void scenario(void)
     CHECK(begins == finishes);
 }
 
+/* 자동 발급 세대가 UINT32_MAX에서 소진되면 거절하고, 이미 쓴 번호는 건너뛴다. */
+static void epoch_exhaustion(void)
+{
+    txn_manager_spec_t spec = {.ops = &OPS, .max_guarantee = TXN_GUARANTEE_SYNCED};
+    txn_manager_t *manager = (txn_manager_t *)1;
+    txn_t *writer = NULL;
+
+    epoch_next_auto = UINT32_MAX - 1;
+    spec.epoch = UINT32_MAX - 1;
+    CHECK(txn_manager_open(&spec, &manager) == TXN_OK);   /* 지정으로 먼저 사용 */
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+    spec.epoch = 0;
+    CHECK(txn_manager_open(&spec, &manager) == TXN_OK);   /* 사용한 UINT32_MAX-1을 건너뛰고 UINT32_MAX */
+    CHECK(txn_begin(manager, NULL, &writer) == TXN_OK && (uint32_t)(txn_id(writer) >> 32) == UINT32_MAX);
+    CHECK(txn_release(&writer) == TXN_OK);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+    manager = (txn_manager_t *)1;
+    CHECK(txn_manager_open(&spec, &manager) == TXN_LIMIT && manager == NULL);
+    spec.epoch = UINT32_MAX;
+    CHECK(txn_manager_open(&spec, &manager) == TXN_INVALID && manager == NULL);
+}
+
+/* 할당 실패한 open은 세대 번호를 소모하지 않고, 사용한 번호의 거절은 할당을 남기지 않는다. */
+static void epoch_open_failures(void)
+{
+    txn_manager_spec_t spec = {.ops = &OPS, .max_guarantee = TXN_GUARANTEE_SYNCED, .epoch = 0x60000000u};
+    txn_manager_t *manager = (txn_manager_t *)1;
+    txn_manager_t *dup = (txn_manager_t *)1;
+    long blocks;
+
+    for (long point = 1; point <= 2; point++) {   /* manager, ring 할당 */
+        alloc_count = 0;
+        fail_at = point;
+        live_blocks = 0;
+        CHECK(txn_manager_open(&spec, &manager) == TXN_NOMEM && manager == NULL);
+        CHECK(live_blocks == 0);
+        manager = (txn_manager_t *)1;
+    }
+    fail_at = 0;
+    live_blocks = 0;
+    CHECK(txn_manager_open(&spec, &manager) == TXN_OK);   /* 실패한 시도가 번호를 쓰지 않았다 */
+    blocks = live_blocks;
+    CHECK(blocks == 2);
+    CHECK(txn_manager_open(&spec, &dup) == TXN_INVALID && dup == NULL);   /* 사용한 번호는 거절 */
+    CHECK(live_blocks == blocks);   /* 거절된 open이 할당을 남기지 않는다 */
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+    CHECK(live_blocks == 0);
+    dup = (txn_manager_t *)1;
+    CHECK(txn_manager_open(&spec, &dup) == TXN_INVALID && dup == NULL);   /* close 뒤에도 거절 */
+    CHECK(live_blocks == 0);
+}
+
 int main(void)
 {
     long total;
@@ -138,6 +190,8 @@ int main(void)
         scenario();
         CHECK(live_blocks == 0);
     }
+    epoch_open_failures();
+    epoch_exhaustion();
     if (failures != 0) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;
