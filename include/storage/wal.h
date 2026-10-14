@@ -140,7 +140,7 @@ typedef struct {
 /*
  * 새 로그를 만든다. 목적지가 이미 있으면 WAL_EXISTS이며 바꾸지 않는다. 헤더를 쓰고 파일과 디렉터리를
  * fsync한 뒤 쓰기 핸들을 돌려준다. 헤더가 durable해지기 전에 멈춘 파일(32바이트 이하이고 헤더 영역이
- * 전부 0)은 wal_open이 다시 초기화한다. 그 시점에는 어떤 레코드도 승인되지 않았다.
+ * 전부 0이거나, 32바이트 미만이고 magic으로 시작함)은 쓰기 wal_open이 다시 초기화한다. 그 시점에는 어떤 레코드도 승인되지 않았다.
  */
 wal_status_t wal_create(const char *path, wal_t **out);
 
