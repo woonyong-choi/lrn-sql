@@ -1,0 +1,167 @@
+#ifndef PAGE_FILE_H
+#define PAGE_FILE_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#include "storage/overflow.h"
+
+/*
+ * 새 저장 형식의 파일 I/O 드라이버. OS 페이지 크기와 독립적으로 물리 페이지 8192바이트를 쓴다.
+ * 기존 pager·MINIDB v1/v2 파일과 무관한 독립 API이며, 옛 파일을 열거나 해석하거나 바꾸지 않는다.
+ *
+ * 페이지 배치(모든 정수는 little-endian):
+ *   0..31   envelope: "LRPG", 버전 u16, 종류 u16, page ID u32, table ID u32,
+ *           본문 길이 u32, 예약 8바이트(0), 체크섬 u32(FNV-1a, 체크섬 필드 제외 전체)
+ *   32..8191 본문 8160바이트. 본문 길이 뒤는 0이어야 한다.
+ * page 0, 1은 제어 페이지 두 장이다. 세대 번호가 큰 쪽이 현재 값이고 commit은 작은 쪽에 쓴다.
+ *
+ * 보장하지 않는 것: 이 모듈은 WAL·거래·DB 전체 재시작 복구를 제공하지 않는다.
+ * - 부분 쓰기(torn)는 체크섬으로 탐지하지만, 성공을 돌려준 뒤 저장 장치가 버린 쓰기(lost)는
+ *   옛 페이지가 자기 일관적이라 탐지하지 못한다. 가장 최근 제어 페이지 쓰기가 사라지면
+ *   한 세대 전 상태로 정상 열리며 "게시되지 않은 것"과 구분되지 않는다.
+ * - 제어 페이지 한쪽이 손상됐을 때 다른 쪽으로 열리는 fallback은 open_info.damaged_slots로
+ *   알리지만, 손상된 쪽이 최신이었는지는 알 수 없다.
+ * - 여러 페이지 갱신의 원자성은 없다. commit은 "데이터 페이지 fsync → 제어 페이지 쓰기 → fsync"
+ *   순서만 지킨다.
+ * - 해제한 페이지의 재사용 목록은 메모리에만 있다. 다시 열면 회수되지 않고 새는 공간이 된다.
+ * 단일 스레드 계약이다.
+ */
+
+#define PAGE_FILE_PAGE_BYTES 8192u
+#define PAGE_ENVELOPE_BYTES 32u
+#define PAGE_BODY_BYTES (PAGE_FILE_PAGE_BYTES - PAGE_ENVELOPE_BYTES)
+#define PAGE_FILE_CONTROL_PAGES 2u
+#define PAGE_FILE_NO_PAGE 0u
+#define PAGE_FILE_FORMAT_VERSION 1u
+#define PAGE_FILE_MAX_PAGES 0xFFFFFFF0u
+
+typedef enum {
+    PAGE_KIND_CONTROL = 1,
+    PAGE_KIND_RECORD = 2,
+    PAGE_KIND_OVERFLOW = 3
+} page_kind_t;
+
+typedef enum {
+    PAGE_FILE_OK,
+    PAGE_FILE_INVALID,      /* 인자·범위·이중 해제 */
+    PAGE_FILE_IO,           /* 읽기·쓰기·fsync·열기 실패. errno를 남긴다 */
+    PAGE_FILE_CORRUPT,      /* 체크섬·magic·page ID·길이·세대 불일치, 잘린 파일 */
+    PAGE_FILE_UNSUPPORTED,  /* 알 수 없는 version·페이지 크기·byte order, 옛 MINIDB 파일 */
+    PAGE_FILE_NO_CONTROL,   /* 유효한 제어 페이지가 없음. 게시되지 않은 파일 */
+    PAGE_FILE_EXISTS,       /* 목적지 또는 partial 파일이 이미 있음 */
+    PAGE_FILE_LOCKED,       /* 다른 열린 핸들이 잠금을 쥐고 있음 */
+    PAGE_FILE_NOMEM,
+    PAGE_FILE_LIMIT,        /* 페이지 번호 한계 */
+    PAGE_FILE_PUBLISHED_DIRTY /* 게시는 됐으나 partial 삭제 또는 디렉터리 fsync가 실패함 */
+} page_file_status_t;
+
+/* 테스트가 실패를 주입하는 자리. 기본값은 libc다. */
+typedef struct {
+    ssize_t (*pread)(int fd, void *buf, size_t size, off_t offset);
+    ssize_t (*pwrite)(int fd, const void *buf, size_t size, off_t offset);
+    int (*fsync)(int fd);
+    int (*link)(const char *from, const char *to);
+    int (*unlink)(const char *path);
+} page_file_io_t;
+
+/* 이후 열리는 핸들이 쓰는 I/O 진입점을 바꾼다. NULL이면 libc로 복원한다. 테스트 전용. */
+void page_file_set_default_io(const page_file_io_t *io);
+
+typedef struct page_file page_file_t;
+
+/* 제어 페이지가 담는 현재 상태. */
+typedef struct {
+    uint64_t generation;          /* commit마다 1씩 오른다. 첫 commit이 1이다 */
+    uint32_t page_count;          /* 제어 페이지 포함 높은 수위 */
+    uint32_t catalog_head;        /* 카탈로그 overflow 체인 head. 없으면 PAGE_FILE_NO_PAGE */
+    uint32_t catalog_size;
+    uint64_t catalog_generation;
+} page_file_control_t;
+
+typedef struct {
+    uint32_t damaged_slots;       /* 손상으로 쓰지 못한 제어 슬롯 수. 0이 아니면 fallback이다 */
+    uint32_t blank_slots;         /* 한 번도 쓰이지 않은(전부 0) 제어 슬롯 수 */
+} page_file_open_info_t;
+
+/*
+ * 새 파일을 만든다. 목적지는 path이고 실제 쓰기는 "path.partial"에 한다. partial은 O_EXCL로 만든
+ * 뒤 배타 잠금을 잡고, 제어 페이지 두 장을 0으로 채운다. 첫 commit 전에는 어떤 열기도 성공하지
+ * 않는다. 목적지나 partial이 이미 있으면 PAGE_FILE_EXISTS이며 어느 쪽도 바꾸지 않는다.
+ * publish 전에 close하면 partial을 지운다.
+ */
+page_file_status_t page_file_create(const char *path, page_file_t **out);
+
+/*
+ * 첫 commit이 끝난 새 파일을 목적지 이름으로 게시한다. link()는 목적지가 있으면 실패하므로
+ * rename과 달리 다른 프로세스가 먼저 만든 목적지를 덮어쓰지 않는다. 그 뒤 partial을 지우고
+ * 디렉터리를 fsync한다. 실패하면 목적지를 만들지 않았거나(EXISTS, IO, UNSUPPORTED) 핸들은
+ * 여전히 partial을 가리킨다. PAGE_FILE_PUBLISHED_DIRTY는 목적지가 보이지만 정리나 이름 fsync가
+ * 실패했다는 뜻이며 이름의 내구성을 주장할 수 없다.
+ */
+page_file_status_t page_file_publish(page_file_t *file);
+
+/*
+ * 게시된 파일을 연다. 쓰기 전에는 아무것도 쓰지 않으며 version·길이·header가 맞지 않으면
+ * 파일을 바꾸지 않고 거절한다. writable이면 배타, 아니면 공유 잠금을 non-blocking으로 잡는다.
+ * 옛 MINIDB 파일은 PAGE_FILE_UNSUPPORTED다. 어떤 경우에도 자동으로 변환하지 않는다.
+ */
+page_file_status_t page_file_open(const char *path, bool writable, page_file_t **out,
+                                  page_file_open_info_t *info);
+/* 핸들을 닫고 잠금을 푼다. 게시 전이면 partial을 지운다. close(2) 실패는 IO다. */
+page_file_status_t page_file_close(page_file_t *file);
+
+const page_file_control_t *page_file_control(const page_file_t *file);
+bool page_file_is_published(const page_file_t *file);
+/* 이 파일을 자기 호출자가 알 수 있게 partial 경로를 돌려준다. 게시 뒤에는 NULL. */
+const char *page_file_partial_path(const page_file_t *file);
+
+/*
+ * 본문 8160바이트를 읽는다. 종류와 table ID가 기대와 다르면 CORRUPT다. page_id는 제어 페이지를
+ * 제외한 할당된 범위여야 한다. 실패하면 body를 바꾸지 않는다.
+ */
+page_file_status_t page_file_read(page_file_t *file, uint32_t page_id, page_kind_t kind,
+                                  uint32_t table_id, uint8_t body[PAGE_BODY_BYTES]);
+page_file_status_t page_file_write(page_file_t *file, uint32_t page_id, page_kind_t kind,
+                                   uint32_t table_id, const uint8_t body[PAGE_BODY_BYTES]);
+
+/*
+ * 새 페이지 번호를 받는다. 마지막 commit이 이미 놓아 준 페이지를 먼저 재사용하고 없으면 높은
+ * 수위를 올린다. 이 시점에는 파일에 아무것도 쓰지 않으며 commit된 제어 페이지가 가리키는
+ * 페이지는 절대 돌려주지 않는다. 실패하면 상태를 바꾸지 않는다.
+ */
+page_file_status_t page_file_alloc(page_file_t *file, uint32_t *page_id);
+/*
+ * 페이지를 놓는다. 곧바로 재사용하지 않고, 이 페이지를 더는 가리키지 않는 제어 페이지가 commit된
+ * 뒤에야 alloc이 돌려줄 수 있다. 호출자는 가리키던 참조를 바꾼 다음에 release한다.
+ * commit이 실패하면 놓은 페이지는 계속 보류 상태이며 이전 제어 페이지는 그대로 유효하다.
+ */
+page_file_status_t page_file_release(page_file_t *file, uint32_t page_id);
+size_t page_file_pending_release_count(const page_file_t *file);
+size_t page_file_reusable_count(const page_file_t *file);
+
+/* 다음 commit이 제어 페이지에 쓸 카탈로그 참조를 정한다. commit 전까지 디스크에 닿지 않는다. */
+page_file_status_t page_file_stage_catalog(page_file_t *file, uint32_t head, uint32_t size,
+                                           uint64_t catalog_generation);
+/*
+ * 데이터 fsync → 오래된 제어 슬롯에 새 세대 쓰기 → fsync. 성공해야 보류 중이던 해제 페이지가
+ * 재사용 가능해진다. 실패하면 제어 페이지의 현재 세대와 보류 목록은 그대로이다. fsync가 한 번
+ * 실패한 핸들은 커널이 오류를 버렸을 수 있어 이후 commit을 거절한다.
+ */
+page_file_status_t page_file_commit(page_file_t *file);
+
+/*
+ * overflow 어댑터. 본문 8160바이트를 한 overflow 페이지로 쓴다. ctx 저장소는 호출자가 소유하며
+ * 반환된 io가 쓰이는 동안 살아 있어야 한다. 해제는 page_file_release의 보류 규칙을 따른다.
+ */
+typedef struct {
+    page_file_t *file;
+    uint32_t table_id;
+} page_file_overflow_ctx_t;
+
+overflow_io_t page_file_overflow_io(page_file_overflow_ctx_t *ctx, page_file_t *file,
+                                    uint32_t table_id);
+
+#endif
