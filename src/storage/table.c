@@ -91,33 +91,43 @@ static uint16_t available_space(pager_t *pager, heap_page_header_t *hph)
  *
  * 반환값: 0 = 탐색 완료 (*out_pid가 0이면 적합한 페이지 없음), -1 = 페이지 읽기 실패
  */
-static int find_heap_page(pager_t *pager, uint16_t row_size, uint32_t *out_pid)
+static int find_heap_page(pager_t *pager, uint16_t row_size, uint32_t *out_pid,
+                          uint32_t *out_full_tail)
 {
     *out_pid = 0;
+    *out_full_tail = 0;
     /*
      * 순차 INSERT 최적화:
      * 대부분의 append workload에서는 마지막 힙 페이지만 보면 충분하다.
      * 마지막 페이지가 가득 찼을 때만 free slot 탐색을 위해 전체 체인을 본다.
+     *
+     * tail은 한 번만 읽어 지역 변수에 고정한다. 읽는 사이 다른 스레드가 tail을 늘려도
+     * latch를 잡은 페이지와 푸는 페이지, 반환하는 페이지가 모두 같아야 다른 페이지의
+     * latch·pin을 풀어 원래 페이지를 잠근 채 남기는 일이 없다.
      */
-    if (pager->last_heap_page_id != 0) {
-        uint8_t *tail_page = pager_get_page_rlatch(pager, pager->last_heap_page_id);
+    uint32_t tail = atomic_load_explicit(&pager->last_heap_page_id, memory_order_acquire);
+    MINIDB_HOOK(MINIDB_HOOK_TAIL_READ, pager, tail);
+    if (tail != 0) {
+        uint8_t *tail_page = pager_get_page_rlatch(pager, tail);
         if (tail_page == NULL) {
             return -1;
         }
         heap_page_header_t tail_hph;
         memcpy(&tail_hph, tail_page, sizeof(tail_hph));
-        pager_unlatch_r(pager, pager->last_heap_page_id);
+        pager_unlatch_r(pager, tail);
 
         if (tail_hph.free_slot_head != SLOT_NONE) {
-            *out_pid = pager->last_heap_page_id;
+            *out_pid = tail;
             return 0;
         }
 
         uint16_t need = (uint16_t)(sizeof(slot_t) + row_size);
         if (available_space(pager, &tail_hph) >= need) {
-            *out_pid = pager->last_heap_page_id;
+            *out_pid = tail;
             return 0;
         }
+        /* 이 tail이 가득 찬 것을 봤다. 확장할 때 아직 같은 tail인지 확인하는 기준이다 */
+        *out_full_tail = tail;
     }
 
     /*
@@ -130,7 +140,7 @@ static int find_heap_page(pager_t *pager, uint16_t row_size, uint32_t *out_pid)
      * 도입 후 재측정, docs/benchmark-postgres.md 참고).
      */
 #ifndef MINIDB_DISABLE_FREE_HINT
-    if (!pager->heap_may_have_free_slots) {
+    if (!atomic_load_explicit(&pager->heap_may_have_free_slots, memory_order_relaxed)) {
         return 0; /* 삭제된 적 없음 → 재활용할 슬롯도 없음 */
     }
 #endif
@@ -140,7 +150,7 @@ static int find_heap_page(pager_t *pager, uint16_t row_size, uint32_t *out_pid)
      * 다시 걷는다는 뜻이다. 회귀 테스트(tests/test_step3_regression.c)가
      * DELETE 없는 순차 INSERT에서 이 값이 0에 머무는지 검사한다.
      */
-    pager->heap_chain_rescan_count++;
+    atomic_fetch_add_explicit(&pager->heap_chain_rescan_count, 1, memory_order_relaxed);
 
     uint32_t pid = pager->header.first_heap_page_id;
     while (pid != 0) {
@@ -163,7 +173,7 @@ static int find_heap_page(pager_t *pager, uint16_t row_size, uint32_t *out_pid)
 
 #ifndef MINIDB_DISABLE_FREE_HINT
     /* 체인 전체에 빈 슬롯이 없음이 확인됨 → 다음 DELETE 전까지 탐색 생략 */
-    pager->heap_may_have_free_slots = false;
+    atomic_store_explicit(&pager->heap_may_have_free_slots, false, memory_order_relaxed);
 #endif
     return 0; /* 적합한 페이지 없음 */
 }
@@ -171,28 +181,39 @@ static int find_heap_page(pager_t *pager, uint16_t row_size, uint32_t *out_pid)
 /*
  * alloc_heap_page - 새 힙 페이지를 만들어 힙 체인 끝에 잇고 그 page_id 를 준다.
  *
- * header_lock 으로 직렬화한다: 여러 스레드가 동시에 tail 을 늘리면
- * last_heap_page_id 의 읽기→쓰기 사이에 레이스가 생겨 페이지가 체인에서
- * 누락될 수 있다 (docs/sql/13-concurrency-issues.md §5 참조).
+ * full_tail은 호출자가 가득 찼다고 본 페이지다. tail_lock 안에서 tail이 아직 full_tail일 때만
+ * 새로 붙이고, 이미 다른 스레드가 늘렸다면 새로 할당하지 않고 그 tail을 돌려줘 호출자가 다시
+ * 시도하게 한다. 같은 tail이 찬 것을 본 스레드마다 페이지를 하나씩 붙이는 일을 막는다.
  *
- * Lock 순서는 header_lock → page wlatch 한 방향뿐이다. 삽입 경로는 wlatch 를
- * 먼저 놓은 뒤 이 함수를 부르므로 역방향이 생기지 않아 데드락이 없다.
+ * tail_lock 으로 직렬화한다: 여러 스레드가 동시에 tail 을 늘리면 last_heap_page_id 의
+ * 읽기→쓰기 사이에 레이스가 생겨 페이지가 체인에서 누락될 수 있다
+ * (docs/sql/13-concurrency-issues.md §5 참조).
+ *
+ * Lock 순서는 tail_lock → page wlatch → pager_mutex → header_lock 한 방향뿐이다(pager.h).
+ * 삽입 경로는 wlatch 를 먼저 놓은 뒤 이 함수를 부르므로 역방향이 생기지 않는다.
  *
  * 실패하면 0을 반환하고 체인은 바뀌지 않는다. 이미 할당한 페이지는 되돌려 준다.
  */
-static uint32_t alloc_heap_page(pager_t *pager)
+static uint32_t alloc_heap_page(pager_t *pager, uint32_t full_tail)
 {
-    pthread_mutex_lock(&pager->header_lock);
+    MINIDB_HOOK(MINIDB_HOOK_TAIL_LOCK_WAIT, pager, full_tail);
+    pager_tail_lock(pager);
+
+    uint32_t prev_pid = atomic_load_explicit(&pager->last_heap_page_id, memory_order_relaxed);
+    if (prev_pid != 0 && prev_pid != full_tail) {
+        pager_tail_unlock(pager);
+        return prev_pid;
+    }
 
     uint32_t pid = pager_alloc_page(pager);
     if (pid == 0) {
-        pthread_mutex_unlock(&pager->header_lock);
+        pager_tail_unlock(pager);
         return 0;
     }
     uint8_t *page = pager_get_page_wlatch(pager, pid);
     if (page == NULL) {
         pager_free_page(pager, pid);
-        pthread_mutex_unlock(&pager->header_lock);
+        pager_tail_unlock(pager);
         return 0;
     }
     heap_page_header_t hph = {
@@ -208,12 +229,12 @@ static uint32_t alloc_heap_page(pager_t *pager)
     pager_unlatch_w(pager, pid);
 
     /* 기존 tail 에 연결 */
-    uint32_t prev_pid = pager->last_heap_page_id;
+    MINIDB_HOOK(MINIDB_HOOK_TAIL_LINK, pager, pid);
     if (prev_pid != 0) {
         uint8_t *pp = pager_get_page_wlatch(pager, prev_pid);
         if (pp == NULL) {
             pager_free_page(pager, pid);
-            pthread_mutex_unlock(&pager->header_lock);
+            pager_tail_unlock(pager);
             return 0;
         }
         heap_page_header_t ph;
@@ -223,9 +244,10 @@ static uint32_t alloc_heap_page(pager_t *pager)
         pager_mark_dirty(pager, prev_pid);
         pager_unlatch_w(pager, prev_pid);
     }
-    pager->last_heap_page_id = pid;
+    MINIDB_HOOK(MINIDB_HOOK_TAIL_PUBLISH, pager, pid);
+    atomic_store_explicit(&pager->last_heap_page_id, pid, memory_order_release);
 
-    pthread_mutex_unlock(&pager->header_lock);
+    pager_tail_unlock(pager);
     return pid;
 }
 
@@ -265,12 +287,13 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
 {
     row_ref_t ref = {0, 0};
     uint32_t pid;
+    uint32_t full_tail;
 
-    if (find_heap_page(pager, row_size, &pid) != 0) {
+    if (find_heap_page(pager, row_size, &pid, &full_tail) != 0) {
         return ref;
     }
     if (pid == 0) {
-        pid = alloc_heap_page(pager);
+        pid = alloc_heap_page(pager, full_tail);
         if (pid == 0) {
             return ref;
         }
@@ -296,8 +319,8 @@ retry_insert:;
         uint16_t need = (uint16_t)(sizeof(slot_t) + row_size);
         if (available_space(pager, &hph) < need) {
             pager_unlatch_w(pager, pid);
-            /* 공간 부족 — 새 페이지를 이어 붙이고 재시도 */
-            pid = alloc_heap_page(pager);
+            /* 공간 부족 — 새 페이지를 이어 붙이고 재시도. 이미 늘어났으면 그 tail로 재시도 */
+            pid = alloc_heap_page(pager, pid);
             if (pid == 0) {
                 return ref;
             }
