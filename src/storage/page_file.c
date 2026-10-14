@@ -721,27 +721,29 @@ page_file_status_t page_file_commit(page_file_t *file)
 static bool adapter_allocate(void *context, uint32_t *page_id)
 {
     page_file_overflow_ctx_t *ctx = context;
-    return page_file_alloc(ctx->file, page_id) == PAGE_FILE_OK;
+    ctx->last_status = page_file_alloc(ctx->file, page_id);
+    return ctx->last_status == PAGE_FILE_OK;
 }
 
 static bool adapter_release(void *context, uint32_t page_id)
 {
     page_file_overflow_ctx_t *ctx = context;
-    return page_file_release(ctx->file, page_id) == PAGE_FILE_OK;
+    ctx->last_status = page_file_release(ctx->file, page_id);
+    return ctx->last_status == PAGE_FILE_OK;
 }
 
 static bool adapter_read(void *context, uint32_t page_id, uint8_t *page)
 {
     page_file_overflow_ctx_t *ctx = context;
-    return page_file_read(ctx->file, page_id, PAGE_KIND_OVERFLOW, ctx->table_id, page) ==
-           PAGE_FILE_OK;
+    ctx->last_status = page_file_read(ctx->file, page_id, PAGE_KIND_OVERFLOW, ctx->table_id, page);
+    return ctx->last_status == PAGE_FILE_OK;
 }
 
 static bool adapter_write(void *context, uint32_t page_id, const uint8_t *page)
 {
     page_file_overflow_ctx_t *ctx = context;
-    return page_file_write(ctx->file, page_id, PAGE_KIND_OVERFLOW, ctx->table_id, page) ==
-           PAGE_FILE_OK;
+    ctx->last_status = page_file_write(ctx->file, page_id, PAGE_KIND_OVERFLOW, ctx->table_id, page);
+    return ctx->last_status == PAGE_FILE_OK;
 }
 
 overflow_io_t page_file_overflow_io(page_file_overflow_ctx_t *ctx, page_file_t *file,
@@ -749,6 +751,7 @@ overflow_io_t page_file_overflow_io(page_file_overflow_ctx_t *ctx, page_file_t *
 {
     ctx->file = file;
     ctx->table_id = table_id;
+    ctx->last_status = PAGE_FILE_OK;
     return (overflow_io_t){ctx, PAGE_BODY_BYTES, adapter_allocate, adapter_release,
                            adapter_read, adapter_write};
 }
