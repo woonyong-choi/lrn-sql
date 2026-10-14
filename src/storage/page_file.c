@@ -14,12 +14,16 @@ _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
                "record page body must equal the page_file body");
 
 #define EINTR_RETRY_MAX 100
-#define CONTROL_BODY_BYTES 52u
+#define CONTROL_BODY_V1_BYTES 52u
+#define CONTROL_BODY_V2_BYTES 76u
 #define BYTE_ORDER_MARK 0x01020304u
 #define PARTIAL_SUFFIX ".partial"
 
-/* 제어 본문 배치: magic 8, 형식 u32, 페이지 크기 u32, byte order u32, 세대 u64,
- * page_count u32, 예약 u32(0), 카탈로그 head u32, size u32, 카탈로그 세대 u64 */
+/* 제어 본문 배치(v1, 52바이트): magic 8, 형식 u32, 페이지 크기 u32, byte order u32, 세대 u64,
+ * page_count u32, 예약 u32(0), 카탈로그 head u32, size u32, 카탈로그 세대 u64
+ * v2(76바이트)는 같은 52바이트 앞부분에 형식만 2이고 뒤에 applied_lsn u64(52), wal_file_id u64(60),
+ * durable_epoch u32(68), 확장 flags u32(72)가 붙는다. flags bit0은 "이 페이지를 쓸 때 직전 현재 페이지도 v2였다"이며
+ * 나머지 비트는 0이어야 한다. v1의 예약 u32(32)는 v2에서도 0이어야 한다. */
 static const uint8_t FILE_MAGIC[8] = {'L', 'R', 'S', 'Q', 'L', 'D', 'B', 0};
 
 struct page_file {
@@ -37,6 +41,10 @@ struct page_file {
     uint32_t staged_head;
     uint32_t staged_size;
     uint64_t staged_generation;
+    uint32_t staged_format;
+    uint64_t staged_applied_lsn;
+    uint64_t staged_wal_file_id;
+    uint32_t staged_epoch;
     uint32_t *pending;
     size_t pending_len, pending_cap;
     uint32_t *aging;      /* 직전 commit이 더는 가리키지 않게 된 페이지. 한 번 더 commit해야 재사용된다 */
@@ -169,6 +177,11 @@ static bool is_blank(const uint8_t *page)
     return true;
 }
 
+static uint32_t control_body_bytes(uint32_t version)
+{
+    return version == PAGE_FILE_DURABLE_FORMAT_VERSION ? CONTROL_BODY_V2_BYTES : CONTROL_BODY_V1_BYTES;
+}
+
 static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file_control_t *out)
 {
     if (is_blank(page)) return SLOT_BLANK;
@@ -176,12 +189,16 @@ static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file
     slot_state_t state = decode_envelope(page, slot, &envelope);
     if (state != SLOT_VALID) return state;
     if (envelope.kind != PAGE_KIND_CONTROL || envelope.table_id != 0 ||
-        envelope.body_len != CONTROL_BODY_BYTES) {
+        (envelope.body_len != CONTROL_BODY_V1_BYTES && envelope.body_len != CONTROL_BODY_V2_BYTES)) {
         return SLOT_DAMAGED;
     }
     const uint8_t *body = page + PAGE_ENVELOPE_BYTES;
     if (memcmp(body, FILE_MAGIC, sizeof(FILE_MAGIC)) != 0) return SLOT_UNSUPPORTED;
-    if (get_u32(body + 8) != PAGE_FILE_FORMAT_VERSION) return SLOT_UNSUPPORTED;
+    uint32_t version = get_u32(body + 8);
+    if (version != PAGE_FILE_FORMAT_VERSION && version != PAGE_FILE_DURABLE_FORMAT_VERSION) {
+        return SLOT_UNSUPPORTED;
+    }
+    if (envelope.body_len != control_body_bytes(version)) return SLOT_DAMAGED;
     if (get_u32(body + 12) != PAGE_FILE_PAGE_BYTES) return SLOT_UNSUPPORTED;
     if (get_u32(body + 16) != BYTE_ORDER_MARK) return SLOT_UNSUPPORTED;
     page_file_control_t control = {
@@ -190,8 +207,18 @@ static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file
         .catalog_head = get_u32(body + 36),
         .catalog_size = get_u32(body + 40),
         .catalog_generation = get_u64(body + 44),
+        .format_version = version,
     };
     if (get_u32(body + 32) != 0) return SLOT_DAMAGED;
+    if (version == PAGE_FILE_DURABLE_FORMAT_VERSION) {
+        uint32_t flags = get_u32(body + 72);
+        if ((flags & ~1u) != 0) return SLOT_UNSUPPORTED; /* 알 수 없는 확장 기능 */
+        control.durable_ready = (flags & 1u) != 0;
+        control.applied_lsn = get_u64(body + 52);
+        control.wal_file_id = get_u64(body + 60);
+        control.durable_epoch = get_u32(body + 68);
+        if (control.wal_file_id == 0) return SLOT_DAMAGED;
+    }
     if (control.generation == 0 || control.generation % 2 != slot) return SLOT_DAMAGED;
     if (control.page_count < PAGE_FILE_CONTROL_PAGES || control.page_count > PAGE_FILE_MAX_PAGES) {
         return SLOT_DAMAGED;
@@ -210,9 +237,9 @@ static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file
 
 static void encode_control_body(uint8_t *body, const page_file_control_t *control)
 {
-    memset(body, 0, CONTROL_BODY_BYTES);
+    memset(body, 0, CONTROL_BODY_V2_BYTES);
     memcpy(body, FILE_MAGIC, sizeof(FILE_MAGIC));
-    put_u32(body + 8, PAGE_FILE_FORMAT_VERSION);
+    put_u32(body + 8, control->format_version);
     put_u32(body + 12, PAGE_FILE_PAGE_BYTES);
     put_u32(body + 16, BYTE_ORDER_MARK);
     put_u64(body + 20, control->generation);
@@ -220,6 +247,12 @@ static void encode_control_body(uint8_t *body, const page_file_control_t *contro
     put_u32(body + 36, control->catalog_head);
     put_u32(body + 40, control->catalog_size);
     put_u64(body + 44, control->catalog_generation);
+    if (control->format_version == PAGE_FILE_DURABLE_FORMAT_VERSION) {
+        put_u64(body + 52, control->applied_lsn);
+        put_u64(body + 60, control->wal_file_id);
+        put_u32(body + 68, control->durable_epoch);
+        put_u32(body + 72, control->durable_ready ? 1u : 0u);
+    }
 }
 
 /* ── 저수준 I/O: EINTR·짧은 I/O·EOF·ENOSPC를 처리한다 ── */
@@ -284,6 +317,7 @@ static page_file_t *new_handle(int fd, bool writable)
     file->fd = fd;
     file->writable = writable;
     file->io = g_default_io;
+    file->staged_format = PAGE_FILE_FORMAT_VERSION; /* enable_durable 전에는 v1로 쓴다 */
     return file;
 }
 
@@ -554,6 +588,10 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
     file->staged_head = chosen.catalog_head;
     file->staged_size = chosen.catalog_size;
     file->staged_generation = chosen.catalog_generation;
+    file->staged_format = chosen.format_version;
+    file->staged_applied_lsn = chosen.applied_lsn;
+    file->staged_wal_file_id = chosen.wal_file_id;
+    file->staged_epoch = chosen.durable_epoch;
     if (info != NULL) *info = local_info;
     *out = file;
     return PAGE_FILE_OK;
@@ -733,6 +771,66 @@ page_file_status_t page_file_stage_catalog(page_file_t *file, uint32_t head, uin
     return PAGE_FILE_OK;
 }
 
+page_file_status_t page_file_enable_durable(page_file_t *file, uint64_t wal_file_id, uint32_t durable_epoch)
+{
+    if (file == NULL || !file->writable || file->poisoned || wal_file_id == 0) return PAGE_FILE_INVALID;
+    if (file->staged_format == PAGE_FILE_DURABLE_FORMAT_VERSION) {
+        bool same = file->staged_wal_file_id == wal_file_id && file->staged_epoch == durable_epoch;
+        return same ? PAGE_FILE_OK : PAGE_FILE_INVALID;
+    }
+    file->staged_format = PAGE_FILE_DURABLE_FORMAT_VERSION;
+    file->staged_wal_file_id = wal_file_id;
+    file->staged_epoch = durable_epoch;
+    file->staged_applied_lsn = 0;
+    return PAGE_FILE_OK;
+}
+
+bool page_file_durable_ready(const page_file_t *file)
+{
+    return file != NULL && file->committed.durable_ready;
+}
+
+page_file_status_t page_file_stage_applied_lsn(page_file_t *file, uint64_t applied_lsn)
+{
+    if (file == NULL || !file->writable || file->poisoned) return PAGE_FILE_INVALID;
+    if (file->staged_format != PAGE_FILE_DURABLE_FORMAT_VERSION) return PAGE_FILE_INVALID;
+    if (applied_lsn < file->committed.applied_lsn) return PAGE_FILE_INVALID;
+    if (applied_lsn > file->committed.applied_lsn && !file->committed.durable_ready) return PAGE_FILE_INVALID;
+    file->staged_applied_lsn = applied_lsn;
+    return PAGE_FILE_OK;
+}
+
+page_file_status_t page_file_stage_durable_epoch(page_file_t *file, uint32_t durable_epoch)
+{
+    if (file == NULL || !file->writable || file->poisoned) return PAGE_FILE_INVALID;
+    if (file->staged_format != PAGE_FILE_DURABLE_FORMAT_VERSION || !file->committed.durable_ready) {
+        return PAGE_FILE_INVALID;
+    }
+    if (durable_epoch == file->staged_epoch && durable_epoch > file->committed.durable_epoch) return PAGE_FILE_OK;
+    if (durable_epoch <= file->committed.durable_epoch) return PAGE_FILE_INVALID;
+    file->staged_epoch = durable_epoch;
+    return PAGE_FILE_OK;
+}
+
+page_file_status_t page_file_next_durable_epoch(const page_file_t *file, uint32_t *next)
+{
+    if (file == NULL || next == NULL) return PAGE_FILE_INVALID;
+    if (file->committed.format_version != PAGE_FILE_DURABLE_FORMAT_VERSION) return PAGE_FILE_INVALID;
+    if (file->committed.durable_epoch == UINT32_MAX) return PAGE_FILE_LIMIT;
+    *next = file->committed.durable_epoch + 1;
+    return PAGE_FILE_OK;
+}
+
+page_file_status_t page_file_check_wal_identity(const page_file_t *file, uint64_t wal_file_id)
+{
+    if (file == NULL || wal_file_id == 0) return PAGE_FILE_INVALID;
+    const page_file_control_t *c = &file->committed;
+    if (c->format_version != PAGE_FILE_DURABLE_FORMAT_VERSION || c->wal_file_id != wal_file_id) {
+        return PAGE_FILE_MISMATCH;
+    }
+    return PAGE_FILE_OK;
+}
+
 page_file_status_t page_file_commit(page_file_t *file)
 {
     if (file == NULL || !file->writable) return PAGE_FILE_INVALID;
@@ -764,12 +862,19 @@ page_file_status_t page_file_commit(page_file_t *file)
         .catalog_head = file->staged_head,
         .catalog_size = file->staged_size,
         .catalog_generation = file->staged_generation,
+        .format_version = file->staged_format,
+        .applied_lsn = file->staged_applied_lsn,
+        .wal_file_id = file->staged_wal_file_id,
+        .durable_epoch = file->staged_epoch,
+        /* 직전 현재 페이지도 v2였을 때만 ready다. 첫 v2 commit은 아직 ready가 아니다 */
+        .durable_ready = file->staged_format == PAGE_FILE_DURABLE_FORMAT_VERSION &&
+                         file->committed.format_version == PAGE_FILE_DURABLE_FORMAT_VERSION,
     };
-    uint8_t body[CONTROL_BODY_BYTES];
+    uint8_t body[CONTROL_BODY_V2_BYTES];
     uint8_t page[PAGE_FILE_PAGE_BYTES];
     encode_control_body(body, &next);
     uint32_t slot = (uint32_t)(next.generation % 2);
-    encode_page(page, PAGE_KIND_CONTROL, slot, 0, CONTROL_BODY_BYTES, body);
+    encode_page(page, PAGE_KIND_CONTROL, slot, 0, control_body_bytes(next.format_version), body);
     /* 여기서부터는 실패해도 디스크에 새 세대가 남았는지 알 수 없다. */
     file->commit_outcome = PAGE_FILE_COMMIT_UNKNOWN;
     status = write_full(file, page, sizeof(page), (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
