@@ -52,6 +52,20 @@ static int consume_word(const char **input, const char *word)
     return 0;
 }
 
+/* 공백·NUL·stops 앞까지 읽어 out에 담는다. 길이를 반환하고, capacity를 넘으면 -1 */
+static int take_token(const char **input, char *out, size_t capacity, const char *stops)
+{
+    const char *p = *input;
+    size_t len = 0;
+    while (*p && !isspace((unsigned char)*p) && strchr(stops, *p) == NULL) {
+        if (len + 1 >= capacity) return -1;
+        out[len++] = *p++;
+    }
+    out[len] = '\0';
+    *input = p;
+    return (int)len;
+}
+
 static int parse_string(const char **input, char *out, size_t capacity)
 {
     const char *p = *input;
@@ -92,13 +106,8 @@ static int parse_where(const char *p, statement_t *stmt, const char **end)
     if (strcasecmp_n(p, "WHERE", 5) != 0) return 0;
     p = skip_ws(p + 5);
 
-    int i = 0;
-    while (*p && *p != '=' && *p != '!' && *p != '<' && *p != '>'
-           && !isspace((unsigned char)*p) && i < 31) {
-        stmt->pred_field[i++] = *p++;
-    }
-    stmt->pred_field[i] = '\0';
-    if (i == 0) return -1;
+    int i = take_token(&p, stmt->pred_field, sizeof(stmt->pred_field), "=!<>");
+    if (i <= 0) return -1;
     p = skip_ws(p);
 
     if (strcasecmp_n(p, "BETWEEN", 7) == 0 && isspace((unsigned char)p[7])) {
@@ -106,20 +115,12 @@ static int parse_where(const char *p, statement_t *stmt, const char **end)
             || strlen(stmt->pred_field) != 2) return -1;
         p = skip_ws(p + 7);
         char lo_buf[64];
-        int j = 0;
-        while (*p && *p != ';' && !isspace((unsigned char)*p) && j < 63)
-            lo_buf[j++] = *p++;
-        lo_buf[j] = '\0';
-        if (j == 0) return -1;
+        if (take_token(&p, lo_buf, sizeof(lo_buf), ";") <= 0) return -1;
         p = skip_ws(p);
         if (strcasecmp_n(p, "AND", 3) != 0) return -1;
         p = skip_ws(p + 3);
         char hi_buf[64];
-        j = 0;
-        while (*p && *p != ';' && !isspace((unsigned char)*p) && j < 63)
-            hi_buf[j++] = *p++;
-        hi_buf[j] = '\0';
-        if (j == 0) return -1;
+        if (take_token(&p, hi_buf, sizeof(hi_buf), ";") <= 0) return -1;
         stmt->predicate_kind = PREDICATE_ID_RANGE;
         if (parse_id_value(lo_buf, &stmt->range_lo) != 0
             || parse_id_value(hi_buf, &stmt->range_hi) != 0) return -1;
@@ -148,15 +149,11 @@ static int parse_where(const char *p, statement_t *stmt, const char **end)
     }
     p = skip_ws(p);
 
-    i = 0;
     if (*p == '\'') {
         if (parse_string(&p, stmt->pred_value, sizeof(stmt->pred_value)) != 0)
             return -1;
-    } else {
-        while (*p && *p != ';' && !isspace((unsigned char)*p) && i < 255)
-            stmt->pred_value[i++] = *p++;
-        stmt->pred_value[i] = '\0';
-        if (i == 0) return -1;
+    } else if (take_token(&p, stmt->pred_value, sizeof(stmt->pred_value), ";") <= 0) {
+        return -1;
     }
 
     bool is_id = (strcasecmp_n(stmt->pred_field, "id", 2) == 0
@@ -194,11 +191,8 @@ static int parse_order_limit(const char *p, statement_t *stmt)
         p = skip_ws(p + 5);
         if (strcasecmp_n(p, "BY", 2) != 0) return -1;
         p = skip_ws(p + 2);
-        int i = 0;
-        while (*p && !isspace((unsigned char)*p) && i < 31)
-            stmt->order_by_field[i++] = *p++;
-        stmt->order_by_field[i] = '\0';
-        if (i == 0) return -1;
+        if (take_token(&p, stmt->order_by_field, sizeof(stmt->order_by_field), "") <= 0)
+            return -1;
         stmt->has_order_by = true;
         p = skip_ws(p);
         if (*p && strcasecmp_n(p, "DESC", 4) == 0) {
@@ -223,16 +217,28 @@ static int parse_order_limit(const char *p, statement_t *stmt)
     return at_end(p);
 }
 
+/* "(n)" 형태의 VARCHAR 크기. 숫자가 아니거나 0·uint16 범위 초과면 -1 */
+static int parse_varchar_size(const char **input, uint16_t *size)
+{
+    const char *p = skip_ws(*input + 1);
+    unsigned long value = 0;
+    if (!isdigit((unsigned char)*p)) return -1;
+    while (isdigit((unsigned char)*p)) {
+        value = value * 10 + (unsigned long)(*p++ - '0');
+        if (value > UINT16_MAX) return -1;
+    }
+    p = skip_ws(p);
+    if (*p != ')' || value == 0) return -1;
+    *size = (uint16_t)value;
+    *input = p + 1;
+    return 0;
+}
+
 /* ── CREATE TABLE ── */
 static int parse_create_table(const char *input, statement_t *stmt)
 {
     const char *p = skip_ws(input);
-    char tname[32] = {0};
-    int i = 0;
-    while (*p && !isspace((unsigned char)*p) && *p != '(' && i < 31)
-        tname[i++] = *p++;
-    tname[i] = '\0';
-    strncpy(stmt->table_name, tname, 31);
+    if (take_token(&p, stmt->table_name, sizeof(stmt->table_name), "(") < 0) return -1;
 
     p = skip_ws(p);
     if (*p != '(') return -1;
@@ -246,31 +252,20 @@ static int parse_create_table(const char *input, statement_t *stmt)
 
         column_def_t *cd = &stmt->col_defs[stmt->col_count];
         memset(cd, 0, sizeof(*cd));
-        i = 0;
-        while (*p && !isspace((unsigned char)*p) && *p != ',' && *p != ')' && i < 31)
-            cd->name[i++] = *p++;
-        cd->name[i] = '\0';
+        if (take_token(&p, cd->name, sizeof(cd->name), ",)") < 0) return -1;
         p = skip_ws(p);
 
         char type_str[32] = {0};
-        i = 0;
-        while (*p && *p != ',' && *p != ')' && *p != '(' && !isspace((unsigned char)*p) && i < 31)
-            type_str[i++] = *p++;
-        type_str[i] = '\0';
+        if (take_token(&p, type_str, sizeof(type_str), ",()") < 0) return -1;
 
         if (strcasecmp_n(type_str, "INT", 3) == 0 && strlen(type_str) == 3) {
             cd->type = COL_TYPE_INT; cd->size = 4;
-        } else if (strcasecmp_n(type_str, "BIGINT", 6) == 0) {
+        } else if (strcasecmp_n(type_str, "BIGINT", 6) == 0 && strlen(type_str) == 6) {
             cd->type = COL_TYPE_BIGINT; cd->size = 8;
-        } else if (strcasecmp_n(type_str, "VARCHAR", 7) == 0) {
+        } else if (strcasecmp_n(type_str, "VARCHAR", 7) == 0 && strlen(type_str) == 7) {
             cd->type = COL_TYPE_VARCHAR; cd->size = 32;
             p = skip_ws(p);
-            if (*p == '(') {
-                p++;
-                cd->size = (uint16_t)atoi(p);
-                while (*p && *p != ')') p++;
-                if (*p == ')') p++;
-            }
+            if (*p == '(' && parse_varchar_size(&p, &cd->size) != 0) return -1;
         } else {
             return -1;
         }
@@ -302,11 +297,7 @@ static int parse_insert(const char *input, statement_t *stmt)
     if (strcasecmp_n(p, "INTO", 4) != 0) return -1;
     p = skip_ws(p + 4);
 
-    int i = 0;
-    while (*p && !isspace((unsigned char)*p) && *p != '(' && i < 31)
-        stmt->table_name[i++] = *p++;
-    stmt->table_name[i] = '\0';
-    if (i == 0) return -1;
+    if (take_token(&p, stmt->table_name, sizeof(stmt->table_name), "(") <= 0) return -1;
 
     p = skip_ws(p);
     if (*p == '(') {
@@ -316,9 +307,11 @@ static int parse_insert(const char *input, statement_t *stmt)
             p = skip_ws(p);
             if (stmt->insert_column_count >= MAX_COLUMNS - 1) return -1;
             char *column = stmt->insert_columns[stmt->insert_column_count];
-            i = 0;
-            while (*p && (isalnum((unsigned char)*p) || *p == '_') && i < 31)
+            int i = 0;
+            while (*p && (isalnum((unsigned char)*p) || *p == '_')) {
+                if (i + 1 >= (int)sizeof(stmt->insert_columns[0])) return -1;
                 column[i++] = *p++;
+            }
             column[i] = '\0';
             if (i == 0) return -1;
             stmt->insert_column_count++;
@@ -345,17 +338,11 @@ static int parse_insert(const char *input, statement_t *stmt)
         if (*p == ')') break;
         if (stmt->insert_value_count >= MAX_COLUMNS - 1) return -1;
         char *val = stmt->insert_values[stmt->insert_value_count];
-        i = 0;
         if (*p == '\'') {
             if (parse_string(&p, val, sizeof(stmt->insert_values[0])) != 0)
                 return -1;
-        } else {
-            while (*p && *p != ',' && *p != ')' && *p != ';'
-                   && !isspace((unsigned char)*p)
-                   && i < 255)
-                val[i++] = *p++;
-            val[i] = '\0';
-            if (i == 0) return -1;
+        } else if (take_token(&p, val, sizeof(stmt->insert_values[0]), ",);") <= 0) {
+            return -1;
         }
         stmt->insert_value_count++;
         p = skip_ws(p);
@@ -388,11 +375,7 @@ static int parse_select(const char *input, statement_t *stmt)
     if (strcasecmp_n(p, "FROM", 4) != 0) return -1;
     p = skip_ws(p + 4);
 
-    int i = 0;
-    while (*p && !isspace((unsigned char)*p) && i < 31)
-        stmt->table_name[i++] = *p++;
-    stmt->table_name[i] = '\0';
-    if (i == 0) return -1;
+    if (take_token(&p, stmt->table_name, sizeof(stmt->table_name), "") <= 0) return -1;
 
     const char *after_where;
     if (parse_where(p, stmt, &after_where) != 0) return -1;
@@ -406,10 +389,7 @@ static int parse_delete(const char *input, statement_t *stmt)
     if (strcasecmp_n(p, "FROM", 4) != 0) return -1;
     p = skip_ws(p + 4);
 
-    int i = 0;
-    while (*p && !isspace((unsigned char)*p) && *p != ';' && i < 31)
-        stmt->table_name[i++] = *p++;
-    stmt->table_name[i] = '\0';
+    if (take_token(&p, stmt->table_name, sizeof(stmt->table_name), ";") < 0) return -1;
 
     const char *end;
     if (parse_where(p, stmt, &end) != 0) return -1;
@@ -422,34 +402,24 @@ static int parse_update(const char *input, statement_t *stmt)
     const char *p = skip_ws(input);
 
     /* 테이블 이름 */
-    int i = 0;
-    while (*p && !isspace((unsigned char)*p) && i < 31)
-        stmt->table_name[i++] = *p++;
-    stmt->table_name[i] = '\0';
+    if (take_token(&p, stmt->table_name, sizeof(stmt->table_name), "") < 0) return -1;
 
     p = skip_ws(p);
     if (strcasecmp_n(p, "SET", 3) != 0) return -1;
     p = skip_ws(p + 3);
 
     /* SET col = val */
-    i = 0;
-    while (*p && *p != '=' && !isspace((unsigned char)*p) && i < 31)
-        stmt->update_field[i++] = *p++;
-    stmt->update_field[i] = '\0';
+    if (take_token(&p, stmt->update_field, sizeof(stmt->update_field), "=") < 0) return -1;
 
     p = skip_ws(p);
     if (*p != '=') return -1;
     p = skip_ws(p + 1);
 
-    i = 0;
     if (*p == '\'') {
         if (parse_string(&p, stmt->update_value, sizeof(stmt->update_value)) != 0)
             return -1;
-    } else {
-        while (*p && *p != ';' && !isspace((unsigned char)*p) && i < 255)
-            stmt->update_value[i++] = *p++;
-        stmt->update_value[i] = '\0';
-        if (i == 0) return -1;
+    } else if (take_token(&p, stmt->update_value, sizeof(stmt->update_value), ";") <= 0) {
+        return -1;
     }
     const char *end;
     if (parse_where(p, stmt, &end) != 0) return -1;
@@ -460,11 +430,7 @@ static int parse_update(const char *input, statement_t *stmt)
 static int parse_drop_table(const char *input, statement_t *stmt)
 {
     const char *p = skip_ws(input);
-    int i = 0;
-    while (*p && !isspace((unsigned char)*p) && *p != ';' && i < 31)
-        stmt->table_name[i++] = *p++;
-    stmt->table_name[i] = '\0';
-    if (i == 0) return -1;
+    if (take_token(&p, stmt->table_name, sizeof(stmt->table_name), ";") <= 0) return -1;
     return at_end(p);
 }
 
@@ -472,9 +438,9 @@ static int parse_drop_table(const char *input, statement_t *stmt)
 int parse(const char *input, statement_t *stmt)
 {
     memset(stmt, 0, sizeof(*stmt));
-    char buf[4096];
-    strncpy(buf, input, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+    char buf[PARSER_MAX_INPUT_LEN + 1];
+    if (strnlen(input, sizeof(buf)) >= sizeof(buf)) return -1;
+    memcpy(buf, input, strlen(input) + 1);
     trim(buf);
 
     const char *p = skip_ws(buf);
@@ -510,11 +476,11 @@ int parse(const char *input, statement_t *stmt)
     }
     if (strcasecmp_n(p, "EXPLAIN", 7) == 0) {
         p = skip_ws(p + 7);
+        /* EXPLAIN EXPLAIN ... 은 의미가 없고, 중첩을 허용하면 계획 수립이
+         * 자기 자신을 무한히 호출한다. 재귀 전에 막아 스택을 쓰지 않는다. */
+        if (strcasecmp_n(p, "EXPLAIN", 7) == 0) return -1;
         statement_t inner;
         if (parse(p, &inner) != 0) return -1;
-        /* EXPLAIN EXPLAIN ... 은 의미가 없고, 중첩을 허용하면 계획 수립이
-         * 자기 자신을 무한히 호출한다. */
-        if (inner.type == STMT_EXPLAIN) return -1;
 
         /*
          * 안쪽 문장을 통째로 들고 간다.
