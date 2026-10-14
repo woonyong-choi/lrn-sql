@@ -825,3 +825,19 @@ overflow_io_t page_file_overflow_io(page_file_overflow_ctx_t *ctx, page_file_t *
     return (overflow_io_t){ctx, PAGE_BODY_BYTES, adapter_allocate, adapter_release,
                            adapter_read, adapter_write};
 }
+
+size_t page_file_handle_bytes(const page_file_t *file)
+{
+    if (file == NULL) return 0;
+    size_t total = sizeof(*file);
+    if (file->path != NULL) total += strlen(file->path) + 1;
+    if (file->partial_path != NULL) total += strlen(file->partial_path) + 1;
+    return total;
+}
+
+size_t page_file_list_peak_bytes(uint32_t page_count)
+{
+    size_t cap = (size_t)page_count * 2;
+    if (cap < 8) cap = 8;
+    return 4 * cap * sizeof(uint32_t);
+}

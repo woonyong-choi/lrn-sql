@@ -213,4 +213,12 @@ sqlstmt_status_t sqlstmt_parse(const lexer_statement_t *statement, const lexer_b
                                sqlstmt_t **out, sqlstmt_error_t *error);
 void sqlstmt_free(sqlstmt_t *statement);
 
+/*
+ * 메모리 회계용 상한. 이 statement를 sqlstmt_parse하는 동안 요청 바이트의 순간 최대치 상한이며 성공한
+ * 결과가 sqlstmt_free까지 쥐는 몫도 이 값 이하다. 구조체와 항목 배열(두 배씩 늘어 old+new가 최대 3배),
+ * 이름·문자열·BLOB의 복사본(토큰마다 최대 두 번), 숫자 변환 임시 buffer, 매개변수 값의 복제를 합한다.
+ * 항목 수는 토큰 수와 CATALOG_MAX_COLUMNS로 제한된다. 요청 바이트 기준이며 allocator 오버헤드는 제외한다.
+ */
+size_t sqlstmt_parse_peak_bytes(const lexer_statement_t *statement, const lexer_binding_t *binding);
+
 #endif
