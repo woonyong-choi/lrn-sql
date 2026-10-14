@@ -46,6 +46,15 @@ typedef enum {
  * catalog_generation(catalog)가 저장된 값보다 작으면 STALE이다.
  */
 catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *catalog);
+/*
+ * catalog_store_save와 같고 applied_lsn(WAL의 COMMIT LSN)을 같은 제어 쓰기 한 번으로 함께 게시한다.
+ * page_file_stage_applied_lsn의 조건(durable이 enable되고 ready이며 현재 값 이상)을 지키지 않으면 아무것도
+ * 쓰지 않고 CATALOG_STORE_INVALID다. 제어 쓰기를 시도하기 전에 실패하면 applied_lsn은 이전 값으로 되돌린다.
+ * CATALOG_STORE_OUTCOME_UNKNOWN은 카탈로그와 applied_lsn 둘 다 어느 쪽이 남았는지 모른다는 뜻이다(둘은
+ * 항상 같은 제어 페이지에 있다).
+ */
+catalog_store_status_t catalog_store_save_applied(page_file_t *file, const catalog_t *catalog,
+                                                  uint64_t applied_lsn);
 /* 현재 제어 페이지가 가리키는 카탈로그를 읽는다. 성공한 *out은 호출자가 catalog_close한다. */
 catalog_store_status_t catalog_store_load(page_file_t *file, catalog_t **out);
 /*

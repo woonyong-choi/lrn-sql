@@ -1214,9 +1214,34 @@ static void test_inplace_uncommitted_is_unsafe(void)
     cleanup();
 }
 
+/* ---- wal_file_id: 읽기 전용 식별자 접근자 ---- */
+
+static void test_file_id_accessor(void)
+{
+    printf("\n[wal_file_id]\n");
+    cleanup();
+    CHECK(wal_file_id(NULL) == 0, "NULL은 0");
+    wal_t *a = NULL, *b = NULL;
+    CHECK(wal_create(LOG, &a) == WAL_OK && wal_create(LOG2, &b) == WAL_OK, "로그 둘 생성");
+    if (a == NULL || b == NULL) return;
+    uint64_t ida = wal_file_id(a), idb = wal_file_id(b);
+    CHECK(ida != 0 && idb != 0 && ida != idb, "0이 아니고 로그마다 다르다");
+    wal_lsn_t l = 0;
+    CHECK(wal_append(a, 1, 0, "x", 1, &l) == WAL_OK && wal_commit(a, 1, &l) == WAL_OK, "쓰기는 식별자를 바꾸지 않는다");
+    CHECK(wal_file_id(a) == ida, "쓴 뒤에도 같다");
+    wal_close(a);
+    wal_close(b);
+    CHECK(wal_open(LOG, false, &a, NULL) == WAL_OK && wal_file_id(a) == ida, "읽기 열기도 같은 식별자");
+    if (a != NULL) wal_close(a);
+    CHECK(wal_open(LOG, true, &a, NULL) == WAL_OK && wal_file_id(a) == ida, "다시 열어도 같은 식별자");
+    if (a != NULL) wal_close(a);
+    cleanup();
+}
+
 int main(void)
 {
     cleanup();
+    test_file_id_accessor();
     test_roundtrip();
     test_commit_order();
     test_call_rules();

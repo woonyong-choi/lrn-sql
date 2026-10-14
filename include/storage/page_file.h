@@ -36,6 +36,8 @@
 #define PAGE_FILE_CONTROL_PAGES 2u
 #define PAGE_FILE_NO_PAGE 0u
 #define PAGE_FILE_FORMAT_VERSION 1u
+/* durable extension. 제어 본문이 52바이트에서 76바이트로 늘고 applied_lsn·wal_file_id·durable_epoch가 붙는다 */
+#define PAGE_FILE_DURABLE_FORMAT_VERSION 2u
 #define PAGE_FILE_MAX_PAGES 0xFFFFFFF0u
 
 typedef enum {
@@ -57,7 +59,8 @@ typedef enum {
     PAGE_FILE_LOCKED,       /* 다른 열린 핸들이 잠금을 쥐고 있음 */
     PAGE_FILE_NOMEM,
     PAGE_FILE_LIMIT,        /* 페이지 번호 한계 */
-    PAGE_FILE_PUBLISHED_DIRTY /* 게시는 됐으나 partial 삭제 또는 디렉터리 fsync가 실패함 */
+    PAGE_FILE_PUBLISHED_DIRTY, /* 게시는 됐으나 partial 삭제 또는 디렉터리 fsync가 실패함 */
+    PAGE_FILE_MISMATCH         /* 제어 페이지의 WAL 식별자와 다른 로그, 또는 durable이 아닌 파일 */
 } page_file_status_t;
 
 /* 테스트가 실패를 주입하는 자리. 기본값은 libc다. */
@@ -83,6 +86,21 @@ typedef struct {
     uint32_t catalog_head;        /* 카탈로그 overflow 체인 head. 없으면 PAGE_FILE_NO_PAGE */
     uint32_t catalog_size;
     uint64_t catalog_generation;
+    /*
+     * 제어 형식. 1은 52바이트 본문(기존 파일)이고 아래 세 값은 항상 0이다. 2는 durable extension이다.
+     * applied_lsn: 이 제어 페이지가 가리키는 상태에 이미 반영된 WAL 위치(COMMIT LSN). 상태 참조와 한 번의
+     *   제어 쓰기로 함께 게시되므로 둘이 어긋난 채 보이는 일이 없다.
+     * wal_file_id: 이 파일과 짝인 WAL 파일의 식별자(wal_file_id). LSN은 WAL 파일 안의 오프셋이라 다른 로그에는
+     *   의미가 없으므로 한 번 정하면 바꿀 수 없다.
+     * durable_epoch: 호출자가 정하는 세대 번호. 이 모듈은 저장만 한다.
+     * durable_ready: 이 제어 페이지를 쓸 때 직전 현재 페이지도 v2였다(두 번째 이상의 v2 commit). 슬롯 자신에
+     *   기록되므로 준비가 끝난 뒤 반대편 슬롯이 손상돼도 살아남은 슬롯이 ready로 읽힌다.
+     */
+    uint32_t format_version;
+    uint64_t applied_lsn;
+    uint64_t wal_file_id;
+    uint32_t durable_epoch;
+    bool durable_ready;
 } page_file_control_t;
 
 typedef struct {
@@ -161,6 +179,44 @@ page_file_status_t page_file_release(page_file_t *file, uint32_t page_id);
 size_t page_file_pending_release_count(const page_file_t *file);
 size_t page_file_aging_release_count(const page_file_t *file);
 size_t page_file_reusable_count(const page_file_t *file);
+
+/*
+ * durable extension. 형식은 파일마다 명시적으로 한 번 올리며 되돌리지 않는다. 자동 변환은 없다.
+ *   - 52바이트 v1 제어 페이지는 그대로 읽고(format_version 1, 세 값 0) enable하지 않으면 v1로 계속 쓴다.
+ *   - enable은 다음 commit부터 v2 본문(76바이트)을 쓴다. v1만 아는 구버전은 v2 슬롯을 손상으로 보므로,
+ *     두 슬롯이 모두 v2가 되면 구버전은 열 수 없다. 둘 중 하나만 v2인 동안에는 구버전이 한 세대 전 상태로
+ *     열릴 수 있고 이때 applied_lsn은 0으로 보인다. 그래서 첫 v2 commit은 ready가 아니고 두 번째 v2 commit부터
+ *     ready이며, ready가 되기 전에는 applied_lsn을 올리지 못한다. WAL로 거래를 승인하기 전에 enable 뒤 commit을
+ *     두 번 성공시킨다.
+ *   - v2 슬롯이 손상돼 v1 슬롯으로 fallback되면 이 파일만으로는 durable이었는지 알 수 없다. 그 판정은 WAL과
+ *     함께 보는 호출자 몫이다(durable_pair.h). 이 모듈은 fallback 사실만 open_info.damaged_slots로 알린다.
+ *   - 알 수 없는 확장 flags는 UNSUPPORTED이고 예약 영역은 해석하지 않는다.
+ * wal_file_id는 0이 아니어야 한다. 같은 값으로 다시 부르면 무동작이고 다른 값은 INVALID다.
+ * 쓰기 핸들만 쓸 수 있고 commit 전까지 디스크에 닿지 않는다.
+ */
+page_file_status_t page_file_enable_durable(page_file_t *file, uint64_t wal_file_id, uint32_t durable_epoch);
+/* 현재 제어 페이지의 durable_ready. applied_lsn을 올릴 수 있는 조건이다. */
+bool page_file_durable_ready(const page_file_t *file);
+/*
+ * 다음 commit과 함께 게시할 applied_lsn을 정한다. durable이 enable된 핸들만 쓸 수 있고 값은 현재 commit된
+ * 값보다 작을 수 없다. 현재 값보다 올리려면 durable_ready여야 한다. commit이 성공하기 전까지 디스크에 닿지
+ * 않으며, 상태 참조(데이터 페이지, 카탈로그)와 같은 제어 쓰기 한 번으로 게시된다.
+ */
+page_file_status_t page_file_stage_applied_lsn(page_file_t *file, uint64_t applied_lsn);
+/*
+ * durable_epoch를 올린다. 세션에 새 epoch를 보여 주기 전에 먼저 이 값을 commit해 영속화하기 위한 것이다
+ * (재시작 뒤 epoch는 영속된 값보다 커야 한다). enable된 핸들만 쓸 수 있고, 같은 wal_file_id를 유지하며,
+ * 현재 commit된 값보다 커야 한다(같거나 작으면 INVALID). 이미 staged한 같은 값은 무동작이다.
+ * applied_lsn과 마찬가지로 durable_ready가 아니면 INVALID이고 commit 전까지 디스크에 닿지 않는다.
+ */
+page_file_status_t page_file_stage_durable_epoch(page_file_t *file, uint32_t durable_epoch);
+/* 현재 commit된 durable_epoch의 다음 값. UINT32_MAX를 넘으면 PAGE_FILE_LIMIT이고 *next는 바뀌지 않는다. */
+page_file_status_t page_file_next_durable_epoch(const page_file_t *file, uint32_t *next);
+/*
+ * 파일과 WAL의 짝을 확인한다. 현재 제어 페이지가 v2이고 wal_file_id가 같을 때만 OK이며 그 밖에는
+ * PAGE_FILE_MISMATCH다. 열기 순서에서 WAL을 열어 replay하기 전에 부른다.
+ */
+page_file_status_t page_file_check_wal_identity(const page_file_t *file, uint64_t wal_file_id);
 
 /* 다음 commit이 제어 페이지에 쓸 카탈로그 참조를 정한다. commit 전까지 디스크에 닿지 않는다. */
 page_file_status_t page_file_stage_catalog(page_file_t *file, uint32_t head, uint32_t size,

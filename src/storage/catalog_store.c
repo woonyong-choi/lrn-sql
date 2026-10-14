@@ -49,7 +49,8 @@ static catalog_store_status_t from_catalog(catalog_status_t status)
     }
 }
 
-catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *catalog)
+static catalog_store_status_t save_impl(page_file_t *file, const catalog_t *catalog, bool with_lsn,
+                                        uint64_t applied_lsn)
 {
     if (file == NULL || catalog == NULL) return CATALOG_STORE_INVALID;
     if (page_file_is_poisoned(file)) {
@@ -60,20 +61,28 @@ catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *ca
     uint32_t old_head = control->catalog_head;
     uint32_t old_size = control->catalog_size;
     uint64_t old_generation = control->catalog_generation;
+    uint64_t old_applied = control->applied_lsn;
     uint64_t generation = catalog_generation(catalog);
     if (old_head != PAGE_FILE_NO_PAGE && generation < old_generation) return CATALOG_STORE_STALE;
+    if (with_lsn && page_file_stage_applied_lsn(file, applied_lsn) != PAGE_FILE_OK) return CATALOG_STORE_INVALID;
 
     uint8_t *bytes = NULL;
     size_t size = 0;
     catalog_status_t encoded = catalog_encode(catalog, &bytes, &size);
-    if (encoded != CATALOG_OK) return from_catalog(encoded);
+    if (encoded != CATALOG_OK) {
+        if (with_lsn) page_file_stage_applied_lsn(file, old_applied);
+        return from_catalog(encoded);
+    }
 
     page_file_overflow_ctx_t ctx;
     overflow_io_t io = page_file_overflow_io(&ctx, file, CATALOG_TABLE_ID);
     overflow_ref_t created;
     overflow_status_t written = overflow_write(&io, bytes, size, &created);
     free(bytes);
-    if (written != OVERFLOW_OK) return from_overflow(written, &ctx);
+    if (written != OVERFLOW_OK) {
+        if (with_lsn) page_file_stage_applied_lsn(file, old_applied);
+        return from_overflow(written, &ctx);
+    }
 
     int saved_errno = 0;
     page_file_status_t staged = page_file_stage_catalog(file, created.head, created.size_bytes, generation);
@@ -91,6 +100,7 @@ catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *ca
         /* 제어 쓰기 전의 실패라 새 체인은 어떤 제어 페이지도 가리키지 않아 보류 해제해도 안전하다. 옛 참조를 되돌려 둔다. */
         overflow_free(&io, created);
         page_file_stage_catalog(file, old_head, old_size, old_generation);
+        if (with_lsn) page_file_stage_applied_lsn(file, old_applied);
         errno = saved_errno;
         return from_page_file(committed);
     }
@@ -101,6 +111,17 @@ catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *ca
         if (freed != OVERFLOW_OK) return CATALOG_STORE_UNRECLAIMED;
     }
     return CATALOG_STORE_OK;
+}
+
+catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *catalog)
+{
+    return save_impl(file, catalog, false, 0);
+}
+
+catalog_store_status_t catalog_store_save_applied(page_file_t *file, const catalog_t *catalog,
+                                                  uint64_t applied_lsn)
+{
+    return save_impl(file, catalog, true, applied_lsn);
 }
 
 catalog_store_status_t catalog_store_load(page_file_t *file, catalog_t **out)
