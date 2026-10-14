@@ -2,7 +2,7 @@
 # DB 코어(DATABASE_OBJS)는 큐 객체를 링크하지 않는다. 큐를 쓰는 바이너리만 QUEUE_OBJS를 더한다.
 
 QUEUE_OBJS = $(BUILD_DIR)/queue/ack_queue.o $(BUILD_DIR)/queue/ack_queue_sql.o
-QUEUE_TESTS = test_ack_queue test_ack_queue_fault
+QUEUE_TESTS = test_ack_queue test_ack_queue_fault test_ack_queue_capi
 QUEUE_BINS = $(addprefix $(BUILD_DIR)/,$(QUEUE_TESTS))
 
 $(QUEUE_BINS): $(BUILD_DIR)/%: $(BUILD_DIR)/tests/%.o $(QUEUE_OBJS) $(DATABASE_OBJS)
