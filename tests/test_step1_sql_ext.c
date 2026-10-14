@@ -5,7 +5,7 @@
  *   1. UPDATE (인덱스 경로: WHERE id = N)
  *   2. UPDATE (스캔 경로: WHERE field = val)
  *   3. 비교 연산자 (!=, <, >, <=, >=) 필터링
- *   4. COUNT(*)
+ *   4. COUNT(*) (LIMIT 적용 포함)
  *   5. ORDER BY (ASC, DESC)
  *   6. LIMIT
  *   7. ORDER BY + LIMIT 복합
@@ -818,6 +818,80 @@ static void test_table_name_guard(void) {
     teardown_test_db(&pager, "table_name_guard");
 }
 
+/* 집계 결과 행 수. 출력이 없으면 0, 있으면 헤더 2줄을 뺀 데이터 줄 수 */
+static int aggregate_rows(const exec_result_t *r) {
+    if (r->out_buf == NULL) return 0;
+    int lines = 0;
+    for (const char *p = r->out_buf; *p; p++) {
+        if (*p == '\n') lines++;
+    }
+    return lines - 2;
+}
+
+/* SQLite 3 기준: COUNT(*)에 LIMIT 0은 0행, LIMIT 1은 집계 1행 */
+static void expect_count_limit(pager_t *pager, const char *sql, int rows,
+                               const char *value) {
+    exec_result_t r = db_execute(pager, sql);
+    ASSERT_EQ_INT(r.status, 0, sql);
+    ASSERT_EQ_INT(aggregate_rows(&r), rows, sql);
+    if (value != NULL && r.out_buf != NULL) {
+        ASSERT_TRUE(strstr(r.out_buf, value) != NULL, sql);
+    }
+    free(r.out_buf);
+}
+
+static void test_count_limit(void) {
+    printf(CLR_YELLOW "\n[test_count_limit]" CLR_RESET "\n");
+    pager_t pager;
+    setup_test_db(&pager, "count_limit");
+
+    exec_result_t r = db_execute(&pager, "CREATE TABLE t (name VARCHAR(8))");
+    ASSERT_EQ_INT(r.status, 0, "create table");
+    free(r.out_buf);
+
+    /* 빈 테이블 */
+    expect_count_limit(&pager, "SELECT COUNT(*) FROM t LIMIT 0", 0, NULL);
+    expect_count_limit(&pager, "SELECT COUNT(*) FROM t LIMIT 1", 1, "\n0\n");
+    expect_count_limit(&pager, "SELECT COUNT(*) FROM t", 1, "\n0\n");
+
+    for (int i = 0; i < 2; i++) {
+        r = db_execute(&pager, "INSERT INTO t (name) VALUES ('a')");
+        ASSERT_EQ_INT(r.status, 0, "insert row");
+        free(r.out_buf);
+    }
+
+    /* 비어 있지 않은 테이블 */
+    expect_count_limit(&pager, "SELECT COUNT(*) FROM t LIMIT 0", 0, NULL);
+    expect_count_limit(&pager, "SELECT COUNT(*) FROM t LIMIT 1", 1, "\n2\n");
+
+    /* WHERE로 모두 제외된 입력 */
+    expect_count_limit(&pager, "SELECT COUNT(*) FROM t WHERE name = 'zz' LIMIT 0", 0, NULL);
+    expect_count_limit(&pager, "SELECT COUNT(*) FROM t WHERE name = 'zz' LIMIT 1", 1, "\n0\n");
+
+    /* 컬럼·타입 검증은 LIMIT 0 조기 종료보다 앞선다 */
+    const char *invalid[] = {
+        "SELECT COUNT(*) FROM t ORDER BY nope LIMIT 0",
+        "SELECT * FROM t ORDER BY nope LIMIT 0",
+        "SELECT COUNT(*) FROM t ORDER BY nope LIMIT 1",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        r = db_execute(&pager, invalid[i]);
+        ASSERT_EQ_INT(r.status, -1, invalid[i]);
+        free(r.out_buf);
+    }
+
+    teardown_test_db(&pager, "count_limit");
+
+    setup_test_db(&pager, "count_limit_int");
+    r = db_execute(&pager, "CREATE TABLE t (age INT)");
+    ASSERT_EQ_INT(r.status, 0, "create int table");
+    free(r.out_buf);
+    r = db_execute(&pager, "SELECT COUNT(*) FROM t WHERE age = 'x' LIMIT 0");
+    ASSERT_EQ_INT(r.status, -1, "COUNT LIMIT 0 keeps numeric predicate validation");
+    free(r.out_buf);
+    teardown_test_db(&pager, "count_limit_int");
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -827,6 +901,7 @@ int main(void)
     test_update_system_id_rejected();
     test_comparison_operators();
     test_count();
+    test_count_limit();
     test_order_by();
     test_limit();
     test_order_by_limit();
