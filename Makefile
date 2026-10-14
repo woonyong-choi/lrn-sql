@@ -453,7 +453,7 @@ test-wal: $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_wal_crash $(BUILD_DIR)/test_wa
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED) --report fault/test_wal_alloc.json -- ./test_wal_alloc
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout 180 --seed $(FAULT_SEED) --report fault/test_wal_crash.json -- ./test_wal_crash
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters test-ack-queue
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
