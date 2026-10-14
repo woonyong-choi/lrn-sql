@@ -4,7 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RECORD_PAGE_BYTES 8192u
+/*
+ * 저장 페이지 하나는 물리 8192바이트이며 앞 32바이트는 page_file의 공통 envelope이다.
+ * 레코드 페이지는 남은 본문 8160바이트만 쓴다. 본문을 8192로 가정하면 envelope를 덮는다.
+ * 같은 값을 page_file.h의 PAGE_BODY_BYTES가 가지며 page_file.c가 정적으로 대조한다.
+ * 이전 형식(LRP1, 본문 8192)은 magic이 달라 이 모듈이 해석하지 않는다.
+ */
+#define RECORD_PAGE_BYTES 8160u
+#define RECORD_PAGE_MAGIC "LRP2"
 
 typedef enum {
     RECORD_PAGE_OK,

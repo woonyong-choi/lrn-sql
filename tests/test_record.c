@@ -125,14 +125,14 @@ static void record_page_bounds_preserve_original(void)
 {
     uint8_t page[RECORD_PAGE_BYTES];
     uint8_t before[RECORD_PAGE_BYTES];
-    uint8_t payload[8181];
+    uint8_t payload[8149]; /* 본문 8160 - 헤더 8 - 슬롯 4 = 8148이 최대 */
     memset(payload, 'x', sizeof(payload));
     uint16_t slot = 123;
     record_page_init(page);
     memcpy(before, page, sizeof(page));
-    assert(record_page_insert(page, (record_slice_t){payload, 8181}, &slot) == RECORD_PAGE_FULL);
+    assert(record_page_insert(page, (record_slice_t){payload, 8149}, &slot) == RECORD_PAGE_FULL);
     assert(slot == 123 && memcmp(page, before, sizeof(page)) == 0);
-    assert(record_page_insert(page, (record_slice_t){payload, 8180}, &slot) == RECORD_PAGE_OK);
+    assert(record_page_insert(page, (record_slice_t){payload, 8148}, &slot) == RECORD_PAGE_OK);
     assert(slot == 0);
     record_slice_t output = {NULL, 123};
     page[8] = 0xff;
@@ -143,6 +143,26 @@ static void record_page_bounds_preserve_original(void)
     assert(memcmp(page, before, sizeof(page)) == 0);
 }
 
+/* #77: 본문 8192의 옛 LRP1 입력은 LRP2로 해석하지 않는다. */
+static void record_page_rejects_previous_format(void)
+{
+    uint8_t old_empty[8192] = {'L', 'R', 'P', '1'};
+    assert(record_page_validate(old_empty) == RECORD_PAGE_INVALID);
+    uint8_t page[RECORD_PAGE_BYTES];
+    record_page_init(page);
+    assert(record_page_validate(page) == RECORD_PAGE_OK);
+    assert(memcmp(page, "LRP2", 4) == 0);
+    memcpy(page, "LRP1", 4);
+    record_slice_t output = {NULL, 7};
+    assert(record_page_validate(page) == RECORD_PAGE_INVALID);
+    assert(record_page_get(page, 0, &output) == RECORD_PAGE_INVALID);
+    assert(output.bytes == NULL && output.size_bytes == 7);
+    uint16_t slot = 55;
+    assert(record_page_insert(page, (record_slice_t){(const uint8_t *)"x", 1}, &slot) ==
+           RECORD_PAGE_INVALID);
+    assert(slot == 55);
+}
+
 int main(void)
 {
     record_roundtrip_preserves_values();
@@ -150,6 +170,7 @@ int main(void)
     record_invalid_input_preserves_output();
     record_page_changes_preserve_slot_identity();
     record_page_bounds_preserve_original();
+    record_page_rejects_previous_format();
     puts("record: codec, stable slots, resize/delete, page bounds and malformed input passed");
     return 0;
 }
