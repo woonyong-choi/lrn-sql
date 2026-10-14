@@ -49,6 +49,105 @@
 #include <sys/file.h>
 #include <unistd.h>
 
+/*
+ * 잠금 순서 추적. pager.h의 순서(tail_lock → latch → pager_mutex → header_lock)를 거슬러
+ * 높은 번호를 쥔 채 낮은 번호를 잡으면 센다. 시험 빌드(MINIDB_TEST_HOOKS)에서만 켜지며
+ * 제품 빌드에서는 아무것도 하지 않는다.
+ */
+enum { RANK_TAIL = 1, RANK_LATCH = 2, RANK_PAGER = 3, RANK_HEADER = 4, RANK_COUNT = 5 };
+
+#ifdef MINIDB_TEST_HOOKS
+void (*minidb_test_hook)(minidb_hook_point_t point, pager_t* pager, uint32_t page_id);
+static _Thread_local int held_ranks[RANK_COUNT];
+static _Atomic uint64_t order_violations;
+
+static void order_acquire(int rank) {
+  for (int higher = rank + 1; higher < RANK_COUNT; higher++) {
+    if (held_ranks[higher] > 0) {
+      atomic_fetch_add(&order_violations, 1);
+      break;
+    }
+  }
+  held_ranks[rank]++;
+}
+
+static void order_release(int rank) {
+  if (held_ranks[rank] > 0) held_ranks[rank]--;
+}
+
+uint64_t pager_test_lock_order_violations(void) {
+  return atomic_load(&order_violations);
+}
+#define ORDER_ACQUIRE(rank) order_acquire(rank)
+#define ORDER_RELEASE(rank) order_release(rank)
+#else
+#define ORDER_ACQUIRE(rank) ((void)0)
+#define ORDER_RELEASE(rank) ((void)0)
+#endif
+
+static void pm_lock(pager_t* pager) {
+  ORDER_ACQUIRE(RANK_PAGER);
+  pthread_mutex_lock(&pager->pager_mutex);
+}
+
+static void pm_unlock(pager_t* pager) {
+  pthread_mutex_unlock(&pager->pager_mutex);
+  ORDER_RELEASE(RANK_PAGER);
+}
+
+void pager_header_lock(pager_t* pager) {
+  ORDER_ACQUIRE(RANK_HEADER);
+  pthread_mutex_lock(&pager->header_lock);
+}
+
+void pager_header_unlock(pager_t* pager) {
+  pthread_mutex_unlock(&pager->header_lock);
+  ORDER_RELEASE(RANK_HEADER);
+}
+
+void pager_tail_lock(pager_t* pager) {
+  ORDER_ACQUIRE(RANK_TAIL);
+  pthread_mutex_lock(&pager->tail_lock);
+}
+
+void pager_tail_unlock(pager_t* pager) {
+  pthread_mutex_unlock(&pager->tail_lock);
+  ORDER_RELEASE(RANK_TAIL);
+}
+
+/*
+ * 새 루트를 게시한다. header 이미지와 잠금 없는 사본을 같은 header_lock 구간에서 바꿔
+ * flush의 스냅샷이 둘 중 하나만 반영하는 일이 없게 한다. 옛 루트의 wlatch를 쥔 채 호출하므로
+ * 루트를 읽은 뒤 latch를 기다리던 스레드는 latch를 얻은 다음 pager_root_id()를 다시 읽어
+ * 바뀐 것을 알아본다.
+ */
+void pager_publish_root(pager_t* pager, uint32_t new_root) {
+  pager_header_lock(pager);
+  pager->header.root_index_page_id = new_root;
+  atomic_store_explicit(&pager->root_page_id, new_root, memory_order_release);
+  pager_header_unlock(pager);
+  pager_note_header_change(pager);
+}
+
+#ifdef MINIDB_TEST_HOOKS
+void pager_test_quiescence(pager_t* pager, uint32_t* pinned, uint32_t* latched) {
+  *pinned = 0;
+  *latched = 0;
+  pm_lock(pager);
+  for (int i = 0; i < MAX_FRAMES; i++) {
+    frame_t* f = &pager->frames[i];
+    if (!f->is_valid) continue;
+    if (f->pin_count > 0) (*pinned)++;
+    if (pthread_rwlock_trywrlock(&f->latch) == 0) {
+      pthread_rwlock_unlock(&f->latch);
+    } else {
+      (*latched)++;
+    }
+  }
+  pm_unlock(pager);
+}
+#endif
+
 /* ── 페이지 타입 → 문자열 변환 (로깅용) ── */
 static const char* page_type_str(uint32_t ptype) {
   switch (ptype) {
@@ -289,6 +388,7 @@ static int evict_frame(pager_t* p) {
 /* pager_open 실패 정리: 지금까지 만든 자원을 모두 풀고 -1을 반환한다 */
 static int open_fail(pager_t* pager, int fd) {
   int saved = errno;
+  pthread_mutex_destroy(&pager->tail_lock);
   pthread_mutex_destroy(&pager->header_lock);
   pthread_mutex_destroy(&pager->pager_mutex);
   for (int i = 0; i < MAX_FRAMES; i++) {
@@ -401,6 +501,7 @@ int pager_open(pager_t* pager, const char* path, bool create) {
   pthread_mutexattr_destroy(&attr);
 
   pthread_mutex_init(&pager->header_lock, NULL);
+  pthread_mutex_init(&pager->tail_lock, NULL);
 
   /* DB 파일 최초 생성 */
   if (create) {
@@ -567,6 +668,9 @@ int pager_open(pager_t* pager, const char* path, bool create) {
     }
   }
 
+  /* 잠금 없는 루트 읽기용 사본. 아직 pager를 공유하기 전이라 plain 초기화로 충분하다 */
+  atomic_store_explicit(&pager->root_page_id, pager->header.root_index_page_id, memory_order_release);
+
   /* 프레임별 래치 초기화 (래치 커플링용) */
   for (int i = 0; i < MAX_FRAMES; i++)
     pthread_rwlock_init(&pager->frames[i].latch, NULL);
@@ -596,6 +700,7 @@ int pager_close(pager_t* pager) {
     if (close(pager->fd) != 0 && rc == 0) rc = -1;
     pager->fd = -1;
   }
+  pthread_mutex_destroy(&pager->tail_lock);
   pthread_mutex_destroy(&pager->header_lock);
   pthread_mutex_destroy(&pager->pager_mutex);
   return rc;
@@ -630,10 +735,10 @@ int pager_close(pager_t* pager) {
  * pin 없이 NULL을 반환하고 errno를 남긴다. 호출자는 NULL을 반드시 확인한다.
  */
 static uint8_t* acquire_page(pager_t* pager, uint32_t page_id, bool fresh) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   if (pager->poisoned) {
     note_io_error(pager, EIO);
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     errno = EIO;
     return NULL;
   }
@@ -645,14 +750,14 @@ static uint8_t* acquire_page(pager_t* pager, uint32_t page_id, bool fresh) {
     pager->stats.cache_hits++;
     pager->frames[idx].pin_count++;
     pager->frames[idx].used_tick = ++pager->tick;
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     return pager->frames[idx].data;
   }
   /* 캐시 미스: 프레임 교체 후 디스크에서 읽기 */
   pager->stats.cache_misses++;
   idx = evict_frame(pager);
   if (idx < 0) {
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     return NULL;
   }
 
@@ -663,7 +768,7 @@ static uint8_t* acquire_page(pager_t* pager, uint32_t page_id, bool fresh) {
     int err = errno;
     note_io_error(pager, err);
     memset(f->data, 0, pager->page_size);
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     errno = err;
     return NULL;
   }
@@ -673,7 +778,7 @@ static uint8_t* acquire_page(pager_t* pager, uint32_t page_id, bool fresh) {
   f->pin_count = 1;
   f->used_tick = ++pager->tick;
   frame_index_insert(pager, idx);
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
   return f->data;
 }
 
@@ -758,19 +863,19 @@ static void pager_flush_dirty(pager_t* pager, uint32_t target_count) {
  * 예: high=64, low=16 → dirty가 64개 넘으면 16개까지 줄인다.
  */
 void pager_mark_dirty(pager_t* pager, uint32_t page_id) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   int idx = find_frame(pager, page_id);
   if (idx >= 0) {
     pager->frames[idx].is_dirty = true;
   }
-  pager->header_dirty = true;
+  pager_note_header_change(pager);
 
   /* 워터마크 체크: dirty가 너무 많으면 선제 플러시 */
   if (!pager->poisoned && pager->dirty_high_watermark > 0 &&
       count_dirty(pager) >= pager->dirty_high_watermark) {
     pager_flush_dirty(pager, pager->dirty_low_watermark);
   }
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
 }
 
 /*
@@ -780,12 +885,12 @@ void pager_mark_dirty(pager_t* pager, uint32_t page_id) {
  * pager_get_page() 호출 횟수만큼 pager_unpin()을 호출해야 한다.
  */
 void pager_unpin(pager_t* pager, uint32_t page_id) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   int idx = find_frame(pager, page_id);
   if (idx >= 0 && pager->frames[idx].pin_count > 0) {
     pager->frames[idx].pin_count--;
   }
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
 }
 
 /* ======================================================================
@@ -802,45 +907,56 @@ uint8_t *pager_get_page_rlatch(pager_t *pager, uint32_t page_id) {
     uint8_t *data = pager_get_page(pager, page_id);
     if (!data) return NULL;
     /* 페이지가 pinned 상태이므로 프레임이 evict되지 않는다 */
-    pthread_mutex_lock(&pager->pager_mutex);
+    pm_lock(pager);
     int idx = find_frame(pager, page_id);
-    pthread_mutex_unlock(&pager->pager_mutex);
-    if (idx >= 0)
+    pm_unlock(pager);
+    if (idx >= 0) {
+        /* pager_mutex·header_lock을 쥔 채 latch를 기다리면 안 된다(pager.h의 잠금 순서) */
+        MINIDB_HOOK(MINIDB_HOOK_LATCH_WAIT, pager, page_id);
+        ORDER_ACQUIRE(RANK_LATCH);
         pthread_rwlock_rdlock(&pager->frames[idx].latch);
+        MINIDB_HOOK(MINIDB_HOOK_LATCH_ACQUIRED, pager, page_id);
+    }
     return data;
 }
 
 uint8_t *pager_get_page_wlatch(pager_t *pager, uint32_t page_id) {
     uint8_t *data = pager_get_page(pager, page_id);
     if (!data) return NULL;
-    pthread_mutex_lock(&pager->pager_mutex);
+    pm_lock(pager);
     int idx = find_frame(pager, page_id);
-    pthread_mutex_unlock(&pager->pager_mutex);
-    if (idx >= 0)
+    pm_unlock(pager);
+    if (idx >= 0) {
+        MINIDB_HOOK(MINIDB_HOOK_LATCH_WAIT, pager, page_id);
+        ORDER_ACQUIRE(RANK_LATCH);
         pthread_rwlock_wrlock(&pager->frames[idx].latch);
+        MINIDB_HOOK(MINIDB_HOOK_LATCH_ACQUIRED, pager, page_id);
+    }
     return data;
 }
 
 void pager_unlatch_r(pager_t *pager, uint32_t page_id) {
-    pthread_mutex_lock(&pager->pager_mutex);
+    pm_lock(pager);
     int idx = find_frame(pager, page_id);
     if (idx >= 0) {
         pthread_rwlock_unlock(&pager->frames[idx].latch);
+        ORDER_RELEASE(RANK_LATCH);
         if (pager->frames[idx].pin_count > 0)
             pager->frames[idx].pin_count--;
     }
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
 }
 
 void pager_unlatch_w(pager_t *pager, uint32_t page_id) {
-    pthread_mutex_lock(&pager->pager_mutex);
+    pm_lock(pager);
     int idx = find_frame(pager, page_id);
     if (idx >= 0) {
         pthread_rwlock_unlock(&pager->frames[idx].latch);
+        ORDER_RELEASE(RANK_LATCH);
         if (pager->frames[idx].pin_count > 0)
             pager->frames[idx].pin_count--;
     }
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -877,13 +993,13 @@ void pager_unlatch_w(pager_t *pager, uint32_t page_id) {
  *   → next_page_id = 6
  */
 uint32_t pager_alloc_page(pager_t* pager) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   /* 빈 페이지 재활용 */
   if (pager->header.free_page_head != 0) {
     uint32_t pid = pager->header.free_page_head;
     uint8_t* page = pager_get_page(pager, pid);
     if (page == NULL) {
-      pthread_mutex_unlock(&pager->pager_mutex);
+      pm_unlock(pager);
       return 0;
     }
     free_page_header_t fph;
@@ -893,21 +1009,21 @@ uint32_t pager_alloc_page(pager_t* pager) {
     memset(page, 0, pager->page_size);
     pager_mark_dirty(pager, pid);
     pager_unpin(pager, pid);
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     return pid;
   }
   /* 새 페이지 할당: 파일 끝에 추가 */
   uint32_t pid = pager->header.next_page_id;
   uint8_t* page = acquire_page(pager, pid, true); /* 디스크에 아직 없는 페이지라 읽지 않는다 */
   if (page == NULL) {
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     return 0;
   }
   pager->header.next_page_id = pid + 1;
   memset(page, 0, pager->page_size);
   pager_mark_dirty(pager, pid);
   pager_unpin(pager, pid);
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
   return pid;
 }
 
@@ -927,11 +1043,11 @@ uint32_t pager_alloc_page(pager_t* pager) {
  *   → 리스트: 7 → 12 → 0
  */
 void pager_free_page(pager_t* pager, uint32_t page_id) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   uint8_t* page = pager_get_page(pager, page_id);
   if (page == NULL) {
     /* 해제하지 못한 페이지는 새지만 데이터는 그대로다. 실패는 io_error_seq에 남았다 */
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     return;
   }
   free_page_header_t fph = {.page_type = PAGE_TYPE_FREE,
@@ -941,7 +1057,7 @@ void pager_free_page(pager_t* pager, uint32_t page_id) {
   pager_mark_dirty(pager, page_id);
   pager_unpin(pager, page_id);
   pager->header.free_page_head = page_id;
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -967,14 +1083,20 @@ void pager_free_page(pager_t* pager, uint32_t page_id) {
  * pager_close() 내부에서 호출되며, 프로그램 종료 전 데이터 유실을 방지한다.
  */
 int pager_flush_all(pager_t* pager) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   if (pager->poisoned) {
     /* 일관되지 않은 메모리 상태를 쓰면 디스크의 마지막 정상 상태가 사라진다 */
     note_io_error(pager, EIO);
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     errno = EIO;
     return -1;
   }
+  /*
+   * header_dirty를 먼저 내리고 header를 스냅샷한다. 스냅샷 뒤에 다른 스레드가 올린 표시는
+   * 지워지지 않고, 아래에서 실패하면 내리기 전 값으로 되돌려 갱신이 사라지지 않게 한다.
+   */
+  bool was_header_dirty =
+      atomic_exchange_explicit(&pager->header_dirty, false, memory_order_acq_rel);
   int rc = 0;
   int err = 0;
   uint32_t flush_count = 0;
@@ -1001,7 +1123,11 @@ int pager_flush_all(pager_t* pager) {
       rc = -1;
       err = ENOMEM;
     } else {
+      /* next_id·row_count·root는 header_lock 아래에서만 바뀐다. leaf lock이라 잠깐 잡는다 */
+      pager_header_lock(pager);
       memcpy(hbuf, &pager->header, sizeof(db_header_t));
+      pager_header_unlock(pager);
+      MINIDB_HOOK(MINIDB_HOOK_FLUSH_SNAPSHOT, pager, 0);
       if (pager_raw_write(pager, 0, hbuf) != 0) {
         rc = -1;
         err = errno;
@@ -1018,8 +1144,9 @@ int pager_flush_all(pager_t* pager) {
     err = EIO;
   }
   if (rc != 0) {
+    if (was_header_dirty) pager_note_header_change(pager);
     note_io_error(pager, err);
-    pthread_mutex_unlock(&pager->pager_mutex);
+    pm_unlock(pager);
     errno = err;
     return -1;
   }
@@ -1031,36 +1158,35 @@ int pager_flush_all(pager_t* pager) {
     fprintf(stderr, "[pager] flush_all: %u pages written + header\n",
             flush_count);
   }
-  pager->header_dirty = false;
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
   return 0;
 }
 
 void pager_poison(pager_t* pager, int err) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   pager->poisoned = true;
   note_io_error(pager, err);
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
 }
 
 bool pager_is_poisoned(pager_t* pager) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   bool poisoned = pager->poisoned;
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
   return poisoned;
 }
 
 uint64_t pager_io_error_seq(pager_t* pager) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   uint64_t seq = pager->io_error_seq;
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
   return seq;
 }
 
 int pager_last_io_errno(pager_t* pager) {
-  pthread_mutex_lock(&pager->pager_mutex);
+  pm_lock(pager);
   int err = pager->io_errno;
-  pthread_mutex_unlock(&pager->pager_mutex);
+  pm_unlock(pager);
   return err;
 }
 
@@ -1074,5 +1200,8 @@ int pager_last_io_errno(pager_t* pager) {
  * 매 쿼리 실행 직전에 호출하여, 해당 쿼리의 I/O 패턴만 정확히 측정한다.
  */
 void pager_reset_stats(pager_t* pager) {
+  /* 다른 스레드의 page_loads++ 같은 갱신(pager_mutex 아래)과 겹치지 않게 같은 lock으로 지운다 */
+  pm_lock(pager);
   memset(&pager->stats, 0, sizeof(query_stats_t));
+  pm_unlock(pager);
 }
