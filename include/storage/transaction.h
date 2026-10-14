@@ -114,6 +114,12 @@ typedef struct {
     void (*close)(void *ctx);
 } txn_backend_ops_t;
 
+/*
+ * 세대 선택 방식. DEFAULT는 txn_manager_spec_t.epoch를 따른다(0이면 자동, 아니면 지정).
+ * ABOVE_FLOOR는 epoch_floor보다 크고 이 프로세스가 이미 발급한 모든 세대보다 큰 값을 한 번에 자동으로 고른다.
+ */
+typedef enum { TXN_EPOCH_DEFAULT, TXN_EPOCH_ABOVE_FLOOR } txn_epoch_mode_t;
+
 /* 0인 필드는 기본값이다. */
 #define TXN_DEFAULT_MAX_READERS 256u
 #define TXN_MAX_MAX_READERS 65536u
@@ -138,6 +144,18 @@ typedef struct {
      * 작은 번호는 거절되므로 번호 범위를 호출자가 조율한다. 같은 세대 번호를 재시작 뒤에 다시 넘기는 것은 이전 id와
      * 구분되지 않으므로 안전하다고 가정하면 안 된다. */
     uint32_t epoch;
+    /*
+     * 재시작을 넘는 세대 할당. epoch_mode가 ABOVE_FLOOR이면 epoch는 0이어야 하고(아니면 TXN_INVALID) manager는
+     * max(이 프로세스의 상한, epoch_floor) + 1을 세대로 받으며 상한이 그 값으로 오른다. 선택과 상한 갱신은 한 번의
+     * 잠금 안에서 일어나므로 동시 open끼리, 그리고 서로 다른 floor를 가진 저장소끼리 겹치지 않는다. floor는 호출자가
+     * backend에 저장해 둔 가장 큰 세대이고 처음 만든 저장소는 0이다. max가 UINT32_MAX이면 TXN_LIMIT이며 상한은
+     * 그대로다. 지정 epoch의 전역 중복 거절은 DEFAULT 방식에서 그대로 유지된다.
+     * 영속화 책임: 이 모듈은 값을 저장하지 않는다. 호출자는 open 직후 txn_manager_epoch로 받은 값을 backend에
+     * 저장해 성공을 확인한 뒤에만 begin을 불러야 한다. 저장이 실패하면 manager를 close하고 그 저장소를 쓰지 않아야
+     * 하며, 이미 발급한 세대는 프로세스 상한에 남아 다시 쓰이지 않는다(저장소의 floor가 그대로여도 다음 open은 더
+     * 큰 값을 받는다). 재시작 뒤에는 상한이 사라지므로 저장된 floor가 유일성을 맡는다. */
+    txn_epoch_mode_t epoch_mode;
+    uint32_t epoch_floor;
     size_t max_readers;
     size_t commit_ring;              /* 응답 손실 조회용으로 기억하는 commit 수 */
     /* 단조 시계(밀리초). NULL이면 CLOCK_MONOTONIC이다. manager를 호출하면 안 된다. */
@@ -183,6 +201,9 @@ txn_status_t txn_rollback(txn_t *txn);
 
 /* ACTIVE면 rollback한 뒤 핸들을 해제하고 *txn을 NULL로 만든다. *txn이 NULL이면 무동작이다. */
 txn_status_t txn_release(txn_t **txn);
+
+/* open이 발급한 세대. txn_id의 상위 32비트와 같다. NULL이면 0이다. */
+uint32_t txn_manager_epoch(const txn_manager_t *manager);
 
 txn_state_t txn_state(const txn_t *txn);
 uint64_t txn_id(const txn_t *txn);
