@@ -25,7 +25,9 @@ exec_result_t execute(pager_t *pager, statement_t *stmt);
 
 #ifdef MINIDB_TEST_HOOKS
 /*
- * 출력 버퍼 할당 실패 주입 (시험 빌드 전용, 단일 스레드에서만 사용).
+ * 출력 버퍼 할당 실패 주입 (시험 빌드 전용). 함수를 부르지 않은 프로세스는 환경 변수
+ * MINIDB_TEST_FAIL_OUT_MALLOC·MINIDB_TEST_FAIL_OUT_REALLOC(프로세스 시작부터 센 n번째)을 따른다.
+ * 함수로 지정·해제할 때는 한 스레드에서 문장 사이에만 부른다.
  * malloc_at/realloc_at번째(1부터) 출력 버퍼 malloc/realloc을 실패시킨다. 0이면 끈다.
  * 호출 시 malloc·realloc 호출 횟수를 0으로 되돌린다.
  */
