@@ -892,6 +892,79 @@ static void test_count_limit(void) {
     teardown_test_db(&pager, "count_limit_int");
 }
 
+/* 파일 전체 바이트를 읽는다. 호출한 쪽이 free한다 */
+static char *read_file_bytes(const char *path, long *size) {
+    FILE *f = fopen(path, "rb");
+    assert(f != NULL);
+    fseek(f, 0, SEEK_END);
+    *size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *bytes = malloc((size_t)*size + 1);
+    assert(bytes != NULL);
+    assert(fread(bytes, 1, (size_t)*size, f) == (size_t)*size);
+    fclose(f);
+    return bytes;
+}
+
+/* #131: SQLite 3.51.0은 아래 문장을 모두 "no such column"으로 거절하고 데이터를 바꾸지 않는다 */
+static void test_missing_where_column_is_rejected(void) {
+    printf(CLR_YELLOW "\n[test_missing_where_column_is_rejected]" CLR_RESET "\n");
+    const char *invalid[] = {
+        "SELECT * FROM users WHERE missing = 1",
+        "SELECT * FROM users WHERE missing > 1",
+        "SELECT * FROM users WHERE missing = 1 LIMIT 0",
+        "SELECT COUNT(*) FROM users WHERE missing = 1",
+        "SELECT COUNT(*) FROM users WHERE missing = 1 LIMIT 0",
+        "SELECT * FROM users ORDER BY missing LIMIT 0",
+        "SELECT COUNT(*) FROM users ORDER BY missing LIMIT 0",
+        "UPDATE users SET age = 2 WHERE missing = 1",
+        "UPDATE users SET age = 2 WHERE missing > 1",
+        "DELETE FROM users WHERE missing = 1",
+        "DELETE FROM users WHERE missing > 1",
+    };
+    const char *states[] = { "missing_where_empty", "missing_where_rows" };
+
+    for (int populated = 0; populated < 2; populated++) {
+        const char *name = states[populated];
+        pager_t pager;
+        setup_test_db(&pager, name);
+        if (populated) {
+            create_and_populate(&pager, 3);
+        } else {
+            exec_result_t r = db_execute(&pager, "CREATE TABLE users (name VARCHAR(32), age INT)");
+            ASSERT_EQ_INT(r.status, 0, "create empty table");
+            free(r.out_buf);
+        }
+        pager_close(&pager);
+
+        long before_size;
+        char *before = read_file_bytes(test_db_path(name), &before_size);
+
+        ASSERT_EQ_INT(pager_open(&pager, test_db_path(name), false), 0, "reopen before rejections");
+        for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+            exec_result_t r = db_execute(&pager, invalid[i]);
+            ASSERT_EQ_INT(r.status, -1, invalid[i]);
+            ASSERT_TRUE(r.out_buf == NULL, invalid[i]);
+            free(r.out_buf);
+        }
+        pager_close(&pager);
+
+        long after_size;
+        char *after = read_file_bytes(test_db_path(name), &after_size);
+        ASSERT_TRUE(before_size == after_size && memcmp(before, after, (size_t)before_size) == 0,
+                    "rejected statements leave the database file unchanged");
+        free(before);
+        free(after);
+
+        ASSERT_EQ_INT(pager_open(&pager, test_db_path(name), false), 0, "reopen after rejections");
+        exec_result_t r = db_execute(&pager, "SELECT COUNT(*) FROM users");
+        ASSERT_TRUE(r.out_buf && strstr(r.out_buf, populated ? "\n3\n" : "\n0\n") != NULL,
+                    "row count survives rejected statements after reopening");
+        free(r.out_buf);
+        teardown_test_db(&pager, name);
+    }
+}
+
 int main(void)
 {
     printf("=== Step 1: SQL Extension Test Suite ===\n");
@@ -902,6 +975,7 @@ int main(void)
     test_comparison_operators();
     test_count();
     test_count_limit();
+    test_missing_where_column_is_rejected();
     test_order_by();
     test_limit();
     test_order_by_limit();
