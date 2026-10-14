@@ -32,7 +32,7 @@ jobs:
           SANITIZER: ${{ matrix.sanitizer }}
         run: |
           if [ "$SANITIZER" = thread ]; then
-            make SANITIZE=thread test-step2 test-concurrency test-transaction test-session test-lock-waiters
+            make SANITIZE=thread test-step2 test-concurrency test-transaction test-session test-lock-waiters test-ack-queue
           else
             make SANITIZE="$SANITIZER" test-all test-runner test-fault test-concurrency test-result test-result-allocation
           fi
