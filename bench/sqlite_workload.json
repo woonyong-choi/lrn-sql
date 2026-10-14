@@ -1,7 +1,6 @@
 {
   "issue": 137,
   "seed": 137,
-  "source_commit": "533f3db8f11d96b4b694de0bf11e456b2e54c4ab",
   "sizes": [1000, 10000, 100000],
   "repetitions": 3,
   "query_repetitions": 20,
