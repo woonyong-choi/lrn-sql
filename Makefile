@@ -24,7 +24,10 @@ SANITIZE_FLAGS = -fsanitize=$(SANITIZE)
 endif
 
 CFLAGS  = $(WARNFLAGS) -g $(INCLUDES) $(SANITIZE_FLAGS)
-LDFLAGS = $(SANITIZE_FLAGS) -lpthread
+LDFLAGS = $(SANITIZE_FLAGS)
+LDLIBS  = -lpthread -lm
+DEPFLAGS = -MMD -MP
+.DEFAULT_GOAL := all
 
 SRC_DIR   = src
 BUILD_DIR = build
@@ -47,45 +50,75 @@ OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 all: $(BUILD_DIR)/minidb
 
 $(BUILD_DIR)/minidb: $(OBJS) $(BUILD_DIR)/main.o
-	$(CC) $(LDFLAGS) -o $@ $^
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-# ── wk07 regression test ──
-$(BUILD_DIR)/test_all: tests/test_all.c $(OBJS)
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
-
-$(BUILD_DIR)/test_record: tests/test_record.c src/storage/record.c src/storage/record_page.c include/storage/record.h include/storage/record_page.h
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_record.c src/storage/record.c src/storage/record_page.c
-
-$(BUILD_DIR)/storage/record_fault.o: src/storage/record.c include/storage/record.h
+# 각 테스트 번역 단위도 헤더 의존성을 추적한다.
+$(BUILD_DIR)/tests/%.o: tests/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Dmalloc=record_test_malloc -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(BUILD_DIR)/storage/record_page_fault.o: src/storage/record_page.c include/storage/record_page.h
+STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o \
+               $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o
+BASIC_TESTS = test_all test_record test_record_fault test_overflow \
+              test_overflow_fault test_value test_value_fault test_parser_boundary \
+              test_http_input
+TEST_BINS = $(addprefix $(BUILD_DIR)/,$(BASIC_TESTS))
+
+$(BUILD_DIR)/test_all: $(BUILD_DIR)/tests/test_all.o $(OBJS)
+$(BUILD_DIR)/test_parser_boundary: $(BUILD_DIR)/tests/test_parser_boundary.o $(OBJS)
+$(BUILD_DIR)/test_http_input: $(BUILD_DIR)/tests/test_http_input.o $(OBJS)
+$(BUILD_DIR)/test_record: $(BUILD_DIR)/tests/test_record.o $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o
+$(BUILD_DIR)/test_overflow: $(BUILD_DIR)/tests/test_overflow.o $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/record_page.o
+$(BUILD_DIR)/test_overflow_file: $(BUILD_DIR)/tests/test_overflow_file.o $(BUILD_DIR)/storage/overflow.o
+$(BUILD_DIR)/test_value: $(BUILD_DIR)/tests/test_value.o $(BUILD_DIR)/storage/value.o
+$(BUILD_DIR)/test_value_sqlite: $(BUILD_DIR)/tests/test_value_sqlite.o $(BUILD_DIR)/storage/value.o
+$(BUILD_DIR)/test_value_sqlite: LDLIBS += -lsqlite3
+$(BUILD_DIR)/test_record_fault: $(BUILD_DIR)/tests/test_record_fault.o $(BUILD_DIR)/storage/record_fault.o $(BUILD_DIR)/storage/record_page_fault.o
+$(BUILD_DIR)/test_overflow_fault: $(BUILD_DIR)/tests/test_overflow_fault.o $(BUILD_DIR)/storage/overflow_fault.o
+$(BUILD_DIR)/test_value_fault: $(BUILD_DIR)/tests/test_value_fault.o $(BUILD_DIR)/storage/value_fault.o
+
+$(TEST_BINS) $(BUILD_DIR)/test_overflow_file $(BUILD_DIR)/test_value_sqlite:
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/storage/record_fault.o: src/storage/record.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Dcalloc=record_test_calloc -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=record_test_malloc -c -o $@ $<
 
-$(BUILD_DIR)/test_record_fault: tests/test_record_fault.c $(BUILD_DIR)/storage/record_fault.o $(BUILD_DIR)/storage/record_page_fault.o
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+$(BUILD_DIR)/storage/record_page_fault.o: src/storage/record_page.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dcalloc=record_test_calloc -c -o $@ $<
 
-test: $(BUILD_DIR)/test_all $(BUILD_DIR)/test_record $(BUILD_DIR)/test_record_fault
-	./$(BUILD_DIR)/test_all
-	./$(BUILD_DIR)/test_record
-	./$(BUILD_DIR)/test_record_fault
+$(BUILD_DIR)/storage/overflow_fault.o: src/storage/overflow.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=overflow_test_malloc -c -o $@ $<
+
+$(BUILD_DIR)/storage/value_fault.o: src/storage/value.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=value_test_malloc -c -o $@ $<
+
+test: $(TEST_BINS)
+	@set -e; for binary in $(TEST_BINS); do "$$binary"; done
+
+test-overflow-file: $(BUILD_DIR)/test_overflow_file
+	@directory=$$(mktemp -d "$(BUILD_DIR)/overflow.XXXXXX") && \
+	trap 'rmdir "$$directory" 2>/dev/null || true' EXIT HUP INT TERM && \
+	./$(BUILD_DIR)/test_overflow_file "$$directory/roundtrip.db"
+
+test-value-sqlite: $(BUILD_DIR)/test_value_sqlite
+	./$(BUILD_DIR)/test_value_sqlite
 
 # ── data generator ──
 $(BUILD_DIR)/gen_data: tools/gen_data.c $(OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 run: $(BUILD_DIR)/minidb
 	./$(BUILD_DIR)/minidb sql.db
@@ -134,44 +167,44 @@ run-server: $(BUILD_DIR)/minidb
 	./$(BUILD_DIR)/minidb --server 8080 stress.db
 
 # ── step tests ──
-$(BUILD_DIR)/test_step0: tests/test_step0_db_execute.c $(OBJS)
+$(BUILD_DIR)/test_step0: $(BUILD_DIR)/tests/test_step0_db_execute.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-step0: $(BUILD_DIR)/test_step0
 	./$(BUILD_DIR)/test_step0
 
-$(BUILD_DIR)/test_step1: tests/test_step1_sql_ext.c $(OBJS)
+$(BUILD_DIR)/test_step1: $(BUILD_DIR)/tests/test_step1_sql_ext.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-step1: $(BUILD_DIR)/test_step1
 	./$(BUILD_DIR)/test_step1
 
-$(BUILD_DIR)/test_prop: tests/test_bptree_property.c $(OBJS)
+$(BUILD_DIR)/test_prop: $(BUILD_DIR)/tests/test_bptree_property.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-prop: $(BUILD_DIR)/test_prop
 	./$(BUILD_DIR)/test_prop
 
-$(BUILD_DIR)/test_step2: tests/test_step2_concurrency.c $(OBJS)
+$(BUILD_DIR)/test_step2: $(BUILD_DIR)/tests/test_step2_concurrency.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-step2: $(BUILD_DIR)/test_step2
 	./$(BUILD_DIR)/test_step2
 
-$(BUILD_DIR)/test_step3: tests/test_step3_regression.c $(OBJS)
+$(BUILD_DIR)/test_step3: $(BUILD_DIR)/tests/test_step3_regression.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-step3: $(BUILD_DIR)/test_step3
 	./$(BUILD_DIR)/test_step3
 
-$(BUILD_DIR)/sql_probe: tests/sql_probe.c $(OBJS)
+$(BUILD_DIR)/sql_probe: $(BUILD_DIR)/tests/sql_probe.o $(OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-pg-compat: $(BUILD_DIR)/sql_probe
 	python3 tests/pg_compat.py --probe ./$(BUILD_DIR)/sql_probe
@@ -179,9 +212,14 @@ test-pg-compat: $(BUILD_DIR)/sql_probe
 test-legacy-adopt: $(BUILD_DIR)/minidb
 	python3 tests/test_legacy_adopt.py --minidb ./$(BUILD_DIR)/minidb
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
+
+.PHONY: test-overflow-file test-value-sqlite
+
+-include $(OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BUILD_DIR)/main.d
+-include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d)
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
