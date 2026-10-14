@@ -196,6 +196,20 @@ bool page_file_is_poisoned(const page_file_t *file);
  */
 size_t page_file_handle_bytes(const page_file_t *file);
 size_t page_file_list_peak_bytes(uint32_t page_count);
+/* page_file_open·page_file_create가 path에 대해 요청하는 바이트의 순간 최대치 상한(핸들과 경로 사본들) */
+size_t page_file_open_peak_bytes(const char *path);
+
+/*
+ * 메모리 상한을 지키며 여는 경로용. admit는 파일을 열고 잠근 뒤 같은 fd의 fstat 결과(file_bytes)를 얻은 직후,
+ * 어떤 힙 할당보다 먼저 한 번 불린다. 경로 이름으로 따로 조회한 값이 아니라 잠근 그 파일의 크기이므로 조회와
+ * 열기 사이의 교체·성장이 끼어들지 않는다. false를 돌려주면 fd를 닫고 PAGE_FILE_NOMEM이며 아무것도 할당하지
+ * 않았다. NULL이면 page_file_open과 같다. 열린 파일이 제어 페이지가 약속한 길이(page_count 쪽)보다 짧으면
+ * 기존처럼 CORRUPT이므로 열린 핸들의 page_count는 file_bytes / PAGE_FILE_PAGE_BYTES 이하다.
+ */
+typedef bool (*page_file_admit_fn)(void *ctx, uint64_t file_bytes);
+page_file_status_t page_file_open_admitted(const char *path, bool writable, page_file_t **out,
+                                           page_file_open_info_t *info, page_file_admit_fn admit,
+                                           void *ctx);
 
 /*
  * overflow 어댑터. 본문 8160바이트를 한 overflow 페이지로 쓴다. ctx 저장소는 호출자가 소유하며

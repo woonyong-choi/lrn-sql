@@ -194,20 +194,52 @@ database_status_t database_create(const char *path, database_t **out)
     return DATABASE_OK;
 }
 
-database_status_t database_open(const char *path, bool writable, database_t **out)
+/* 열기 admission: 잠근 fd의 크기와 제어 페이지가 약속한 카탈로그 크기를 소비해 할당 전에 reserve한다. */
+typedef struct {
+    const mem_ledger_t *resident;
+    const char *path;
+    size_t admitted;
+} admission_t;
+
+static bool admit_file(void *ctx, uint64_t file_bytes)
 {
-    if (path == NULL || out == NULL) return DATABASE_INVALID;
+    admission_t *admission = ctx;
+    /* 열린 핸들의 page_count는 file_bytes / 페이지 크기 이하다(page_file_open_admitted) */
+    uint64_t pages = file_bytes / PAGE_FILE_PAGE_BYTES;
+    size_t bytes = sizeof(database_t) + page_file_open_peak_bytes(admission->path) +
+                   page_file_list_peak_bytes((uint32_t)(pages > UINT32_MAX ? UINT32_MAX : pages));
+    if (!mem_reserve(admission->resident, MEM_SCOPE_RESIDENT, bytes)) return false;
+    admission->admitted += bytes;
+    return true;
+}
+
+static bool admit_catalog(void *ctx, size_t catalog_bytes)
+{
+    admission_t *admission = ctx;
+    /* 읽기 buffer가 살아 있는 동안 페이지 buffer 또는 복호화 임시가 함께 있다. 복호화된 카탈로그는 그 안에 든다 */
+    size_t decode = catalog_decode_peak_bytes(catalog_bytes);
+    size_t bytes = catalog_bytes + (decode > PAGE_BODY_BYTES ? decode : PAGE_BODY_BYTES);
+    if (!mem_reserve(admission->resident, MEM_SCOPE_RESIDENT, bytes)) return false;
+    admission->admitted += bytes;
+    return true;
+}
+
+static database_status_t open_database(const char *path, bool writable, admission_t *admission,
+                                       database_t **out)
+{
+    page_file_t *file = NULL;
+    page_file_status_t opened = page_file_open_admitted(path, writable, &file, NULL,
+                                                        admission != NULL ? admit_file : NULL, admission);
+    if (opened != PAGE_FILE_OK) return from_page_file(opened);
     database_t *db = calloc(1, sizeof(*db));
-    if (db == NULL) return DATABASE_NOMEM;
-    db->writable = writable;
-    page_file_status_t opened = page_file_open(path, writable, &db->file, NULL);
-    if (opened != PAGE_FILE_OK) {
-        int saved = errno;
-        free(db);
-        errno = saved;
-        return from_page_file(opened);
+    if (db == NULL) {
+        page_file_close(file);
+        return DATABASE_NOMEM;
     }
-    catalog_store_status_t loaded = catalog_store_load(db->file, &db->catalog);
+    db->writable = writable;
+    db->file = file;
+    catalog_store_status_t loaded = catalog_store_load_admitted(db->file, admission != NULL ? admit_catalog : NULL,
+                                                                admission, &db->catalog);
     if (loaded != CATALOG_STORE_OK) {
         int saved = errno;
         page_file_close(db->file);
@@ -217,6 +249,12 @@ database_status_t database_open(const char *path, bool writable, database_t **ou
     }
     *out = db;
     return DATABASE_OK;
+}
+
+database_status_t database_open(const char *path, bool writable, database_t **out)
+{
+    if (path == NULL || out == NULL) return DATABASE_INVALID;
+    return open_database(path, writable, NULL, out);
 }
 
 database_status_t database_close(database_t *db)
@@ -238,6 +276,8 @@ size_t database_table_count(const database_t *db)
 {
     return db != NULL ? catalog_table_count(db->catalog) : 0;
 }
+
+static size_t overflow_write_bound(size_t size_bytes);
 
 /* ── 상주 메모리 ── */
 
@@ -261,6 +301,79 @@ database_status_t database_attach_ledger(database_t *db, const mem_ledger_t *res
 size_t database_resident_bytes(const database_t *db)
 {
     return db == NULL ? 0 : db->res_fixed + db->res_catalog + db->res_lists;
+}
+
+/*
+ * admission으로 reserve한 몫을 열린 핸들의 실제 상주 몫으로 바꾼다. 실제 몫이 admission보다 크면 이미 할당한
+ * 뒤라 예산을 지켰다고 말할 수 없으므로 상한 계산의 오류로 보고 거절한다(assert로도 잡힌다).
+ */
+static database_status_t finish_admission(database_t *db, const mem_ledger_t *resident, size_t admitted)
+{
+    size_t fixed = sizeof(*db) + page_file_handle_bytes(db->file);
+    size_t catalog = catalog_memory_bytes(db->catalog);
+    size_t lists = page_file_list_peak_bytes(page_file_control(db->file)->page_count);
+    size_t exact = fixed + catalog + lists;
+    assert(exact <= admitted);
+    if (exact > admitted) return DATABASE_INVALID;
+    mem_release(resident, MEM_SCOPE_RESIDENT, admitted - exact);
+    mem_ledger_retain(resident);
+    db->resident = *resident;
+    db->res_fixed = fixed;
+    db->res_catalog = catalog;
+    db->res_lists = lists;
+    return DATABASE_OK;
+}
+
+database_status_t database_open_bounded(const char *path, bool writable, const mem_ledger_t *resident,
+                                        database_t **out)
+{
+    if (!mem_ledger_enabled(resident)) return database_open(path, writable, out);
+    if (path == NULL || out == NULL) return DATABASE_INVALID;
+    admission_t admission = {resident, path, 0};
+    database_t *db = NULL;
+    database_status_t opened = open_database(path, writable, &admission, &db);
+    if (opened != DATABASE_OK) {
+        int saved = errno;
+        mem_release(resident, MEM_SCOPE_RESIDENT, admission.admitted);
+        errno = saved;
+        return opened;
+    }
+    database_status_t attached = finish_admission(db, resident, admission.admitted);
+    if (attached != DATABASE_OK) {
+        database_close(db);
+        mem_release(resident, MEM_SCOPE_RESIDENT, admission.admitted);
+        return attached;
+    }
+    *out = db;
+    return DATABASE_OK;
+}
+
+database_status_t database_create_bounded(const char *path, const mem_ledger_t *resident, database_t **out)
+{
+    if (!mem_ledger_enabled(resident)) return database_create(path, out);
+    if (path == NULL || out == NULL) return DATABASE_INVALID;
+    /* 새 파일은 빈 카탈로그(부호화 32바이트) 하나와 페이지 몇 장뿐이다 */
+    size_t empty = 32;
+    size_t catalog = catalog_decode_peak_bytes(empty);
+    size_t admitted = sizeof(database_t) + page_file_open_peak_bytes(path) + catalog +
+                      page_file_list_peak_bytes(16) + empty + overflow_write_bound(empty);
+    if (!mem_reserve(resident, MEM_SCOPE_RESIDENT, admitted)) return DATABASE_NOMEM;
+    database_t *db = NULL;
+    database_status_t created = database_create(path, &db);
+    if (created != DATABASE_OK) {
+        int saved = errno;
+        mem_release(resident, MEM_SCOPE_RESIDENT, admitted);
+        errno = saved;
+        return created;
+    }
+    database_status_t attached = finish_admission(db, resident, admitted);
+    if (attached != DATABASE_OK) {
+        database_close(db);
+        mem_release(resident, MEM_SCOPE_RESIDENT, admitted);
+        return attached;
+    }
+    *out = db;
+    return DATABASE_OK;
 }
 
 typedef struct {
