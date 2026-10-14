@@ -22,6 +22,17 @@
  * 디스크에서 읽기 pager_mark_dirty(pid) → 수정됨 표시, flush 시 디스크에 기록
  *   pager_unpin(pid) → pin-- (0이 되면 LRU 교체 대상)
  *
+ * 실패 모델과 보장 범위 (WAL 없음):
+ *   - 프로세스 종료(SIGKILL): 이미 pwrite한 페이지는 OS 캐시에 남아 보존된다.
+ *     flush_all 성공 이후의 변경만 파일에 있다고 말할 수 있고, 그 뒤 변경은 사라진다.
+ *   - 부분 쓰기(torn): 한 페이지가 절반만 새 내용일 수 있다. 페이지 체크섬이
+ *     없는 현재 형식은 이를 탐지하지 못한다.
+ *   - 성공 반환 후 미반영(lost): pwrite/fsync가 성공을 돌려줘도 저장 장치가
+ *     버렸다면 알 방법이 없다.
+ *   - 여러 페이지에 걸친 변경은 원자적이지 않다. 기록 순서만으로 일관성을 보장하지 않는다.
+ *   따라서 flush_all 성공은 "이 시점의 페이지 이미지를 쓰고 fsync가 오류 없이
+ *   끝났다"까지만 뜻하며, 트랜잭션 단위 내구성이나 크래시 복구를 주장하지 않는다.
+ *
  * 빈 페이지 재활용:
  *   삭제로 비워진 페이지는 free page 연결 리스트에 추가된다.
  *   free_page_head → page_A → page_B → 0 (끝)
@@ -35,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 /* ── 페이지 타입 → 문자열 변환 (로깅용) ── */
@@ -330,14 +342,34 @@ int pager_open(pager_t* pager, const char* path, bool create) {
   pager->dirty_high_watermark = 64;
   pager->dirty_low_watermark = 16;
 
+  /*
+   * 같은 파일을 쓰는 pager는 하나만 둔다. advisory lock은 열린 fd(open file
+   * description)에 묶이므로 프로세스가 SIGKILL로 죽어도 커널이 풀어 준다.
+   * pid 파일 같은 숫자 기록으로 생존을 판정하지 않는다.
+   * 새 DB 생성(O_TRUNC)은 잠금을 얻은 뒤에 비워야 다른 pager의 파일을 지우지 않는다.
+   */
   int flags = O_RDWR;
   if (create) {
-    flags |= O_CREAT | O_TRUNC;
+    flags |= O_CREAT;
   }
   pager->io = g_default_io;
   int fd = open(path, flags, 0644);
   if (fd < 0) {
     pager->fd = -1;
+    return -1;
+  }
+  if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    int err = errno;
+    close(fd);
+    pager->fd = -1;
+    errno = err; /* 이미 열려 있으면 EWOULDBLOCK */
+    return -1;
+  }
+  if (create && ftruncate(fd, 0) != 0) {
+    int err = errno;
+    close(fd);
+    pager->fd = -1;
+    errno = err;
     return -1;
   }
 
