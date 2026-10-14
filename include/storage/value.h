@@ -87,6 +87,26 @@ value_status_t value_clone(const value_view_t *from, value_t *out);
 value_status_t value_cast(const value_view_t *from, value_type_t target, value_t *out);
 
 /*
+ * TEXT의 문자 수(Unicode code point 수)를 *chars에 채운다. U+0000도 한 문자이고 바이트 수(size_bytes)와
+ * 다르다(한글 3바이트, 이모지 4바이트도 한 문자). TEXT가 아니면 VALUE_MISMATCH, 잘못된 view나 잘못된
+ * UTF-8이면 VALUE_INVALID이며 *chars는 변경하지 않는다. 할당하지 않는다.
+ */
+value_status_t value_text_chars(const value_view_t *text, size_t *chars);
+
+/*
+ * VARCHAR(n) 경계 검사. n은 저장 폭이나 바이트 수가 아니라 문자 수의 상한(max_chars)이다. 값을 자르거나
+ * 고치지 않고 통과(VALUE_OK) 또는 거절만 한다.
+ *   TEXT   문자 수가 max_chars 이하면 VALUE_OK, 넘으면 VALUE_LIMIT (n 문자는 통과, n+1 문자는 거절)
+ *   NULL   VALUE_OK (제한을 받을 값이 없다)
+ *   그 밖  VALUE_MISMATCH
+ *   max_chars가 0이거나 잘못된 view·UTF-8이면 VALUE_INVALID (n 문자를 넘긴 값이 아니라 잘못된 입력으로 구분한다)
+ * 최초 비교와 같이 locale이나 정규화는 보지 않는다(결합 문자는 별개 문자로 센다). SQLite는 VARCHAR(n)의 n을
+ * 강제하지 않고 PostgreSQL은 문자 수로 거절하므로, 이 함수는 후자와 같은 단위를 쓰되 공백을 특별 취급하지 않는다.
+ * 할당하지 않는다.
+ */
+value_status_t value_check_varchar(const value_view_t *value, size_t max_chars);
+
+/*
  * 정렬용 전순서를 *order(-1, 0, 1)에 채운다. NULL < 숫자 < TEXT < BLOB이다.
  * INTEGER와 REAL은 변환 없이 수학적으로 정확히 비교한다(2^53 초과 정수 포함, -0.0 == 0.0).
  * TEXT·BLOB은 길이를 가진 바이트열로 memcmp 후 길이 순이다(UTF-8 바이트 순).
