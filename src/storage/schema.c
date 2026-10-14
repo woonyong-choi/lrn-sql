@@ -138,14 +138,16 @@ void row_serialize(const db_header_t *hdr, const row_value_t *values, uint8_t *b
             case COL_TYPE_VARCHAR:
             {
                 /*
-                 * col->size - 1 바이트까지 복사 (null 종단 보장)
-                 * 예: VARCHAR(32)에 "Alice"(5자) 저장
+                 * 값을 그대로 복사한다. 슬롯은 col->size 바이트이고 읽을 때 종료 NUL을 따로 붙이므로
+                 * 값은 col->size 바이트까지 들어간다. 슬롯보다 긴 값은 호출자(executor)가 쓰기 전에
+                 * 거절해야 하며 여기서 조용히 자르지 않는다. 방어로 슬롯 밖은 쓰지 않는다.
+                 * 예: VARCHAR(32)에 "Alice"(5바이트) 저장
                  *   → 5바이트 복사, 나머지 27바이트는 0 (memset으로 이미 초기화됨)
                  */
                 size_t len = strlen(values[i].str_val);
-                if (len >= col->size)
+                if (len > col->size)
                 {
-                    len = col->size - 1;
+                    len = col->size;
                 }
                 memcpy(dst, values[i].str_val, len);
                 break;
@@ -185,8 +187,10 @@ void row_deserialize(const db_header_t *hdr, const uint8_t *buf, row_value_t *va
             }
             case COL_TYPE_VARCHAR:
             {
-                memcpy(values[i].str_val, src, col->size);
-                values[i].str_val[col->size] = '\0';
+                /* str_val은 255바이트와 종료 NUL까지만 담는다. 더 큰 폭의 헤더는 버퍼 밖을 쓰지 못하게 자른다. */
+                size_t width = col->size < sizeof(values[i].str_val) ? col->size : sizeof(values[i].str_val) - 1;
+                memcpy(values[i].str_val, src, width);
+                values[i].str_val[width] = '\0';
                 break;
             }
         }
