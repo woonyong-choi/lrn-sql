@@ -99,6 +99,7 @@ typedef enum {
     HEAP_CORRUPT,
     HEAP_UNSUPPORTED_LOCATOR,  /* heap_root가 이 모듈의 디렉터리가 아님 */
     HEAP_BATCH_FAILED,         /* 앞선 연산이 실패한 batch는 abort·free만 가능하다 */
+    HEAP_KEY_EXISTS,           /* 키 색인에 같은 키가 이미 있음 */
     HEAP_DONE                  /* cursor가 끝에 도달 */
 } heap_status_t;
 
@@ -116,6 +117,31 @@ typedef struct {
 typedef struct heap heap_t;
 typedef struct heap_batch heap_batch_t;
 typedef struct heap_cursor heap_cursor_t;
+
+/* 호출자가 주는 누적 계수기. heap과 여기서 연 cursor·batch가 올린다(단일 스레드). */
+typedef struct {
+    uint64_t rows_scanned;      /* cursor가 돌려준 행 수 */
+    uint64_t index_lookups;     /* 키 색인 조회(find·max) 횟수 */
+    uint64_t index_pages_read;  /* 색인 노드 페이지 읽기 횟수 */
+} heap_stats_t;
+
+/*
+ * 정수 키 색인(pk_tree.h). key_column의 NULL이 아닌 값마다 locator를 색인에 두며, heap batch의 insert·update·
+ * delete가 행과 같은 batch 안에서 색인을 함께 바꾼다. 색인 페이지는 행 페이지와 같은 fresh·old 목록에 실려
+ * 같은 catalog 게시로 올라가므로 게시된 색인은 항상 게시된 heap의 행 위치를 가리킨다.
+ *
+ * 색인을 쓰는 조건(heap_is_indexed): key_column이 INTEGER 컬럼이고 다음 중 하나다.
+ *   - index_root가 있고 root의 stamp가 heap root와 같다(이 heap의 색인이다).
+ *   - index_root가 없고 heap_root도 없다(빈 heap. 첫 batch가 root를 만든다).
+ * 그 밖에는 색인이 없는 것으로 보고 호출자는 cursor로 스캔한다. 색인 없이 만들어진 heap에 행이 있으면(옛 파일)
+ * 색인을 만들지 않으며, 다른 쪽(색인을 모르는 구버전)이 heap만 바꿔 stamp가 어긋난 색인도 쓰지 않는다.
+ * key_column이 SIZE_MAX면 색인을 쓰지 않는다.
+ */
+typedef struct {
+    size_t key_column;
+    uint32_t index_root;
+    heap_stats_t *stats;  /* NULL이면 세지 않는다 */
+} heap_index_spec_t;
 
 /*
  * 커밋된 상태를 연다. 디렉터리 페이지를 모두 읽어 검증한다(record page 자체는 읽을 때 종류와
@@ -140,6 +166,19 @@ heap_status_t heap_open(page_file_t *file, uint32_t table_id, uint32_t heap_root
  */
 heap_status_t heap_open_ex(page_file_t *file, uint32_t table_id, uint32_t heap_root,
                            const heap_schema_t *schema, const mem_ledger_t *ledger, heap_t **out);
+/* spec이 NULL이면 heap_open_ex와 같다. 색인 root 페이지가 형식에 맞지 않으면 HEAP_CORRUPT다. */
+heap_status_t heap_open_indexed(page_file_t *file, uint32_t table_id, uint32_t heap_root,
+                                const heap_schema_t *schema, const heap_index_spec_t *spec,
+                                const mem_ledger_t *ledger, heap_t **out);
+/* 이 heap이 키 색인을 쓰는지. false면 호출자가 스캔한다. */
+bool heap_is_indexed(const heap_t *heap);
+/*
+ * 키 색인으로 한 행의 locator를 찾는다. 없으면 HEAP_NOT_FOUND다. 찾은 행을 읽어 키가 같은지 확인하며
+ * 어긋나면 HEAP_CORRUPT다(낡은 locator를 돌려주지 않는다). 색인을 쓰지 않으면 HEAP_INVALID다.
+ */
+heap_status_t heap_find_key(heap_t *heap, int64_t key, heap_locator_t *locator);
+/* 색인에 있는 가장 큰 키. 비어 있으면 *present가 false다. */
+heap_status_t heap_max_key(heap_t *heap, bool *present, int64_t *key);
 void heap_release_row(const heap_t *heap, value_t *row);
 void heap_free_pages(const heap_t *heap, uint32_t *pages, size_t count);
 void heap_close(heap_t *heap);
@@ -175,13 +214,19 @@ heap_status_t heap_batch_update(heap_batch_t *batch, heap_locator_t locator,
                                 const value_view_t *values, size_t count,
                                 heap_locator_t *new_locator);
 heap_status_t heap_batch_delete(heap_batch_t *batch, heap_locator_t locator);
+/*
+ * insert·update·delete는 색인을 쓰면 색인도 바꾼다. 새 키가 이미 다른 행의 것이면 HEAP_KEY_EXISTS이며 batch는
+ * FAILED다. 호출자는 먼저 heap_find_key로 중복을 거른다. 한 batch 안에서 같은 키를 여러 행에 임시로 겹쳐 쓰는
+ * 갱신은 지원하지 않는다(호출자가 최종 결과가 유일한 갱신만 보낸다).
+ */
 
 typedef struct {
     uint32_t new_root;           /* 새 디렉터리 루트. record page가 하나도 없으면 0 */
     const uint32_t *old_pages;   /* 게시 성공 뒤 release할 페이지 */
     size_t old_count;
-    const uint32_t *new_pages;   /* 이번 batch가 할당해 살아 있는 페이지 */
+    const uint32_t *new_pages;   /* 이번 batch가 할당해 살아 있는 페이지(색인 페이지 포함) */
     size_t new_count;
+    uint32_t new_primary_root;   /* 새 색인 root. 색인을 쓰지 않으면 열 때의 index_root 그대로 */
 } heap_batch_result_t;
 
 /*

@@ -690,7 +690,7 @@ page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
         return PAGE_FILE_CORRUPT;
     }
     if (envelope.kind != PAGE_KIND_RECORD && envelope.kind != PAGE_KIND_OVERFLOW &&
-        envelope.kind != PAGE_KIND_DIRECTORY) {
+        envelope.kind != PAGE_KIND_DIRECTORY && envelope.kind != PAGE_KIND_INDEX) {
         return PAGE_FILE_UNSUPPORTED;
     }
     info->kind = envelope.kind;
