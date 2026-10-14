@@ -21,7 +21,9 @@
  * 어느 단계에서 멈춰도 WAL에 기록이 없고 승인한 거래가 없으므로 같은 호출을 다시 하면 이어서 끝낸다.
  *
  * 열 때의 판정(제어 페이지 c, WAL 상태). 오류는 복구하지 않고 파일을 바꾸지 않는다.
- *   c가 v1, WAL 없음            PLAIN(로그 없이 연다). convert면 A, B, C를 한다
+ *   c가 v1, WAL 없음            PLAIN(로그 없이 연다). convert면 A, B, C를 한다. 단 손상 슬롯로 fallback한 v1
+ *                               (file_info.damaged_slots != 0)은 오류 CORRUPT. 이전 durable 파일의 손상과 구별할 수 없어
+ *                               PLAIN이나 자동 전환으로 열지 않는다
  *   c가 v1, WAL에 기록 0        중단된 전환. convert면 B, C를 한다. 아니면 NEEDS_CONVERSION
  *   c가 v1, WAL에 기록 있음     오류 DOWNGRADED. v2 제어 페이지가 손상돼 v1 슬롯으로 fallback했을 수 있다.
  *                               승인한 거래가 있을 수 있으므로 로그 없는 파일로 조용히 여는 길은 없다
@@ -31,7 +33,8 @@
  *   c가 v2 ready 아님, 기록 있음 오류 DOWNGRADED. 기록은 ready 뒤에만 생기므로 더 새로운 슬롯이 사라졌다
  *   c가 v2 ready                정상. 한 슬롯이 손상돼도 살아남은 슬롯이 ready이면 정상이다
  * 판정할 수 없는 한계: WAL 파일이 지워지고 v2 슬롯도 손상돼 v1 fallback이 된 경우는 로그 없는 v1 파일과 같다.
- * 이때는 file_info.damaged_slots가 0이 아니므로 호출자가 구별해 거절할 수 있다.
+ * 이때는 damaged_slots가 0이 아니므로 위 표대로 CORRUPT로 거절한다. 대가로 durable과 무관한 v1 파일의 슬롯
+ * 손상도 같이 거절한다(복구 도구가 필요하다).
  */
 
 typedef enum {
@@ -60,6 +63,7 @@ typedef struct {
 typedef struct {
     page_file_t *file;
     wal_t *wal;                      /* PLAIN이면 NULL */
+    bool failed;                     /* persist_epoch가 실패했다. 다시 열기 전에는 epoch를 내주지 않는다 */
 } durable_pair_t;
 
 typedef struct {
@@ -79,9 +83,13 @@ durable_pair_status_t durable_pair_open(const char *db_path, const char *wal_pat
                                         durable_pair_info_t *info);
 
 /*
- * epoch를 영속화한다. page_file_stage_durable_epoch와 page_file_commit을 한 번에 하며, 성공을 돌려받은 뒤에만
- * 호출자가 그 epoch를 세션에 보여 줄 수 있다. 실패하면 보여 주면 안 된다. 제어 쓰기를 시도한 뒤의 실패는 영속 여부를
- * 알 수 없으므로 DURABLE_PAIR_IO이고 핸들은 poison이다(다시 열면 영속된 값이 floor다).
+ * epoch를 영속화한다. 같은 epoch를 두 제어 슬롯에 차례로 commit하고, 둘째가 성공한 뒤에만 OK를 돌려준다. 호출자는
+ * OK를 받은 뒤에만 그 epoch를 세션에 보여 줄 수 있다. 한 슬롯만 쓴 상태에서 그 슬롯이 손상되면 이전 슬롯의 낮은
+ * floor로 열려 보여 준 epoch를 다시 내줄 수 있으므로, 한 슬롯이 손상돼도 floor는 보여 준 epoch 이상이다
+ * (두 슬롯이 모두 손상되면 열기가 CORRUPT로 거절한다).
+ * 첫째나 둘째 commit이 실패하면 영속 여부를 알 수 없다. DURABLE_PAIR_IO를 돌려주고 pair->failed가 켜져 이후 호출도
+ * 새 epoch를 내주지 않는다. 호출자는 핸들을 닫고 다시 열어야 하며 그때는 영속된 값이 floor다(보여 주지 않은 epoch는
+ * 건너뛸 수 있다).
  */
 durable_pair_status_t durable_pair_persist_epoch(durable_pair_t *pair, uint32_t epoch);
 
