@@ -648,3 +648,14 @@ size_t catalog_encoded_bytes(const catalog_t *catalog)
 {
     return catalog == NULL ? 0 : catalog->encoded_bytes;
 }
+
+size_t catalog_decode_peak_bytes(size_t encoded_bytes)
+{
+    size_t tables = encoded_bytes / MIN_TABLE_BYTES;
+    size_t columns = encoded_bytes / (COLUMN_FIXED_BYTES + 1u);
+    size_t memory = sizeof(catalog_t) + tables * sizeof(table_t) + encoded_bytes +
+                    columns * sizeof(catalog_column_t);
+    size_t scratch = columns * (sizeof(catalog_column_spec_t) + sizeof(name_ref_t)) +
+                     tables * sizeof(name_ref_t);
+    return memory + scratch;
+}

@@ -472,6 +472,13 @@ static page_file_status_t pick_control(const uint8_t pages[2][PAGE_FILE_PAGE_BYT
 page_file_status_t page_file_open(const char *path, bool writable, page_file_t **out,
                                   page_file_open_info_t *info)
 {
+    return page_file_open_admitted(path, writable, out, info, NULL, NULL);
+}
+
+page_file_status_t page_file_open_admitted(const char *path, bool writable, page_file_t **out,
+                                           page_file_open_info_t *info, page_file_admit_fn admit,
+                                           void *ctx)
+{
     if (path == NULL || out == NULL) return PAGE_FILE_INVALID;
     int fd = open(path, writable ? O_RDWR : O_RDONLY);
     if (fd < 0) return PAGE_FILE_IO;
@@ -481,6 +488,20 @@ page_file_status_t page_file_open(const char *path, bool writable, page_file_t *
         close(fd);
         errno = err;
         return status;
+    }
+    if (admit != NULL) {
+        /* 잠근 fd의 크기로 상한을 정한다. 이 뒤의 할당은 모두 admit가 허락한 몫 안에서만 일어난다 */
+        struct stat sized;
+        if (fstat(fd, &sized) != 0) {
+            int err = errno;
+            close(fd);
+            errno = err;
+            return PAGE_FILE_IO;
+        }
+        if (!admit(ctx, sized.st_size > 0 ? (uint64_t)sized.st_size : 0)) {
+            close(fd);
+            return PAGE_FILE_NOMEM;
+        }
     }
     page_file_t *file = new_handle(fd, writable);
     if (file == NULL) {
@@ -840,4 +861,11 @@ size_t page_file_list_peak_bytes(uint32_t page_count)
     size_t cap = (size_t)page_count * 2;
     if (cap < 8) cap = 8;
     return 4 * cap * sizeof(uint32_t);
+}
+
+size_t page_file_open_peak_bytes(const char *path)
+{
+    size_t length = path != NULL ? strlen(path) : 0;
+    /* 핸들, create의 partial·final·directory 사본(접미사 포함)과 open의 path 사본 */
+    return sizeof(page_file_t) + 4 * (length + sizeof(PARTIAL_SUFFIX) + 1);
 }
