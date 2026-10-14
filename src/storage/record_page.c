@@ -25,13 +25,13 @@ static const uint8_t *get_slot(const uint8_t *page, uint16_t slot)
 void record_page_init(uint8_t page[RECORD_PAGE_BYTES])
 {
     memset(page, 0, RECORD_PAGE_BYTES);
-    memcpy(page, "LRP1", 4);
+    memcpy(page, RECORD_PAGE_MAGIC, 4);
 }
 
 record_page_status_t record_page_validate(const uint8_t page[RECORD_PAGE_BYTES])
 {
     if (page == NULL) return RECORD_PAGE_INVALID;
-    if (memcmp(page, "LRP1", 4) != 0) return RECORD_PAGE_INVALID;
+    if (memcmp(page, RECORD_PAGE_MAGIC, 4) != 0) return RECORD_PAGE_INVALID;
     if (read_u16(page + 6) != 0) return RECORD_PAGE_INVALID;
     uint16_t count = read_u16(page + 4);
     if (count > (RECORD_PAGE_BYTES - PAGE_HEADER_BYTES) / SLOT_BYTES) {
