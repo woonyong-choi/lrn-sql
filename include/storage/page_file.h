@@ -45,7 +45,9 @@ typedef enum {
     PAGE_KIND_RECORD = 2,
     PAGE_KIND_OVERFLOW = 3,
     /* 테이블 heap의 페이지 디렉터리. 본문은 자체 magic·version을 갖는다(heap_store.h). */
-    PAGE_KIND_DIRECTORY = 4
+    PAGE_KIND_DIRECTORY = 4,
+    /* 테이블 기본 키 색인 노드. 본문은 자체 magic·version을 갖는다(pk_tree.h). */
+    PAGE_KIND_INDEX = 5
 } page_kind_t;
 
 typedef enum {

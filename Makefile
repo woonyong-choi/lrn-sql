@@ -72,11 +72,12 @@ $(BUILD_DIR)/tests/%.o: tests/%.c
 
 STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o \
                $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o \
-               $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/catalog_store.o $(BUILD_DIR)/storage/legacy_migrate.o
+               $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/catalog_store.o $(BUILD_DIR)/storage/legacy_migrate.o \
+               $(BUILD_DIR)/storage/pk_tree.o
 BASIC_TESTS = test_all test_record test_record_fault test_overflow \
               test_overflow_fault test_value test_value_fault test_value_legacy_varchar test_parser_boundary \
               test_http_input test_io test_io_lock test_catalog test_catalog_fault \
-              test_lexer test_lexer_fault test_page_file test_catalog_store test_legacy_migrate
+              test_lexer test_lexer_fault test_page_file test_catalog_store test_legacy_migrate test_pk_tree
 TEST_BINS = $(addprefix $(BUILD_DIR)/,$(BASIC_TESTS))
 
 $(BUILD_DIR)/test_all: $(BUILD_DIR)/tests/test_all.o $(OBJS)
@@ -108,6 +109,7 @@ $(BUILD_DIR)/test_lexer_fault: $(BUILD_DIR)/tests/test_lexer_fault.o $(BUILD_DIR
 $(BUILD_DIR)/test_page_file: $(BUILD_DIR)/tests/test_page_file.o $(STORAGE_OBJS)
 $(BUILD_DIR)/test_catalog_store: $(BUILD_DIR)/tests/test_catalog_store.o $(STORAGE_OBJS)
 $(BUILD_DIR)/test_legacy_migrate: $(BUILD_DIR)/tests/test_legacy_migrate.o $(STORAGE_OBJS)
+$(BUILD_DIR)/test_pk_tree: $(BUILD_DIR)/tests/test_pk_tree.o $(BUILD_DIR)/storage/pk_tree.o
 
 $(BUILD_DIR)/test_result: $(BUILD_DIR)/tests/test_result.o $(BUILD_DIR)/sql/result.o $(BUILD_DIR)/storage/value.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -338,7 +340,7 @@ DATABASE_OBJS = $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store.o $(BUILD_DIR)/s
                 $(BUILD_DIR)/storage/durable_pair.o $(BUILD_DIR)/storage/transaction.o \
                 $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/sql/database_txn.o \
                 $(BUILD_DIR)/sql/sql_statement.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/sql/result.o
-DATABASE_TESTS = test_sql_statement test_heap_store test_database test_database_sqlite test_database_fault test_database_bounded_open
+DATABASE_TESTS = test_sql_statement test_heap_store test_database test_database_sqlite test_database_fault test_database_bounded_open test_primary_index
 DATABASE_BINS = $(addprefix $(BUILD_DIR)/,$(DATABASE_TESTS))
 DATABASE_AUDIT_OBJS = $(patsubst $(BUILD_DIR)/%.o,$(BUILD_DIR)/audit/%.o,$(DATABASE_OBJS))
 
@@ -346,6 +348,7 @@ $(BUILD_DIR)/test_sql_statement: $(BUILD_DIR)/tests/test_sql_statement.o $(BUILD
 $(BUILD_DIR)/test_heap_store: $(BUILD_DIR)/tests/test_heap_store.o $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store_test.o
 $(BUILD_DIR)/test_database: $(BUILD_DIR)/tests/test_database.o $(DATABASE_OBJS)
 $(BUILD_DIR)/test_database_sqlite: $(BUILD_DIR)/tests/test_database_sqlite.o $(DATABASE_OBJS)
+$(BUILD_DIR)/test_primary_index: $(BUILD_DIR)/tests/test_primary_index.o $(DATABASE_OBJS)
 $(BUILD_DIR)/test_database_fault: $(BUILD_DIR)/tests/test_database_fault.o $(filter-out $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/storage/heap_store.o,$(DATABASE_OBJS)) $(BUILD_DIR)/sql/database_fault.o $(BUILD_DIR)/storage/heap_store_fault.o
 $(BUILD_DIR)/test_database_bounded_open: $(BUILD_DIR)/tests/test_database_bounded_open.o $(BUILD_DIR)/tests/alloc_audit.o $(DATABASE_AUDIT_OBJS)
 $(DATABASE_BINS):
