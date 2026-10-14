@@ -60,7 +60,8 @@ static internal_entry_t* internal_entries(uint8_t* page) {
   return (internal_entry_t*)(page + sizeof(internal_page_header_t));
 }
 
-static uint32_t root_id(pager_t* p) { return p->header.root_index_page_id; }
+/* 잠금 없이 읽는다. 읽은 뒤 latch를 잡고 다시 읽어 같은지 확인하는 호출부 규칙이 논리적 원자성을 만든다 */
+static uint32_t root_id(pager_t* p) { return pager_root_id(p); }
 
 /* ── 이진 탐색 ── */
 
@@ -188,6 +189,7 @@ static uint8_t* find_leaf_rlatch(pager_t* pager, uint64_t key,
                                  uint32_t* out_pid) {
 retry:;
   uint32_t pid = root_id(pager);
+  MINIDB_HOOK(MINIDB_HOOK_ROOT_READ, pager, pid);
   uint8_t* page = pager_get_page_rlatch(pager, pid);
   if (!page) {
     *out_pid = pid;
@@ -243,6 +245,7 @@ retry:
   ls_init(stack);
   {
     uint32_t pid = root_id(pager);
+    MINIDB_HOOK(MINIDB_HOOK_ROOT_READ, pager, pid);
     uint8_t* page = pager_get_page_wlatch(pager, pid);
     if (!page) {
       *out_pid = pid;
@@ -368,6 +371,7 @@ bool bptree_search(pager_t* pager, uint64_t key, row_ref_t* out_ref) {
 static uint8_t* find_leftmost_leaf_rlatch(pager_t* pager, uint32_t* out_pid) {
 retry:;
   uint32_t pid = root_id(pager);
+  MINIDB_HOOK(MINIDB_HOOK_ROOT_READ, pager, pid);
   uint8_t* page = pager_get_page_rlatch(pager, pid);
   if (!page) {
     *out_pid = pid;
@@ -662,8 +666,7 @@ static int propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
   /* root_id를 갱신 — old_root의 wlatch가 아직 유지 중이므로
    * 다른 스레드는 old_root에 접근할 수 없다.
    * ls_release_all 후에야 다른 스레드가 새 루트를 통해 접근 가능. */
-  pager->header.root_index_page_id = new_root;
-  pager->header_dirty = true;
+  pager_publish_root(pager, new_root);
   ls_release_all(pager, stack);
   return 0;
 }
@@ -884,8 +887,7 @@ static int propagate_delete(pager_t* pager, latch_stack_t* stack,
       pager_unpin(pager, node_pid); /* pin-- */
       pager_free_page(pager, node_pid);
 
-      pager->header.root_index_page_id = child;
-      pager->header_dirty = true;
+      pager_publish_root(pager, child);
 
       /* 새 루트의 parent를 0으로 설정 */
       uint8_t* cp = pager_get_page(pager, child);
