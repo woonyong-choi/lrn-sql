@@ -32,6 +32,7 @@ def _run(folder: Path, source: str, options: list[str]) -> tuple[int, dict]:
         text=True,
         timeout=5,
     )
+    assert report.exists(), completed.stderr
     return completed.returncode, json.loads(report.read_text())
 
 
@@ -65,7 +66,9 @@ def test_exit_code_matches_only_the_requested_result(
 def test_signal_is_distinct_from_error(tmp_path: Path) -> None:
     source = "import os,signal; os.kill(os.getpid(),signal.SIGTERM)"
     status, result = _run(
-        tmp_path, source, ["--expect", "signal", "--expect-code", str(signal.SIGTERM)]
+        tmp_path,
+        source,
+        ["--expect", "signal", "--expect-code", str(int(signal.SIGTERM))],
     )
     assert status == 0
     assert result["outcome"] == "signal"
