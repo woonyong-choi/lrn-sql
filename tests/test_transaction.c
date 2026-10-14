@@ -753,7 +753,12 @@ static void test_epoch(void)
     third = (txn_manager_t *)1;
     CHECK(txn_manager_open(&spec, &third) == TXN_INVALID && third == NULL);
 
-    /* 자동 발급은 이미 쓴 지정 세대를 건너뛰고 계속 증가한다 */
+    /* 상한보다 작은 지정도 거절한다 */
+    spec.epoch = 5;
+    third = (txn_manager_t *)1;
+    CHECK(txn_manager_open(&spec, &third) == TXN_INVALID && third == NULL);
+
+    /* 자동 발급은 상한 + 1로 계속 증가하고, 상한을 뛰어넘는 지정 뒤에는 그 다음 번호를 받는다 */
     first = open_manager(&fake, TXN_GUARANTEE_SYNCED, 0);
     e1 = writer_epoch(first);
     CHECK(txn_manager_close(&first) == TXN_OK);
@@ -763,6 +768,98 @@ static void test_epoch(void)
     e2 = writer_epoch(second);
     CHECK(e2 == e1 + 2);
     CHECK(txn_manager_close(&first) == TXN_OK && txn_manager_close(&second) == TXN_OK);
+}
+
+#define EPOCH_THREADS 8
+#define EPOCH_OPENS 50
+
+typedef struct {
+    uint32_t epochs[EPOCH_OPENS];
+    int failures_seen;
+} epoch_worker_t;
+
+static txn_status_t nop_begin(void *ctx, uint64_t base, void **write)
+{
+    (void)ctx;
+    (void)base;
+    *write = NULL;
+    return TXN_OK;
+}
+
+static txn_publish_result_t nop_publish(void *ctx, void *write, uint64_t seq, txn_guarantee_t requested)
+{
+    (void)ctx;
+    (void)write;
+    (void)seq;
+    (void)requested;
+    return (txn_publish_result_t){TXN_OUTCOME_APPLIED, TXN_GUARANTEE_SYNCED};
+}
+
+static void nop_finish(void *ctx, void *write, txn_outcome_t outcome, uint64_t seq)
+{
+    (void)ctx;
+    (void)write;
+    (void)outcome;
+    (void)seq;
+}
+
+static const txn_backend_ops_t NOP_OPS = {nop_begin, nop_publish, nop_finish, NULL, NULL, NULL};
+
+/* 동시에 manager를 열고 닫으며 자동 세대를 받는다. 결과는 스레드별 배열에만 쓴다. */
+static void *epoch_worker_main(void *arg)
+{
+    epoch_worker_t *worker = arg;
+    txn_manager_spec_t spec = {.ops = &NOP_OPS, .max_guarantee = TXN_GUARANTEE_SYNCED};
+
+    for (int i = 0; i < EPOCH_OPENS; i++) {
+        txn_manager_t *manager = NULL;
+        txn_t *txn = NULL;
+
+        if (txn_manager_open(&spec, &manager) != TXN_OK || txn_begin(manager, NULL, &txn) != TXN_OK) {
+            worker->failures_seen++;
+            continue;
+        }
+        worker->epochs[i] = (uint32_t)(txn_id(txn) >> 32);
+        txn_release(&txn);
+        txn_manager_close(&manager);
+    }
+    return NULL;
+}
+
+static int compare_u32(const void *a, const void *b)
+{
+    uint32_t x = *(const uint32_t *)a;
+    uint32_t y = *(const uint32_t *)b;
+
+    return x < y ? -1 : x > y;
+}
+
+static void test_epoch_concurrent_open(void)
+{
+    static epoch_worker_t workers[EPOCH_THREADS];
+    static uint32_t all[EPOCH_THREADS * EPOCH_OPENS];
+    pthread_t threads[EPOCH_THREADS];
+    int duplicates = 0;
+    int seen_failures = 0;
+
+    for (int i = 0; i < EPOCH_THREADS; i++) {
+        pthread_create(&threads[i], NULL, epoch_worker_main, &workers[i]);
+    }
+    for (int i = 0; i < EPOCH_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+        seen_failures += workers[i].failures_seen;
+        for (int j = 0; j < EPOCH_OPENS; j++) {
+            all[i * EPOCH_OPENS + j] = workers[i].epochs[j];
+        }
+    }
+    CHECK(seen_failures == 0);
+    qsort(all, EPOCH_THREADS * EPOCH_OPENS, sizeof(all[0]), compare_u32);
+    for (int i = 1; i < EPOCH_THREADS * EPOCH_OPENS; i++) {
+        if (all[i] == all[i - 1]) {
+            duplicates++;
+        }
+    }
+    CHECK(all[0] != 0 && duplicates == 0);   /* 동시 open에서도 세대가 겹치지 않는다 */
 }
 
 /* 호출마다 20ms 흐르는 시계로 timeout·취소·writer 슬롯 보존을 실제 시간과 무관하게 확정한다. */
@@ -929,6 +1026,7 @@ int main(void)
     test_readers_and_horizon();
     test_reentrancy();
     test_epoch();
+    test_epoch_concurrent_open();
     test_timeout_deterministic();
     test_real_timeout_completes();
     test_threads();
