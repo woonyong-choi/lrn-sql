@@ -147,7 +147,8 @@ static void put_bytes(buffer_t *b, const void *bytes, size_t size)
     }
     size_t need = b->size + size;   /* limit 이하라 넘치지 않는다 */
     if (need > b->capacity) {
-        size_t capacity = b->capacity == 0 ? 256 : b->capacity;
+        /* 선언한 상한보다 크게 할당하지 않는다. 작은 상한에서는 처음부터 상한 크기로 잡는다. */
+        size_t capacity = b->capacity != 0 ? b->capacity : (limit < 256 ? limit : 256);
         while (capacity < need) {
             if (capacity > limit / 2) {
                 capacity = limit;   /* need <= limit이므로 충분하다 */
