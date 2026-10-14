@@ -83,7 +83,7 @@ static void test_enqueue_claim(void)
     for (size_t i = 0; i < n; i++) {
         CHECK(g_items[i].id == ids[i] && g_items[i].fence == 1 && g_items[i].attempts == 1, "FIFO id·fence 1·시도 1");
         CHECK(g_items[i].lease_until_ms == 1500, "lease는 now + lease_ms");
-        char want[16];
+        char want[32];
         snprintf(want, sizeof(want), "job-%zu", i);
         CHECK(g_items[i].payload_size == strlen(want) && memcmp(g_items[i].payload, want, strlen(want)) == 0,
               "payload 왕복");
