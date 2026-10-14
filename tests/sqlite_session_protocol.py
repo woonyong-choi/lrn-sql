@@ -97,7 +97,9 @@ def decode_cell(token: str) -> Cell:
 
 def _parse_error(parts: list[str]) -> tuple[str, int, bytes]:
     if len(parts) != 4:
-        raise ProtocolViolationError("invalid error line: {!r}".format(" ".join(parts)[:80]))
+        raise ProtocolViolationError(
+            "invalid error line: {!r}".format(" ".join(parts)[:80])
+        )
     return parts[1], int(parts[2]), hex_decode(parts[3])
 
 
@@ -203,7 +205,10 @@ class EngineProcess:
     def __init__(self, argv: Sequence[str], timeout_s: float) -> None:
         self._timeout_s = timeout_s
         self._proc = subprocess.Popen(
-            list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            list(argv),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._stderr_tail = b""
@@ -247,7 +252,9 @@ class EngineProcess:
             try:
                 line = self._lines.get(timeout=self._timeout_s)
             except queue.Empty as err:
-                raise EngineTimeoutError(f"no response within {self._timeout_s:.1f}s") from err
+                raise EngineTimeoutError(
+                    f"no response within {self._timeout_s:.1f}s"
+                ) from err
             if line is None:
                 raise EngineExitedError(f"adapter exited: {self.stderr_tail[-200:]}")
             if line == END_LINE:

@@ -102,7 +102,9 @@ def select_step(step_id: str, **extra: Any) -> dict[str, Any]:
     return step
 
 
-def run_fake(case: dict[str, Any], reference: FakeEngine, subject: FakeEngine) -> list[StepVerdict]:
+def run_fake(
+    case: dict[str, Any], reference: FakeEngine, subject: FakeEngine
+) -> list[StepVerdict]:
     return diff.CaseRunner(reference, subject).run(case)  # type: ignore[arg-type]
 
 
@@ -134,7 +136,9 @@ def test_run_equal_results_pass() -> None:
 # #103 완료 조건 3: 값이 다르면 fail이며 차이 설명이 남는다
 def test_run_different_rows_fail() -> None:
     results = run_fake(
-        make_case([select_step("s1")]), FakeEngine([one_row("a")]), FakeEngine([one_row("b")])
+        make_case([select_step("s1")]),
+        FakeEngine([one_row("a")]),
+        FakeEngine([one_row("b")]),
     )
 
     assert verdicts_of(results) == [PASS, FAIL]
@@ -145,7 +149,9 @@ def test_run_different_rows_fail() -> None:
 def test_run_both_engines_wrong_the_same_way_fails_expectation() -> None:
     empty = make_outcome(rows=[])
 
-    results = run_fake(make_case([select_step("s1")]), FakeEngine([empty]), FakeEngine([empty]))
+    results = run_fake(
+        make_case([select_step("s1")]), FakeEngine([empty]), FakeEngine([empty])
+    )
 
     assert results[1].verdict == FAIL
     assert "rows expected 1 but was 0" in results[1].detail
@@ -213,7 +219,9 @@ def test_run_declared_difference_not_observed_fails() -> None:
     step = select_step("s1", difference=DECLARATION)
     step.pop("expect")
 
-    results = run_fake(make_case([step]), FakeEngine([one_row()]), FakeEngine([one_row()]))
+    results = run_fake(
+        make_case([step]), FakeEngine([one_row()]), FakeEngine([one_row()])
+    )
 
     assert results[1].verdict == FAIL
     assert "was not observed" in results[1].detail
@@ -225,7 +233,9 @@ def test_run_declared_difference_with_other_subject_behavior_fails() -> None:
     step.pop("expect")
     subject = make_outcome(rows=[[text("a")], [text("b")]])
 
-    results = run_fake(make_case([step]), FakeEngine([one_row()]), FakeEngine([subject]))
+    results = run_fake(
+        make_case([step]), FakeEngine([one_row()]), FakeEngine([subject])
+    )
 
     assert results[1].verdict == FAIL
     assert "does not match its declaration" in results[1].detail
@@ -301,7 +311,9 @@ def test_tally_exit_code_never_counts_unfinished_work_as_success() -> None:
 
 
 # #103 완료 조건 3: 요구 버전이 아닌 SQLite는 실행 없이 not-run이다
-def test_run_all_with_wrong_sqlite_version_marks_everything_not_run(tmp_path: Path) -> None:
+def test_run_all_with_wrong_sqlite_version_marks_everything_not_run(
+    tmp_path: Path,
+) -> None:
     case = make_case([select_step("s1")])
     probe = tmp_path / "probe"
     probe.write_text("")
@@ -319,7 +331,11 @@ def test_run_all_with_missing_probe_marks_everything_not_run(tmp_path: Path) -> 
     assert version is not None
 
     results = diff.run_all(
-        [make_case([select_step("s1")])], tmp_path / "absent", tmp_path / "work", 5.0, version
+        [make_case([select_step("s1")])],
+        tmp_path / "absent",
+        tmp_path / "work",
+        5.0,
+        version,
     )
 
     assert verdicts_of(results["fake"]) == [NOT_RUN, NOT_RUN]
@@ -355,7 +371,8 @@ def test_sqlite_statement_maps_transaction_start_but_keeps_other_sql() -> None:
     assert diff.sqlite_statement({"sql": "begin  durable"}) == "BEGIN IMMEDIATE"
     assert diff.sqlite_statement({"sql": "COMMIT"}) == "COMMIT"
     assert (
-        diff.sqlite_statement({"sql": "BEGIN", "sql_sqlite": "BEGIN DEFERRED"}) == "BEGIN DEFERRED"
+        diff.sqlite_statement({"sql": "BEGIN", "sql_sqlite": "BEGIN DEFERRED"})
+        == "BEGIN DEFERRED"
     )
 
 
@@ -376,8 +393,12 @@ def test_protocol_cell_round_trip_keeps_nul_empty_and_real_bits() -> None:
 def test_protocol_generated_values_are_deterministic_exact_size_utf8() -> None:
     assert generate_text(8160, 5) == generate_text(8160, 5)
     assert generate_text(8160, 5) != generate_text(8160, 6)
-    assert len(generate_text(8161, 7)) == 8161 and generate_text(8161, 7).decode("utf-8")
-    assert len(generate_blob(300000, 12)) == 300000 and b"\x00" in generate_blob(300000, 12)
+    assert len(generate_text(8161, 7)) == 8161 and generate_text(8161, 7).decode(
+        "utf-8"
+    )
+    assert len(generate_blob(300000, 12)) == 300000 and b"\x00" in generate_blob(
+        300000, 12
+    )
     assert build_param({"real": -0.0}).payload == 0x8000000000000000
 
 
