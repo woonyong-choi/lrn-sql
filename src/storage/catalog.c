@@ -599,3 +599,47 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
     *out = catalog;
     return CATALOG_OK;
 }
+
+/* 테이블 하나가 쥔 이름 배열과 컬럼 배열. 이름 바이트 합은 encoded_bytes에서 거꾸로 구한다. */
+static size_t table_memory_bytes(const table_t *table)
+{
+    size_t names = table->encoded_bytes - TABLE_FIXED_BYTES - table->column_count * COLUMN_FIXED_BYTES;
+    return names + table->column_count * sizeof(catalog_column_t);
+}
+
+size_t catalog_memory_bytes(const catalog_t *catalog)
+{
+    if (catalog == NULL) return 0;
+    size_t total = sizeof(*catalog) + catalog->capacity * sizeof(table_t);
+    for (size_t i = 0; i < catalog->count; i++) total += table_memory_bytes(&catalog->tables[i]);
+    return total;
+}
+
+size_t catalog_clone_peak_bytes(const catalog_t *catalog)
+{
+    if (catalog == NULL) return 0;
+    size_t decoded = sizeof(*catalog) + catalog->count * sizeof(table_t);
+    size_t widest = 0;
+    for (size_t i = 0; i < catalog->count; i++) {
+        decoded += table_memory_bytes(&catalog->tables[i]);
+        if (catalog->tables[i].column_count > widest) widest = catalog->tables[i].column_count;
+    }
+    /* read_table의 임시 spec 배열과 이름 검사 refs, 마지막의 테이블 이름 refs */
+    size_t per_table = widest * (sizeof(catalog_column_spec_t) + sizeof(name_ref_t));
+    size_t names = catalog->count * sizeof(name_ref_t);
+    size_t scratch = per_table > names ? per_table : names;
+    return catalog->encoded_bytes + decoded + scratch;
+}
+
+size_t catalog_create_peak_bytes(const catalog_t *catalog, size_t column_count, size_t names_bytes)
+{
+    if (catalog == NULL) return 0;
+    size_t refs = column_count * sizeof(name_ref_t);
+    size_t built = names_bytes + column_count * sizeof(catalog_column_t);
+    size_t grow = 0;
+    if (catalog->count == catalog->capacity) {
+        size_t next = catalog->capacity == 0 ? 4 : catalog->capacity * 2;
+        grow = (catalog->capacity + next) * sizeof(table_t);
+    }
+    return refs + built + grow;
+}
