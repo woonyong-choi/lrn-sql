@@ -3,14 +3,15 @@
 
 #include "storage/overflow.h"
 
-#define OVERFLOW_HEADER_BYTES 24u
-#define OVERFLOW_CHECKED_BYTES 20u
+#define OVERFLOW_HEADER_BYTES 28u
+#define OVERFLOW_CHECKSUM_OFFSET 24u
 
 typedef struct {
     uint32_t index;
     uint32_t next;
     uint32_t chunk;
     uint32_t total;
+    uint32_t head;
 } page_header_t;
 
 static void write_u32(uint8_t *bytes, uint32_t value)
@@ -30,7 +31,7 @@ static uint32_t checksum(const uint8_t *page, size_t page_bytes)
 {
     uint32_t hash = 2166136261u;
     for (size_t i = 0; i < page_bytes; i++) {
-        if (i >= OVERFLOW_CHECKED_BYTES && i < OVERFLOW_HEADER_BYTES) continue;
+        if (i >= OVERFLOW_CHECKSUM_OFFSET && i < OVERFLOW_HEADER_BYTES) continue;
         hash = (hash ^ page[i]) * 16777619u;
     }
     return hash;
@@ -64,8 +65,9 @@ static void encode_page(uint8_t *page, size_t page_bytes, page_header_t header,
     write_u32(page + 8, header.next);
     write_u32(page + 12, header.chunk);
     write_u32(page + 16, header.total);
+    write_u32(page + 20, header.head);
     if (header.chunk > 0) memcpy(page + OVERFLOW_HEADER_BYTES, chunk, header.chunk);
-    write_u32(page + 20, checksum(page, page_bytes));
+    write_u32(page + OVERFLOW_CHECKSUM_OFFSET, checksum(page, page_bytes));
 }
 
 static bool decode_page(const uint8_t *page, size_t page_bytes, page_header_t *header)
@@ -75,8 +77,9 @@ static bool decode_page(const uint8_t *page, size_t page_bytes, page_header_t *h
     header->next = read_u32(page + 8);
     header->chunk = read_u32(page + 12);
     header->total = read_u32(page + 16);
+    header->head = read_u32(page + 20);
     if (header->chunk > page_bytes - OVERFLOW_HEADER_BYTES) return false;
-    return read_u32(page + 20) == checksum(page, page_bytes);
+    return read_u32(page + OVERFLOW_CHECKSUM_OFFSET) == checksum(page, page_bytes);
 }
 
 static void release_all(const overflow_io_t *io, const uint32_t *ids, size_t count,
@@ -96,11 +99,38 @@ static overflow_status_t write_pages(const overflow_io_t *io, const uint8_t *byt
         size_t offset = i * payload;
         size_t chunk = size_bytes - offset < payload ? size_bytes - offset : payload;
         page_header_t header = {(uint32_t)i, i + 1 < count ? ids[i + 1] : OVERFLOW_NO_PAGE,
-                                (uint32_t)chunk, (uint32_t)size_bytes};
+                                (uint32_t)chunk, (uint32_t)size_bytes, ids[0]};
         encode_page(page, io->page_bytes, header, bytes + offset);
         if (!io->write(io->context, ids[i], page)) return OVERFLOW_IO;
     }
     return OVERFLOW_OK;
+}
+
+static int compare_ids(const void *left, const void *right)
+{
+    uint32_t a = *(const uint32_t *)left, b = *(const uint32_t *)right;
+    return (a > b) - (a < b);
+}
+
+/* 같은 호출에서 받은 번호가 겹치면 true. scratch는 count개 이상이고 정렬 결과로 덮인다. */
+static bool has_duplicate(const uint32_t *ids, size_t count, uint32_t *scratch)
+{
+    memcpy(scratch, ids, count * sizeof(uint32_t));
+    qsort(scratch, count, sizeof(uint32_t), compare_ids);
+    for (size_t i = 1; i < count; i++) {
+        if (scratch[i] == scratch[i - 1]) return true;
+    }
+    return false;
+}
+
+/* 정렬된 scratch에서 중복을 건너뛰어 번호마다 한 번만 반납한다. */
+static void release_unique(const overflow_io_t *io, const uint32_t *sorted, size_t count,
+                           bool *failed)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0 && sorted[i] == sorted[i - 1]) continue;
+        if (!io->release(io->context, sorted[i])) *failed = true;
+    }
 }
 
 static overflow_status_t allocate_pages(const overflow_io_t *io, uint32_t *ids,
@@ -127,8 +157,8 @@ overflow_status_t overflow_write(const overflow_io_t *io, const uint8_t *bytes,
         return OVERFLOW_OK;
     }
     size_t count = page_count(io, size_bytes);
-    if (count > SIZE_MAX / sizeof(uint32_t)) return OVERFLOW_LIMIT;
-    uint32_t *ids = malloc(count * sizeof(uint32_t));
+    if (count > SIZE_MAX / (2 * sizeof(uint32_t))) return OVERFLOW_LIMIT;
+    uint32_t *ids = malloc(2 * count * sizeof(uint32_t));
     uint8_t *page = malloc(io->page_bytes);
     if (ids == NULL || page == NULL) {
         free(ids);
@@ -137,12 +167,18 @@ overflow_status_t overflow_write(const overflow_io_t *io, const uint8_t *bytes,
     }
     size_t allocated = 0;
     overflow_status_t status = allocate_pages(io, ids, count, &allocated);
+    bool duplicate = status == OVERFLOW_OK && has_duplicate(ids, count, ids + count);
+    if (duplicate) status = OVERFLOW_INVALID;
     if (status == OVERFLOW_OK) status = write_pages(io, bytes, size_bytes, ids, count, page);
     if (status == OVERFLOW_OK) {
         *ref = (overflow_ref_t){ids[0], (uint32_t)size_bytes};
     } else {
         bool failed = false;
-        release_all(io, ids, allocated, &failed);
+        if (duplicate) {
+            release_unique(io, ids + count, allocated, &failed);
+        } else {
+            release_all(io, ids, allocated, &failed);
+        }
         if (failed) status = OVERFLOW_ROLLBACK_FAILED;
     }
     free(ids);
@@ -158,6 +194,7 @@ static overflow_status_t check_page(const overflow_io_t *io, const uint8_t *page
     size_t payload = payload_bytes(io);
     size_t expected = remaining < payload ? remaining : payload;
     if (header->index != index || header->total != ref.size_bytes) return OVERFLOW_CORRUPT;
+    if (header->head != ref.head) return OVERFLOW_CORRUPT;
     if (header->chunk != expected) return OVERFLOW_CORRUPT;
     bool last = remaining == expected;
     if (last != (header->next == OVERFLOW_NO_PAGE)) return OVERFLOW_CORRUPT;
