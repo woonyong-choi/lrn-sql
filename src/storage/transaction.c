@@ -157,64 +157,33 @@ static void wait_slice(txn_manager_t *manager)
 }
 
 /*
- * 프로세스 안에서 쓴 세대 번호 기록. 자동 발급은 이 기록에 없는 다음 번호를 단조 증가로 고르고, 호출자가 지정한
- * 번호가 이미 기록에 있으면 거절한다. 기록은 manager가 닫혀도 프로세스가 끝날 때까지 남으므로 같은 프로세스에서
- * 한 번 쓴 번호는 다시 쓰이지 않는다. 프로세스를 넘는 유일성은 이 기록이 보장하지 못한다. 재시작하면 자동 발급은
- * 1부터 다시 시작하므로, 재시작 경계에서는 호출자가 backend에 저장한 증가하는 세대 번호를 넘겨야 한다.
+ * 프로세스 안에서 발급한 세대 번호의 상한(high-water) 하나만 둔다. 고정 공간이며 manager를 몇 번 열어도 늘지
+ * 않는다. 자동 발급은 상한 + 1이고, 지정 번호는 상한보다 클 때만 채택하며 채택하면 상한이 그 값으로 오른다.
+ * 따라서 이 프로세스에서 한 번 쓴 번호와 그 이하의 번호는 다시 쓰이지 않는다(작은 번호를 나중에 지정하는 것도
+ * 거절한다). 프로세스를 넘는 유일성은 이 상한이 보장하지 못한다. 재시작하면 자동 발급은 1부터 다시 시작하므로,
+ * 재시작 경계에서는 호출자가 backend에 저장한 증가하는 세대 번호를 넘겨야 하고, 같은 프로세스에서 자동 발급과
+ * 지정을 섞는 호출자는 둘의 번호 범위를 스스로 조율해야 한다.
  */
 static pthread_mutex_t epoch_mutex = PTHREAD_MUTEX_INITIALIZER;
-static uint32_t *epoch_used;
-static size_t epoch_used_count;
-static size_t epoch_used_cap;
-static uint64_t epoch_next_auto = 1;   /* UINT32_MAX를 넘으면 자동 발급이 소진된 것이다 */
+static uint64_t epoch_high_water;   /* 0이면 아직 발급 없음. UINT32_MAX이면 자동 발급이 소진된 것이다 */
 
-static bool epoch_seen_locked(uint32_t epoch)
-{
-    for (size_t i = 0; i < epoch_used_count; i++) {
-        if (epoch_used[i] == epoch) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* requested가 0이면 자동 발급. 중복은 INVALID, 자동 발급 소진은 LIMIT, 기록 확장 실패는 NOMEM이다. */
+/* requested가 0이면 자동 발급. 상한 이하의 지정은 INVALID, 자동 발급 소진은 LIMIT이다. */
 static txn_status_t epoch_reserve(uint32_t requested, uint32_t *out)
 {
     txn_status_t status = TXN_OK;
-    uint32_t epoch;
 
     pthread_mutex_lock(&epoch_mutex);
-    if (epoch_used_count == epoch_used_cap) {
-        size_t cap = epoch_used_cap != 0 ? epoch_used_cap * 2 : 16;
-        uint32_t *grown = realloc(epoch_used, cap * sizeof(*grown));
-
-        if (grown == NULL) {
-            pthread_mutex_unlock(&epoch_mutex);
-            return TXN_NOMEM;
-        }
-        epoch_used = grown;
-        epoch_used_cap = cap;
-    }
     if (requested != 0) {
-        epoch = requested;
-        if (epoch_seen_locked(epoch)) {
+        if (requested <= epoch_high_water) {
             status = TXN_INVALID;
-        }
-    } else {
-        while (epoch_next_auto <= UINT32_MAX && epoch_seen_locked((uint32_t)epoch_next_auto)) {
-            epoch_next_auto++;
-        }
-        if (epoch_next_auto > UINT32_MAX) {
-            status = TXN_LIMIT;
-            epoch = 0;
         } else {
-            epoch = (uint32_t)epoch_next_auto++;
+            epoch_high_water = requested;
+            *out = requested;
         }
-    }
-    if (status == TXN_OK) {
-        epoch_used[epoch_used_count++] = epoch;
-        *out = epoch;
+    } else if (epoch_high_water >= UINT32_MAX) {
+        status = TXN_LIMIT;
+    } else {
+        *out = (uint32_t)++epoch_high_water;
     }
     pthread_mutex_unlock(&epoch_mutex);
     return status;
