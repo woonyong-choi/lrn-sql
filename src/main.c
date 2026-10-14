@@ -45,6 +45,7 @@
 #include <inttypes.h>
 #include <time.h>
 #include <ctype.h>
+#include <errno.h>
 #include <unistd.h>
 /* readline 제거 — fgets 기반 입력 */
 /* 한 줄 버퍼: 문장 한도 + CRLF 2바이트 + NUL. 넘는 줄은 통째로 버린다 */
@@ -129,6 +130,11 @@ static void cmd_pages(pager_t *pager)
     /* 모든 페이지를 순회하며 유형별로 분류 */
     for (uint32_t i = 1; i < hdr->next_page_id; i++) {
         uint8_t *page = pager_get_page(pager, i);
+        if (page == NULL) {
+            fprintf(stderr, "오류: 페이지 %u를 읽을 수 없습니다 (%s)\n",
+                    i, strerror(errno));
+            return;
+        }
         uint32_t ptype;
         memcpy(&ptype, page, sizeof(uint32_t));
         pager_unpin(pager, i);
@@ -155,6 +161,12 @@ static void cmd_pages(pager_t *pager)
         while (fp != 0 && c < 20) {
             printf(" %u", fp);
             uint8_t *p = pager_get_page(pager, fp);
+            if (p == NULL) {
+                printf("\n");
+                fprintf(stderr, "오류: 페이지 %u를 읽을 수 없습니다 (%s)\n",
+                        fp, strerror(errno));
+                return;
+            }
             free_page_header_t fph;
             memcpy(&fph, p, sizeof(fph));
             pager_unpin(pager, fp);
@@ -234,7 +246,11 @@ static int adopt_legacy_table(const char *name, const char *path)
     }
 
     pager_t pager;
-    if (pager_open(&pager, path, false) != 0) return 1;
+    if (pager_open(&pager, path, false) != 0) {
+        fprintf(stderr, "오류: '%s' 데이터베이스를 열 수 없습니다 (%s)\n",
+                path, strerror(errno));
+        return 1;
+    }
     if (pager.header.version != 1 || pager.header.column_count == 0) {
         fprintf(stderr, "오류: 이름을 등록할 v1 테이블이 없습니다\n");
         pager_close(&pager);
@@ -243,7 +259,11 @@ static int adopt_legacy_table(const char *name, const char *path)
     memcpy(pager.header.table_name, name, len + 1);
     pager.header.version = DB_VERSION;
     pager.header_dirty = true;
-    pager_close(&pager);
+    if (pager_close(&pager) != 0) {
+        fprintf(stderr, "오류: 테이블 이름을 디스크에 기록하지 못했습니다 (%s)\n",
+                strerror(errno));
+        return 1;
+    }
     printf("기존 테이블 이름 '%s' 등록 완료\n", name);
     return 0;
 }
@@ -289,7 +309,8 @@ int main(int argc, char **argv)
 
     /* 데이터베이스 열기 */
     if (pager_open(&pager, db_path, create) != 0) {
-        fprintf(stderr, "오류: '%s' 데이터베이스를 열 수 없습니다\n", db_path);
+        fprintf(stderr, "오류: '%s' 데이터베이스를 열 수 없습니다 (%s)\n",
+                db_path, strerror(errno));
         return 1;
     }
 
@@ -364,8 +385,12 @@ int main(int argc, char **argv)
                 continue;
             }
             if (strcmp(line, ".flush") == 0) {
-                pager_flush_all(&pager);
-                printf("모든 dirty 페이지를 디스크에 기록했습니다.\n");
+                if (pager_flush_all(&pager) != 0) {
+                    printf("오류: 디스크에 기록하지 못했습니다 (%s)\n",
+                           strerror(errno));
+                } else {
+                    printf("모든 dirty 페이지를 디스크에 기록했습니다.\n");
+                }
                 continue;
             }
             if (strcmp(line, ".debug") == 0) {
@@ -424,7 +449,11 @@ int main(int argc, char **argv)
 
 exit_repl:
     /* 종료: 모든 변경사항을 디스크에 플러시하고 파일을 닫는다 */
-    pager_close(&pager);
+    if (pager_close(&pager) != 0) {
+        fprintf(stderr, "오류: 변경 사항을 디스크에 기록하지 못했습니다 (%s)\n",
+                strerror(errno));
+        return 1;
+    }
     printf("종료합니다.\n");
     return 0;
 }
