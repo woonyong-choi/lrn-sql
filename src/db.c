@@ -18,8 +18,13 @@
  *     B+ tree 래치 커플링으로 페이지 단위 동시성 보장.
  *   Level 1 — Pager Mutex (pager.c 내부)
  *     프레임 메타데이터(pin, tick, dirty) 보호
- *   Header Lock — pager->header_lock (mutex)
- *     next_id, row_count 등 헤더 카운터 원자적 갱신
+ *   Tail Lock — pager->tail_lock (mutex)
+ *     힙 체인 확장(새 tail 할당·연결·게시)만 직렬화
+ *   Header Lock — pager->header_lock (mutex, leaf)
+ *     next_id, row_count, 루트 ID 등 헤더 이미지 필드 갱신
+ *
+ * storage 안의 획득 순서는 tail_lock → 페이지 latch → pager_mutex → header_lock 하나뿐이며
+ * 자세한 규칙은 include/storage/pager.h의 "잠금 순서"에 있다.
  */
 
 #include "db.h"
