@@ -862,6 +862,149 @@ static void test_epoch_concurrent_open(void)
     CHECK(all[0] != 0 && duplicates == 0);   /* 동시 open에서도 세대가 겹치지 않는다 */
 }
 
+static txn_manager_t *open_manager_nop(const txn_manager_spec_t *spec)
+{
+    txn_manager_t *manager = NULL;
+
+    CHECK(txn_manager_open(spec, &manager) == TXN_OK);
+    return manager;
+}
+
+/* floor 방식으로 manager를 열고 발급 세대를 돌려준다. 실패하면 상태를 *status에 남기고 0을 돌려준다. */
+static uint32_t open_above_floor(uint32_t floor, txn_manager_t **out, txn_status_t *status)
+{
+    txn_manager_spec_t spec = {.ops = &NOP_OPS,
+                               .max_guarantee = TXN_GUARANTEE_SYNCED,
+                               .epoch_mode = TXN_EPOCH_ABOVE_FLOOR,
+                               .epoch_floor = floor};
+
+    *status = txn_manager_open(&spec, out);
+    return *status == TXN_OK ? txn_manager_epoch(*out) : 0;
+}
+
+/* 서로 다른 floor를 가진 저장소, 접근자, 지정 방식과의 공존을 대조한다. */
+static void test_epoch_floor(void)
+{
+    txn_manager_t *a = NULL;
+    txn_manager_t *b = NULL;
+    txn_manager_t *c = NULL;
+    txn_manager_t *auto_manager = NULL;
+    txn_manager_t *rejected = (txn_manager_t *)1;
+    txn_manager_spec_t spec = {.ops = &NOP_OPS, .max_guarantee = TXN_GUARANTEE_SYNCED};
+    txn_status_t status;
+    uint32_t base;
+    uint32_t ea;
+    uint32_t eb;
+    uint32_t ec;
+    uint32_t before;
+    uint32_t after;
+
+    CHECK(txn_manager_epoch(NULL) == 0);
+    auto_manager = open_manager_nop(&spec);
+    base = txn_manager_epoch(auto_manager);
+    CHECK(base != 0 && writer_epoch(auto_manager) == base);   /* 접근자는 id 상위 32비트와 같다 */
+    CHECK(txn_manager_close(&auto_manager) == TXN_OK);
+
+    /* DB A의 floor가 상한보다 훨씬 크다: floor + 1 */
+    ea = open_above_floor(base + 1000, &a, &status);
+    CHECK(status == TXN_OK && ea == base + 1001 && writer_epoch(a) == ea);
+    /* DB B의 floor가 작다: 상한이 이미 A까지 올라 있으므로 A보다 큰 값을 받는다 */
+    eb = open_above_floor(5, &b, &status);
+    CHECK(status == TXN_OK && eb == ea + 1 && writer_epoch(b) == eb);
+    /* floor가 상한과 같아도 그 다음 값이다 */
+    ec = open_above_floor(eb, &c, &status);
+    CHECK(status == TXN_OK && ec == eb + 1);
+    CHECK(txn_manager_close(&a) == TXN_OK && txn_manager_close(&b) == TXN_OK && txn_manager_close(&c) == TXN_OK);
+
+    /* 지정 epoch는 floor 방식이 발급한 번호까지 포함해 전역 중복을 계속 거절한다 */
+    spec.epoch = ea;
+    CHECK(txn_manager_open(&spec, &rejected) == TXN_INVALID && rejected == NULL);
+    spec.epoch = ec;
+    rejected = (txn_manager_t *)1;
+    CHECK(txn_manager_open(&spec, &rejected) == TXN_INVALID && rejected == NULL);
+
+    /* floor 방식에서 epoch를 함께 주거나 모르는 방식을 주면 INVALID이고 번호를 소모하지 않는다 */
+    auto_manager = open_manager_nop(&(txn_manager_spec_t){.ops = &NOP_OPS, .max_guarantee = TXN_GUARANTEE_SYNCED});
+    before = txn_manager_epoch(auto_manager);
+    CHECK(txn_manager_close(&auto_manager) == TXN_OK);
+    spec.epoch = before + 100;
+    spec.epoch_mode = TXN_EPOCH_ABOVE_FLOOR;
+    rejected = (txn_manager_t *)1;
+    CHECK(txn_manager_open(&spec, &rejected) == TXN_INVALID && rejected == NULL);
+    spec.epoch = 0;
+    spec.epoch_mode = (txn_epoch_mode_t)99;
+    rejected = (txn_manager_t *)1;
+    CHECK(txn_manager_open(&spec, &rejected) == TXN_INVALID && rejected == NULL);
+    spec.epoch_mode = TXN_EPOCH_DEFAULT;
+    auto_manager = open_manager_nop(&spec);
+    after = txn_manager_epoch(auto_manager);
+    CHECK(after == before + 1);
+    CHECK(txn_manager_close(&auto_manager) == TXN_OK);
+}
+
+#define FLOOR_THREADS 8
+#define FLOOR_OPENS 40
+
+typedef struct {
+    uint32_t floor;
+    uint32_t epochs[FLOOR_OPENS];
+    int failures_seen;
+    int below_floor;
+} floor_worker_t;
+
+/* 스레드마다 다른 floor로 동시에 열고 닫는다. 결과는 스레드별 구조체에만 쓴다. */
+static void *floor_worker_main(void *arg)
+{
+    floor_worker_t *worker = arg;
+
+    for (int i = 0; i < FLOOR_OPENS; i++) {
+        txn_manager_t *manager = NULL;
+        txn_status_t status;
+
+        worker->epochs[i] = open_above_floor(worker->floor, &manager, &status);
+        if (status != TXN_OK) {
+            worker->failures_seen++;
+            continue;
+        }
+        if (worker->epochs[i] <= worker->floor) {
+            worker->below_floor++;
+        }
+        txn_manager_close(&manager);
+    }
+    return NULL;
+}
+
+static void test_epoch_floor_concurrent(void)
+{
+    static floor_worker_t workers[FLOOR_THREADS];
+    static uint32_t all[FLOOR_THREADS * FLOOR_OPENS];
+    pthread_t threads[FLOOR_THREADS];
+    int duplicates = 0;
+    int failures = 0;
+    int below = 0;
+
+    for (int i = 0; i < FLOOR_THREADS; i++) {
+        workers[i].floor = (uint32_t)(i % 3) * 100000u + 7u;   /* 겹치는 floor도 섞는다 */
+        pthread_create(&threads[i], NULL, floor_worker_main, &workers[i]);
+    }
+    for (int i = 0; i < FLOOR_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+        failures += workers[i].failures_seen;
+        below += workers[i].below_floor;
+        for (int j = 0; j < FLOOR_OPENS; j++) {
+            all[i * FLOOR_OPENS + j] = workers[i].epochs[j];
+        }
+    }
+    CHECK(failures == 0 && below == 0);
+    qsort(all, FLOOR_THREADS * FLOOR_OPENS, sizeof(all[0]), compare_u32);
+    for (int i = 1; i < FLOOR_THREADS * FLOOR_OPENS; i++) {
+        if (all[i] == all[i - 1]) {
+            duplicates++;
+        }
+    }
+    CHECK(all[0] != 0 && duplicates == 0);
+}
+
 /* 호출마다 20ms 흐르는 시계로 timeout·취소·writer 슬롯 보존을 실제 시간과 무관하게 확정한다. */
 static void test_timeout_deterministic(void)
 {
@@ -1027,6 +1170,8 @@ int main(void)
     test_reentrancy();
     test_epoch();
     test_epoch_concurrent_open();
+    test_epoch_floor();
+    test_epoch_floor_concurrent();
     test_timeout_deterministic();
     test_real_timeout_completes();
     test_threads();
