@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <sys/types.h>
 
 #define MAX_FRAMES 256  /* 메모리에 유지할 최대 페이지 프레임 수 */
 #define FRAME_HASH_BUCKETS 512  /* page_id -> frame_idx 해시 버킷 수 */
@@ -26,6 +27,15 @@ typedef struct {
     uint32_t cache_misses;   /* 캐시 미스 수 (디스크에서 읽어야 했던 횟수) */
     uint32_t pages_flushed;  /* 디스크에 기록한 페이지 수 (evict + watermark) */
 } query_stats_t;
+
+/*
+ * 디스크 I/O 진입점. 기본값은 libc이고, 테스트가 실패·짧은 I/O를 주입할 때만 바꾼다.
+ */
+typedef struct {
+    ssize_t (*pread)(int fd, void *buf, size_t n, off_t off);
+    ssize_t (*pwrite)(int fd, const void *buf, size_t n, off_t off);
+    int     (*fsync)(int fd);
+} pager_io_t;
 
 /*
  * 프레임: 메모리에 캐시된 하나의 페이지를 나타낸다.
@@ -70,16 +80,26 @@ typedef struct {
     uint32_t    dirty_low_watermark; /* write-back 후 유지할 dirty frame 목표치 */
     uint32_t    dirty_high_watermark;/* 이 개수 이상 dirty면 선제 flush 수행 */
     query_stats_t stats;             /* 현재 쿼리의 실행 통계 */
+    pager_io_t  io;                  /* 디스크 I/O 진입점 (기본 libc) */
+    uint64_t    io_error_seq;        /* I/O 실패 누적 횟수. 문장 전후 비교로 실패를 귀속한다 */
+    int         io_errno;            /* 마지막 I/O 실패의 errno (0 = 없음) */
+    bool        poisoned;            /* 구조 변경 도중 I/O가 실패해 메모리 상태가 일관되지 않음.
+                                      * 이후 페이지 접근은 모두 실패하고 flush는 디스크를 건드리지 않는다 */
+    bool        fsync_failed;        /* fsync가 한 번이라도 실패함. 커널이 오류를 버렸을 수 있어
+                                      * 다시 열기 전에는 flush 성공을 주장하지 않는다 */
     pthread_mutex_t pager_mutex;     /* Level 1: 프레임 메타데이터 보호 */
     pthread_mutex_t header_lock;     /* next_id, row_count 보호 (DML 동시성용) */
 } pager_t;
 
 /* 생명주기 */
-int  pager_open(pager_t *pager, const char *path, bool create);  /* DB 열기/생성 */
-void pager_close(pager_t *pager);  /* DB 닫기 (flush 후 리소스 해제) */
+int  pager_open(pager_t *pager, const char *path, bool create);  /* DB 열기/생성. 0 = 성공, -1 = 실패 */
+int  pager_close(pager_t *pager);  /* DB 닫기 (flush 후 리소스 해제). flush 실패 시 -1, 자원은 해제한다 */
+
+/* 이후 pager_open이 쓰는 I/O 진입점을 바꾼다. NULL이면 libc로 복원. 테스트 전용 */
+void pager_set_default_io(const pager_io_t *io);
 
 /* 캐시 기반 페이지 접근 */
-uint8_t *pager_get_page(pager_t *pager, uint32_t page_id);     /* 페이지 로드 (pin++) */
+uint8_t *pager_get_page(pager_t *pager, uint32_t page_id);     /* 페이지 로드 (pin++). 읽기·교체 쓰기 실패 시 NULL */
 void     pager_mark_dirty(pager_t *pager, uint32_t page_id);   /* dirty 표시 */
 void     pager_unpin(pager_t *pager, uint32_t page_id);        /* pin 해제 (pin--) */
 
@@ -90,11 +110,23 @@ void     pager_unlatch_r(pager_t *pager, uint32_t page_id);       /* 읽기 래�
 void     pager_unlatch_w(pager_t *pager, uint32_t page_id);       /* 쓰기 래치 해제 + unpin */
 
 /* 페이지 할당/해제 */
-uint32_t pager_alloc_page(pager_t *pager);                     /* 새 페이지 할당 */
+uint32_t pager_alloc_page(pager_t *pager);                     /* 새 페이지 할당. 실패 시 0 (page 0은 헤더) */
 void     pager_free_page(pager_t *pager, uint32_t page_id);    /* 페이지 해제 (free 리스트에 추가) */
 
 /* 플러시 */
-void pager_flush_all(pager_t *pager);  /* 모든 dirty 프레임을 디스크에 기록 */
+int pager_flush_all(pager_t *pager);  /* 모든 dirty 프레임을 디스크에 기록. 실패 시 -1, 실패한 프레임은 dirty 유지 */
+
+/*
+ * 여러 페이지에 걸친 변경 도중 I/O가 실패해 되돌릴 수 없을 때 호출한다.
+ * WAL이 없어 메모리 상태를 복구할 수 없으므로, 이후 페이지 접근을 모두 막고
+ * flush가 디스크의 마지막 상태를 덮어쓰지 않게 한다. 다시 열어야 풀린다.
+ */
+void pager_poison(pager_t *pager, int err);
+bool pager_is_poisoned(pager_t *pager);
+
+/* 오류 조회 */
+uint64_t pager_io_error_seq(pager_t *pager);   /* 누적 I/O 실패 횟수 */
+int      pager_last_io_errno(pager_t *pager);  /* 마지막 실패의 errno */
 
 /* 통계 */
 void pager_reset_stats(pager_t *pager);  /* 쿼리 통계 초기화 (쿼리 실행 전 호출) */

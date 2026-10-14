@@ -88,9 +88,12 @@ static uint16_t available_space(pager_t *pager, heap_page_header_t *hph)
  *   3. 없으면 0을 반환 → 호출자가 새 페이지를 할당해야 함
  *
  * 예시: row_size=44, 필요 공간 = sizeof(slot_t) + 44 = 8 + 44 = 52바이트
+ *
+ * 반환값: 0 = 탐색 완료 (*out_pid가 0이면 적합한 페이지 없음), -1 = 페이지 읽기 실패
  */
-static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
+static int find_heap_page(pager_t *pager, uint16_t row_size, uint32_t *out_pid)
 {
+    *out_pid = 0;
     /*
      * 순차 INSERT 최적화:
      * 대부분의 append workload에서는 마지막 힙 페이지만 보면 충분하다.
@@ -98,17 +101,22 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
      */
     if (pager->last_heap_page_id != 0) {
         uint8_t *tail_page = pager_get_page_rlatch(pager, pager->last_heap_page_id);
+        if (tail_page == NULL) {
+            return -1;
+        }
         heap_page_header_t tail_hph;
         memcpy(&tail_hph, tail_page, sizeof(tail_hph));
         pager_unlatch_r(pager, pager->last_heap_page_id);
 
         if (tail_hph.free_slot_head != SLOT_NONE) {
-            return pager->last_heap_page_id;
+            *out_pid = pager->last_heap_page_id;
+            return 0;
         }
 
         uint16_t need = (uint16_t)(sizeof(slot_t) + row_size);
         if (available_space(pager, &tail_hph) >= need) {
-            return pager->last_heap_page_id;
+            *out_pid = pager->last_heap_page_id;
+            return 0;
         }
     }
 
@@ -137,13 +145,17 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
     uint32_t pid = pager->header.first_heap_page_id;
     while (pid != 0) {
         uint8_t *page = pager_get_page_rlatch(pager, pid);
+        if (page == NULL) {
+            return -1;
+        }
         heap_page_header_t hph;
         memcpy(&hph, page, sizeof(hph));
         pager_unlatch_r(pager, pid);
 
         /* 재활용 가능한 빈 슬롯이 있는지 확인 */
         if (hph.free_slot_head != SLOT_NONE) {
-            return pid;
+            *out_pid = pid;
+            return 0;
         }
 
         pid = hph.next_heap_page_id;
@@ -165,13 +177,24 @@ static uint32_t find_heap_page(pager_t *pager, uint16_t row_size)
  *
  * Lock 순서는 header_lock → page wlatch 한 방향뿐이다. 삽입 경로는 wlatch 를
  * 먼저 놓은 뒤 이 함수를 부르므로 역방향이 생기지 않아 데드락이 없다.
+ *
+ * 실패하면 0을 반환하고 체인은 바뀌지 않는다. 이미 할당한 페이지는 되돌려 준다.
  */
 static uint32_t alloc_heap_page(pager_t *pager)
 {
     pthread_mutex_lock(&pager->header_lock);
 
     uint32_t pid = pager_alloc_page(pager);
+    if (pid == 0) {
+        pthread_mutex_unlock(&pager->header_lock);
+        return 0;
+    }
     uint8_t *page = pager_get_page_wlatch(pager, pid);
+    if (page == NULL) {
+        pager_free_page(pager, pid);
+        pthread_mutex_unlock(&pager->header_lock);
+        return 0;
+    }
     heap_page_header_t hph = {
         .page_type = PAGE_TYPE_HEAP,
         .next_heap_page_id = 0,
@@ -188,6 +211,11 @@ static uint32_t alloc_heap_page(pager_t *pager)
     uint32_t prev_pid = pager->last_heap_page_id;
     if (prev_pid != 0) {
         uint8_t *pp = pager_get_page_wlatch(pager, prev_pid);
+        if (pp == NULL) {
+            pager_free_page(pager, pid);
+            pthread_mutex_unlock(&pager->header_lock);
+            return 0;
+        }
         heap_page_header_t ph;
         memcpy(&ph, pp, sizeof(ph));
         ph.next_heap_page_id = pid;
@@ -229,14 +257,23 @@ static uint32_t alloc_heap_page(pager_t *pager)
  *     slot_3 = {offset=3920, ALIVE}
  *     free_space_offset += 44 → 176
  *     반환: {page_id=1, slot_id=3}
+ *
+ * 실패(페이지 읽기·할당 실패)하면 page_id가 0인 ref를 반환한다. page 0은 DB 헤더라
+ * 힙 행의 위치가 될 수 없다. 실패 시 행은 기록되지 않는다.
  */
 row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size)
 {
     row_ref_t ref = {0, 0};
-    uint32_t pid = find_heap_page(pager, row_size);
+    uint32_t pid;
 
+    if (find_heap_page(pager, row_size, &pid) != 0) {
+        return ref;
+    }
     if (pid == 0) {
         pid = alloc_heap_page(pager);
+        if (pid == 0) {
+            return ref;
+        }
     }
 
     /*
@@ -248,6 +285,9 @@ row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size
      */
 retry_insert:;
     uint8_t *page = pager_get_page_wlatch(pager, pid);
+    if (page == NULL) {
+        return ref;
+    }
     heap_page_header_t hph;
     memcpy(&hph, page, sizeof(hph));
 
@@ -258,6 +298,9 @@ retry_insert:;
             pager_unlatch_w(pager, pid);
             /* 공간 부족 — 새 페이지를 이어 붙이고 재시도 */
             pid = alloc_heap_page(pager);
+            if (pid == 0) {
+                return ref;
+            }
             goto retry_insert;
         }
     }
@@ -427,14 +470,16 @@ int heap_delete(pager_t *pager, row_ref_t ref)
  *
  * 시간 복잡도: O(전체 행 수) — 인덱스를 사용하지 않으므로 느림
  *              WHERE id=N 일 때는 B+ tree를 사용하는 INDEX_LOOKUP이 훨씬 빠름
+ *
+ * 반환값: 0 = 끝까지 순회했거나 cb가 중단시킴, -1 = 페이지 읽기 실패로 순회가 잘림
  */
-void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
+int heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
 {
     uint32_t pid = pager->header.first_heap_page_id;
     while (pid != 0) {
         uint8_t *page = pager_get_page_rlatch(pager, pid);
         if (page == NULL) {
-            return;
+            return -1;
         }
 
         heap_page_header_t hph;
@@ -486,7 +531,7 @@ void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
             for (uint16_t i = 0; i < live_count; i++) {
                 if (!cb(rows + (size_t)i * row_size, refs[i], ctx)) {
                     free(snapshot);
-                    return;
+                    return 0;
                 }
             }
             free(snapshot);
@@ -497,7 +542,7 @@ void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
         for (uint16_t i = 0; i < hph.slot_count; i++) {
             page = pager_get_page_rlatch(pager, pid);
             if (page == NULL) {
-                return;
+                return -1;
             }
             slot_t slot;
             size_t slot_off = sizeof(heap_page_header_t) + i * sizeof(slot_t);
@@ -506,11 +551,12 @@ void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx)
                 row_ref_t ref = { .page_id = pid, .slot_id = i };
                 if (!cb(page + slot.offset, ref, ctx)) {
                     pager_unlatch_r(pager, pid);
-                    return;
+                    return 0;
                 }
             }
             pager_unlatch_r(pager, pid);
         }
         pid = next;
     }
+    return 0;
 }
