@@ -120,19 +120,19 @@ static void scenario(void)
     CHECK(begins == finishes);
 }
 
-/* 자동 발급 세대가 UINT32_MAX에서 소진되면 거절하고, 이미 쓴 번호는 건너뛴다. */
+/* 자동 발급 세대가 UINT32_MAX에서 소진되면 거절하고, 상한 이하의 지정도 거절한다. */
 static void epoch_exhaustion(void)
 {
     txn_manager_spec_t spec = {.ops = &OPS, .max_guarantee = TXN_GUARANTEE_SYNCED};
     txn_manager_t *manager = (txn_manager_t *)1;
     txn_t *writer = NULL;
 
-    epoch_next_auto = UINT32_MAX - 1;
+    epoch_high_water = UINT32_MAX - 2;
     spec.epoch = UINT32_MAX - 1;
-    CHECK(txn_manager_open(&spec, &manager) == TXN_OK);   /* 지정으로 먼저 사용 */
+    CHECK(txn_manager_open(&spec, &manager) == TXN_OK);   /* 상한보다 큰 지정은 채택하고 상한이 오른다 */
     CHECK(txn_manager_close(&manager) == TXN_OK);
     spec.epoch = 0;
-    CHECK(txn_manager_open(&spec, &manager) == TXN_OK);   /* 사용한 UINT32_MAX-1을 건너뛰고 UINT32_MAX */
+    CHECK(txn_manager_open(&spec, &manager) == TXN_OK);   /* 자동 발급은 상한 + 1 = UINT32_MAX */
     CHECK(txn_begin(manager, NULL, &writer) == TXN_OK && (uint32_t)(txn_id(writer) >> 32) == UINT32_MAX);
     CHECK(txn_release(&writer) == TXN_OK);
     CHECK(txn_manager_close(&manager) == TXN_OK);
@@ -140,6 +140,9 @@ static void epoch_exhaustion(void)
     CHECK(txn_manager_open(&spec, &manager) == TXN_LIMIT && manager == NULL);
     spec.epoch = UINT32_MAX;
     CHECK(txn_manager_open(&spec, &manager) == TXN_INVALID && manager == NULL);
+    spec.epoch = 1;
+    CHECK(txn_manager_open(&spec, &manager) == TXN_INVALID && manager == NULL);   /* 상한보다 작은 지정 */
+    CHECK(epoch_high_water == UINT32_MAX);   /* 거절된 시도는 상한을 바꾸지 않는다 */
 }
 
 /* 할당 실패한 open은 세대 번호를 소모하지 않고, 사용한 번호의 거절은 할당을 남기지 않는다. */
@@ -148,6 +151,7 @@ static void epoch_open_failures(void)
     txn_manager_spec_t spec = {.ops = &OPS, .max_guarantee = TXN_GUARANTEE_SYNCED, .epoch = 0x60000000u};
     txn_manager_t *manager = (txn_manager_t *)1;
     txn_manager_t *dup = (txn_manager_t *)1;
+    uint64_t high_before = epoch_high_water;
     long blocks;
 
     for (long point = 1; point <= 2; point++) {   /* manager, ring 할당 */
@@ -156,6 +160,7 @@ static void epoch_open_failures(void)
         live_blocks = 0;
         CHECK(txn_manager_open(&spec, &manager) == TXN_NOMEM && manager == NULL);
         CHECK(live_blocks == 0);
+        CHECK(epoch_high_water == high_before);   /* 실패한 open은 상한을 올리지 않는다 */
         manager = (txn_manager_t *)1;
     }
     fail_at = 0;
