@@ -86,8 +86,9 @@ gen: $(BUILD_DIR)/gen_data
 # bench-http HTTP 서버 경로 부하 생성기 (make run-server 가 먼저 필요)
 bench:
 	python3 bench/scaling.py
-	npm_config_cache=$(BUILD_DIR)/npm-cache npm exec --yes --package=daphnis@0.1.3 -- daphnis check docs/assets/sql-scaling-*.dap --strict --no-deprecated --require-data
-	npm_config_cache=$(BUILD_DIR)/npm-cache npm exec --yes --package=daphnis@0.1.3 -- daphnis render docs/assets/sql-scaling-*.dap --strict --require-data
+	npm_config_cache=$(BUILD_DIR)/npm-cache npm ci --prefix docs/assets --ignore-scripts
+	docs/assets/node_modules/.bin/daphnis check docs/assets/sql-scaling-*.dap --strict --no-deprecated --require-data
+	docs/assets/node_modules/.bin/daphnis render docs/assets/sql-scaling-*.dap --strict --require-data
 
 bench-1m:
 	python3 bench/bench_minidb_param.py --rows 1000000
