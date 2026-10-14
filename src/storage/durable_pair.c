@@ -83,6 +83,8 @@ static durable_pair_status_t decide(durable_pair_t *pair, const char *wal_path,
 
     if (absent) {
         if (durable) return DURABLE_PAIR_WAL_MISSING;
+        /* 손상으로 v1 슬롯에 fallback한 파일은 로그 없는 v1과 이전 durable 파일의 손상을 구별할 수 없다 */
+        if (info->file_info.damaged_slots != 0) return DURABLE_PAIR_CORRUPT;
         if (!options->convert) return DURABLE_PAIR_OK; /* PLAIN */
         st = from_wal(wal_create_with(wal_path, options->wal_limits, &pair->wal));
         if (st != DURABLE_PAIR_OK) return st;
@@ -106,6 +108,7 @@ durable_pair_status_t durable_pair_open(const char *db_path, const char *wal_pat
     if (out == NULL) return DURABLE_PAIR_INVALID;
     out->file = NULL;
     out->wal = NULL;
+    out->failed = false;
     durable_pair_info_t local;
     if (info == NULL) info = &local;
     memset(info, 0, sizeof(*info));
@@ -113,7 +116,7 @@ durable_pair_status_t durable_pair_open(const char *db_path, const char *wal_pat
     if (options == NULL) options = &defaults;
     if (db_path == NULL || wal_path == NULL) return DURABLE_PAIR_INVALID;
 
-    durable_pair_t pair = {NULL, NULL};
+    durable_pair_t pair = {NULL, NULL, false};
     page_file_status_t fs = page_file_open_admitted(db_path, true, &pair.file, &info->file_info, options->admit,
                                                     options->admit_ctx);
     if (fs != PAGE_FILE_OK) return from_page_file(fs);
@@ -129,12 +132,25 @@ durable_pair_status_t durable_pair_open(const char *db_path, const char *wal_pat
 durable_pair_status_t durable_pair_persist_epoch(durable_pair_t *pair, uint32_t epoch)
 {
     if (pair == NULL || pair->file == NULL) return DURABLE_PAIR_INVALID;
+    if (pair->failed) {
+        errno = EIO;
+        return DURABLE_PAIR_IO;
+    }
     page_file_status_t st = page_file_stage_durable_epoch(pair->file, epoch);
     if (st != PAGE_FILE_OK) return from_page_file(st);
-    st = page_file_commit(pair->file);
-    if (st != PAGE_FILE_OK) {
-        /* 실패한 commit이 디스크에 남았는지 모를 수 있다. 같은 값을 다시 staged로 두지 않고 호출자가 다시 연다. */
-        return from_page_file(st);
+    /*
+     * 같은 epoch를 서로 다른 두 제어 슬롯에 commit한다. 한 슬롯만 쓰면 그 슬롯이 손상돼 이전 슬롯으로 열릴 때 floor가
+     * 내려가 이미 보여 준 epoch를 다시 내줄 수 있다. 둘째 commit은 staged 값을 그대로 다른 슬롯에 쓴다.
+     * 한 번이라도 실패하면 영속 여부를 알 수 없고 한 슬롯에만 있을 수 있으므로 핸들을 못 쓰게 하고 호출자가 다시 연다.
+     */
+    for (int copy = 0; copy < 2; copy++) {
+        st = page_file_commit(pair->file);
+        if (st != PAGE_FILE_OK) {
+            int saved = errno;
+            pair->failed = true;
+            errno = saved;
+            return from_page_file(st);
+        }
     }
     return DURABLE_PAIR_OK;
 }
