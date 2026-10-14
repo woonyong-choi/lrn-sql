@@ -474,3 +474,6 @@ clean:
 .PHONY: test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
+
+# 선택형 ACK 큐(#140). 큐 파일이 없으면 무시한다.
+-include src/queue/queue.mk
