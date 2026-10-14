@@ -49,23 +49,82 @@
  *  SELECT/EXPLAIN 결과를 메모리 버퍼에 축적한다.
  *  서버 모드에서는 이 버퍼를 클라이언트에 send()하고,
  *  REPL 모드에서는 printf("%s", buf)로 출력한다.
+ *
+ *  할당 실패는 failed에 남기고(sticky) 이후 append는 아무것도 쓰지 않는다. cap은 실제 할당이
+ *  성공한 뒤에만 바뀌므로 data·len·cap은 항상 서로 맞는다. 결과를 넘기는 쪽은 buf_take()로
+ *  실패 여부를 확인해야 하며, 실패하면 일부만 쌓인 내용을 성공 결과로 돌려주지 않는다.
  * ====================================================================== */
 typedef struct {
     char  *data;
     size_t len;
     size_t cap;
+    bool   failed;
 } out_buf_t;
+
+#define OUT_BUF_INITIAL_CAP 4096
+#define OUT_BUF_ALLOC_FAILED_MSG "오류: 결과 출력 버퍼 할당에 실패했습니다"
+
+#ifdef MINIDB_TEST_HOOKS
+static long g_fail_malloc_at;    /* n번째 출력 버퍼 malloc을 실패시킨다 (0 = 끔) */
+static long g_fail_realloc_at;   /* n번째 출력 버퍼 realloc을 실패시킨다 (0 = 끔) */
+static long g_malloc_calls;
+static long g_realloc_calls;
+static long g_live_bufs;         /* 할당됐고 아직 해제도 이전도 되지 않은 버퍼 수 */
+static long g_transferred_bufs;  /* 호출자에게 넘긴 버퍼 수 */
+
+void executor_test_fail_out_alloc(long malloc_at, long realloc_at)
+{
+    g_fail_malloc_at  = malloc_at;
+    g_fail_realloc_at = realloc_at;
+    g_malloc_calls    = 0;
+    g_realloc_calls   = 0;
+}
+
+void executor_test_out_stats(long *mallocs, long *reallocs, long *live, long *transferred)
+{
+    *mallocs     = g_malloc_calls;
+    *reallocs    = g_realloc_calls;
+    *live        = g_live_bufs;
+    *transferred = g_transferred_bufs;
+}
+#define OUT_LIVE_ADD(n)        (g_live_bufs += (n))
+#define OUT_TRANSFERRED_ADD(n) (g_transferred_bufs += (n))
+#else
+#define OUT_LIVE_ADD(n)        ((void)0)
+#define OUT_TRANSFERRED_ADD(n) ((void)0)
+#endif
+
+static void *out_malloc(size_t n)
+{
+#ifdef MINIDB_TEST_HOOKS
+    if (g_fail_malloc_at != 0 && ++g_malloc_calls == g_fail_malloc_at) return NULL;
+    if (g_fail_malloc_at == 0) g_malloc_calls++;
+#endif
+    return malloc(n);
+}
+
+static void *out_realloc(void *p, size_t n)
+{
+#ifdef MINIDB_TEST_HOOKS
+    if (g_fail_realloc_at != 0 && ++g_realloc_calls == g_fail_realloc_at) return NULL;
+    if (g_fail_realloc_at == 0) g_realloc_calls++;
+#endif
+    return realloc(p, n);
+}
 
 static void buf_init(out_buf_t *b)
 {
-    b->cap  = 4096;
-    b->data = (char *)malloc(b->cap);
-    b->len  = 0;
+    b->len    = 0;
+    b->cap    = 0;
+    b->failed = false;
+    b->data   = (char *)out_malloc(OUT_BUF_INITIAL_CAP);
     if (b->data == NULL) {
-        b->cap = 0;
+        b->failed = true;
         return;
     }
+    b->cap = OUT_BUF_INITIAL_CAP;
     b->data[0] = '\0';
+    OUT_LIVE_ADD(1);
 }
 
 static void buf_append(out_buf_t *b, const char *fmt, ...)
@@ -73,7 +132,7 @@ static void buf_append(out_buf_t *b, const char *fmt, ...)
 
 static void buf_append(out_buf_t *b, const char *fmt, ...)
 {
-    if (b->data == NULL || b->cap == 0) {
+    if (b->failed) {
         return;
     }
 
@@ -81,13 +140,32 @@ static void buf_append(out_buf_t *b, const char *fmt, ...)
     va_start(ap, fmt);
     int need = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
-    if (need < 0) return;
+    if (need < 0) {
+        b->failed = true;
+        return;
+    }
 
-    while (b->len + (size_t)need + 1 > b->cap) {
-        b->cap *= 2;
-        char *tmp = (char *)realloc(b->data, b->cap);
-        if (!tmp) return;   /* realloc 실패 시 기존 버퍼 유지 */
+    size_t want = b->len + (size_t)need + 1;
+    if (want < b->len) {
+        b->failed = true;
+        return;
+    }
+    if (want > b->cap) {
+        size_t new_cap = b->cap;
+        while (new_cap < want) {
+            if (new_cap > SIZE_MAX / 2) {
+                b->failed = true;
+                return;
+            }
+            new_cap *= 2;
+        }
+        char *tmp = (char *)out_realloc(b->data, new_cap);
+        if (tmp == NULL) {
+            b->failed = true;   /* 기존 data와 cap은 그대로라 buf_free가 한 번 해제한다 */
+            return;
+        }
         b->data = tmp;
+        b->cap  = new_cap;
     }
     va_start(ap, fmt);
     vsnprintf(b->data + b->len, (size_t)need + 1, fmt, ap);
@@ -95,23 +173,50 @@ static void buf_append(out_buf_t *b, const char *fmt, ...)
     b->len += (size_t)need;
 }
 
-/* 버퍼 소유권을 exec_result_t에 이전. 호출 후 b는 사용 불가 */
-static void buf_transfer(out_buf_t *b, exec_result_t *res)
+/* 버퍼를 해제 (transfer하지 않는 경로용) */
+static void buf_free(out_buf_t *b)
 {
-    res->out_buf = b->data;
-    res->out_len = b->len;
+    if (b->data != NULL) {
+        free(b->data);
+        OUT_LIVE_ADD(-1);
+    }
     b->data = NULL;
     b->len  = 0;
     b->cap  = 0;
 }
 
-/* 버퍼를 해제 (transfer하지 않는 경로용) */
-static void buf_free(out_buf_t *b)
+/* 버퍼 소유권을 exec_result_t에 이전. 호출 후 b는 사용 불가 */
+static void buf_transfer(out_buf_t *b, exec_result_t *res)
 {
-    free(b->data);
+    res->out_buf = b->data;
+    res->out_len = b->len;
+    if (b->data != NULL) {
+        OUT_LIVE_ADD(-1);
+        OUT_TRANSFERRED_ADD(1);
+    }
     b->data = NULL;
     b->len  = 0;
     b->cap  = 0;
+}
+
+/*
+ * buf_take - 출력이 필요한 경로가 결과를 넘길 때 쓴다.
+ *
+ * 성공하면 소유권을 res에 이전하고 true. 할당에 실패했으면 쌓인 내용을 해제하고 res를
+ * 오류(status -1, out_buf NULL, out_len 0)로 만든 뒤 false. 호출자는 false면 res를 그대로 반환한다.
+ */
+static bool buf_take(out_buf_t *b, exec_result_t *res)
+{
+    if (b->failed) {
+        buf_free(b);
+        res->status  = -1;
+        res->out_buf = NULL;
+        res->out_len = 0;
+        snprintf(res->message, sizeof(res->message), "%s", OUT_BUF_ALLOC_FAILED_MSG);
+        return false;
+    }
+    buf_transfer(b, res);
+    return true;
 }
 
 /*
@@ -546,6 +651,9 @@ static bool select_scan_cb(const uint8_t *row_data, row_ref_t ref, void *ctx)
     }
     append_row(sc->buf, hdr, values);
     sc->count++;
+    if (sc->buf->failed) {
+        return false; /* 출력 할당 실패: 더 쌓아도 쓸 수 없으니 스캔을 멈춘다 */
+    }
     if (sc->stop_at_limit && sc->count >= sc->limit) {
         return false;
     }
@@ -601,7 +709,9 @@ static exec_result_t exec_index_lookup(pager_t *pager, statement_t *stmt)
     buf_init(&buf);
     append_header(&buf, hdr);
     append_row(&buf, hdr, values);
-    buf_transfer(&buf, &res);
+    if (!buf_take(&buf, &res)) {
+        return res;
+    }
 
     snprintf(res.message, sizeof(res.message), "1행 조회 (INDEX_LOOKUP)");
     return res;
@@ -730,6 +840,9 @@ static exec_result_t exec_index_range_scan(pager_t *pager, statement_t *stmt)
         }
         append_row(&buf, hdr, values);
         out++;
+        if (buf.failed) {
+            break;   /* 출력 할당 실패: 아래에서 잡은 latch를 풀고 오류로 반환 */
+        }
     }
     if (cur_page != NULL) {
         pager_unlatch_r(pager, cur_pid);
@@ -737,7 +850,9 @@ static exec_result_t exec_index_range_scan(pager_t *pager, statement_t *stmt)
     free(rc.refs);
 
     if (out > 0) {
-        buf_transfer(&buf, &res);
+        if (!buf_take(&buf, &res)) {
+            return res;
+        }
     } else {
         buf_free(&buf);
     }
@@ -1114,7 +1229,9 @@ static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
         }
 
         buf_append(&buf, "COUNT(*)\n----------\n%" PRIu64 "\n", count);
-        buf_transfer(&buf, &res);
+        if (!buf_take(&buf, &res)) {
+            return res;
+        }
         snprintf(res.message, sizeof(res.message), "count = %" PRIu64, count);
         return res;
     }
@@ -1190,10 +1307,16 @@ static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
             append_header(&buf, hdr);
             for (uint32_t i = 0; i < output_count; i++) {
                 append_row(&buf, hdr, row_collect_get(&rc, i));
+                if (buf.failed) {
+                    break;
+                }
             }
         }
         if (output_count > 0) {
-            buf_transfer(&buf, &res);
+            if (!buf_take(&buf, &res)) {
+                row_collect_free(&rc);
+                return res;
+            }
         } else {
             buf_free(&buf);
         }
@@ -1215,7 +1338,9 @@ static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
     };
     heap_scan(pager, hdr->row_size, select_scan_cb, &sc);
     if (sc.count > 0) {
-        buf_transfer(&buf, &res);
+        if (!buf_take(&buf, &res)) {
+            return res;
+        }
     } else {
         buf_free(&buf);
     }
@@ -1725,7 +1850,9 @@ static exec_result_t exec_explain(pager_t *pager, statement_t *stmt)
         }
         buf_append(&buf, "  Scan: all heap pages\n");
     }
-    buf_transfer(&buf, &res);
+    if (!buf_take(&buf, &res)) {
+        return res;
+    }
 
     snprintf(res.message, sizeof(res.message), "실행 계획 출력 완료");
     return res;
