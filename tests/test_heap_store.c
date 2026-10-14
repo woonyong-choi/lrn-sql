@@ -298,15 +298,33 @@ static void fx_close(fx_t *fx)
     memset(fx, 0, sizeof(*fx));
 }
 
-/* 닫았다가 다시 열어 catalog가 가리키는 heap을 연다. */
-static void fx_reopen(fx_t *fx)
+/* 디스크에 있는 파일을 열어 catalog가 가리키는 heap을 연다. */
+static void fx_open_existing(fx_t *fx)
 {
-    fx_close(fx);
     assert(page_file_open(DB_PATH, true, &fx->file, NULL) == PAGE_FILE_OK);
     assert(catalog_store_load(fx->file, &fx->catalog) == CATALOG_STORE_OK);
     assert(catalog_find(fx->catalog, "items", 5, &fx->tid) == CATALOG_OK);
     heap_schema_t schema = {TYPES, COLUMNS};
     assert(heap_open(fx->file, fx->tid, catalog_heap_root(fx->catalog, fx->tid), &schema, &fx->heap) == HEAP_OK);
+}
+
+/* 닫았다가 다시 열어 catalog가 가리키는 heap을 연다. */
+static void fx_reopen(fx_t *fx)
+{
+    fx_close(fx);
+    fx_open_existing(fx);
+}
+
+/* finish가 끝난 batch를 catalog로 게시하고, 성공이 확실하면 옛 페이지를 release한다. */
+static catalog_store_status_t fx_save_finished(fx_t *fx, heap_batch_t *batch, const heap_batch_result_t *result)
+{
+    assert(catalog_set_locators(fx->catalog, fx->tid, result->new_root, 0) == CATALOG_OK);
+    catalog_store_status_t saved = catalog_store_save(fx->file, fx->catalog);
+    fx->new_root = result->new_root;
+    if (saved == CATALOG_STORE_OK || saved == CATALOG_STORE_UNRECLAIMED) {
+        assert(heap_batch_release_old(batch) == HEAP_OK);
+    }
+    return saved;
 }
 
 /* finish -> catalog 게시 -> 성공이 확실하면 옛 페이지 release 후 새 heap으로 교체. 실패는 abort하지 않고 돌려준다. */
@@ -316,13 +334,7 @@ static catalog_store_status_t fx_publish(fx_t *fx, heap_batch_t *batch, heap_sta
     heap_status_t finished = heap_batch_finish(batch, &result);
     if (finish_status != NULL) *finish_status = finished;
     if (finished != HEAP_OK) return CATALOG_STORE_INVALID;
-    assert(catalog_set_locators(fx->catalog, fx->tid, result.new_root, 0) == CATALOG_OK);
-    catalog_store_status_t saved = catalog_store_save(fx->file, fx->catalog);
-    fx->new_root = result.new_root;
-    if (saved == CATALOG_STORE_OK || saved == CATALOG_STORE_UNRECLAIMED) {
-        assert(heap_batch_release_old(batch) == HEAP_OK);
-    }
-    return saved;
+    return fx_save_finished(fx, batch, &result);
 }
 
 /* 게시에 성공한 뒤 새 root로 heap을 다시 연다. 실패 주입을 끈 뒤에 부른다. */
@@ -608,38 +620,42 @@ static void test_update_delete_and_row_moves(void)
     clean_dir();
 }
 
+/* load_many_pages가 넣는 행. 모델에도 같은 행을 넣는다. */
+static void model_put_loaded(int id)
+{
+    make_row(id, 4, g_model[id].cells);
+    value_clear(&g_model[id].cells[3]);
+    assert(value_set_null(&g_model[id].cells[3]) == VALUE_OK);
+    g_model[id].present = true;
+}
+
+/* 행 하나가 약 3990바이트라 한 record page에 두 행이 들어간다. 4300행이면 디렉터리 잎이 둘이다. */
+static void load_many_pages(fx_t *fx, int rows)
+{
+    heap_batch_t *batch;
+    assert(heap_batch_begin(fx->heap, &batch) == HEAP_OK);
+    for (int id = 0; id < rows; id++) {
+        model_put_loaded(id);
+        value_view_t views[COLUMNS];
+        to_views(g_model[id].cells, views);
+        heap_locator_t loc;
+        heap_status_t status = heap_batch_insert(batch, views, COLUMNS, &loc);
+        if (status != HEAP_OK) {
+            CHECK(false, "삽입 %d: %d", id, status);
+            break;
+        }
+    }
+    assert(fx_commit(fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+}
+
 static void test_many_pages_need_several_directory_pages(void)
 {
     printf("\n[test_many_pages_need_several_directory_pages]\n");
     fx_t fx;
     fx_create(&fx);
     model_reset();
-    heap_batch_t *batch;
-    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
-    /* 행 하나가 약 3990바이트라 한 record page에 두 행이 들어간다 */
-    int rows = 4300;
-    for (int id = 0; id < rows; id++) {
-        value_t row[COLUMNS] = ZERO_ROW;
-        make_row(id, 4, row);
-        value_clear(&row[3]);
-        assert(value_set_null(&row[3]) == VALUE_OK);
-        value_view_t views[COLUMNS];
-        to_views(row, views);
-        heap_locator_t loc;
-        heap_status_t status = heap_batch_insert(batch, views, COLUMNS, &loc);
-        if (status != HEAP_OK) {
-            CHECK(false, "삽입 %d: %d", id, status);
-            clear_row(row);
-            break;
-        }
-        for (int c = 0; c < COLUMNS; c++) {
-            assert(value_clone(&row[c].view, &g_model[id].cells[c]) == VALUE_OK);
-        }
-        g_model[id].present = true;
-        clear_row(row);
-    }
-    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
-    heap_batch_free(batch);
+    load_many_pages(&fx, 4300);
     size_t pages = heap_record_page_count(fx.heap);
     CHECK(pages > HEAP_DIRECTORY_ENTRIES, "디렉터리 한 장의 항목 수(%u)를 넘는 record page %zu개",
           (unsigned)HEAP_DIRECTORY_ENTRIES, pages);
@@ -1153,6 +1169,341 @@ static void test_failures_never_change_published_state(void)
     printf("  (batch 단계 %d, 제어 쓰기 전 게시 실패 %d, 불확정 %d)\n", batch_failures, not_applied_seen, unknown_seen);
 }
 
+/* ── 국소 디렉터리 갱신(#159) ── */
+
+#define TREE_ROWS 4300
+#define MAX_DIRS 8
+#define TARGETS 2
+
+/* heap이 가리키는 디렉터리 페이지를 collect 순서(루트, 잎...)로 돌려준다. */
+static size_t directory_pages(heap_t *heap, uint32_t file_dirs[MAX_DIRS], page_file_t *file)
+{
+    uint32_t *all;
+    size_t count;
+    assert(heap_collect_pages(heap, &all, &count) == HEAP_OK);
+    size_t found = 0;
+    for (size_t i = 0; i < count; i++) {
+        page_file_page_info_t info;
+        assert(page_file_page_info(file, all[i], &info) == PAGE_FILE_OK);
+        if (info.kind != PAGE_KIND_DIRECTORY) continue;
+        assert(found < MAX_DIRS);
+        file_dirs[found++] = all[i];
+    }
+    free(all);
+    return found;
+}
+
+static size_t count_directory_pages(page_file_t *file, const uint32_t *pages, size_t count)
+{
+    size_t found = 0;
+    for (size_t i = 0; i < count; i++) {
+        page_file_page_info_t info;
+        assert(page_file_page_info(file, pages[i], &info) == PAGE_FILE_OK);
+        found += info.kind == PAGE_KIND_DIRECTORY;
+    }
+    return found;
+}
+
+static bool contains_page(const uint32_t *pages, size_t count, uint32_t page)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (pages[i] == page) return true;
+    }
+    return false;
+}
+
+typedef struct {
+    int id;
+    heap_locator_t at;
+} target_t;
+
+/* 순회 순서의 앞쪽 TARGETS개 행(첫 잎에 속한다)과 마지막 행을 찾는다. */
+static void find_targets(heap_t *heap, target_t first[TARGETS], target_t *last)
+{
+    heap_cursor_t *cursor;
+    assert(heap_cursor_open(heap, &cursor) == HEAP_OK);
+    value_t row[COLUMNS] = ZERO_ROW;
+    heap_locator_t at;
+    int seen = 0;
+    while (heap_cursor_next(cursor, row, &at) == HEAP_OK) {
+        target_t found = {(int)row[0].view.integer, at};
+        clear_row(row);
+        if (seen < TARGETS) first[seen] = found;
+        *last = found;
+        seen++;
+    }
+    heap_cursor_close(cursor);
+}
+
+/* 대상 행들의 모델을 크기가 작아진 상태(shrunk)나 적재한 상태로 맞춘다. */
+static void set_targets_model(const target_t *targets, bool shrunk)
+{
+    for (int i = 0; i < TARGETS; i++) {
+        if (shrunk) model_put(targets[i].id, 0);
+        else model_put_loaded(targets[i].id);
+    }
+}
+
+static heap_status_t update_targets(heap_batch_t *batch, const target_t *targets)
+{
+    for (int i = 0; i < TARGETS; i++) {
+        value_view_t views[COLUMNS];
+        to_views(g_model[targets[i].id].cells, views);
+        heap_locator_t placed;
+        heap_status_t status = heap_batch_update(batch, targets[i].at, views, COLUMNS, &placed);
+        if (status != HEAP_OK) return status;
+    }
+    return HEAP_OK;
+}
+
+static bool root_has_magic(fx_t *fx, const char *magic)
+{
+    uint8_t body[PAGE_BODY_BYTES];
+    uint32_t root = catalog_heap_root(fx->catalog, fx->tid);
+    assert(page_file_read(fx->file, root, PAGE_KIND_DIRECTORY, fx->tid, body) == PAGE_FILE_OK);
+    return memcmp(body, magic, 4) == 0;
+}
+
+/* #159: 한 행을 바꿔도 바뀐 record page가 속한 잎과 루트만 새로 쓴다. 나머지 잎 페이지 번호는 그대로다. */
+static void test_one_row_change_rewrites_only_its_leaf(void)
+{
+    printf("\n[test_one_row_change_rewrites_only_its_leaf]\n");
+    fx_t fx;
+    fx_create(&fx);
+    model_reset();
+    load_many_pages(&fx, TREE_ROWS);
+    uint32_t before[MAX_DIRS], after[MAX_DIRS];
+    size_t before_count = directory_pages(fx.heap, before, fx.file);
+    CHECK(before_count == 3 && root_has_magic(&fx, HEAP_TREE_ROOT_MAGIC), "루트 하나와 잎 둘의 트리 (%zu장)", before_count);
+    target_t first[TARGETS], last;
+    find_targets(fx.heap, first, &last);
+
+    /* 첫 잎의 행을 갱신: 새 루트와 새 첫 잎만 쓰고 둘째 잎은 그대로 */
+    set_targets_model(first, true);
+    heap_batch_t *batch;
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    CHECK(update_targets(batch, first) == HEAP_OK, "첫 잎의 행 갱신");
+    heap_batch_result_t result;
+    assert(heap_batch_finish(batch, &result) == HEAP_OK);
+    CHECK(count_directory_pages(fx.file, result.new_pages, result.new_count) == 2, "새로 쓴 디렉터리 페이지는 루트와 잎 하나");
+    CHECK(contains_page(result.old_pages, result.old_count, before[0]) &&
+              contains_page(result.old_pages, result.old_count, before[1]) &&
+              !contains_page(result.old_pages, result.old_count, before[2]),
+          "옛 루트와 옛 첫 잎만 반환 대상이고 둘째 잎은 아님");
+    assert(fx_save_finished(&fx, batch, &result) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    fx_adopt(&fx);
+    size_t after_count = directory_pages(fx.heap, after, fx.file);
+    CHECK(after_count == 3 && after[0] != before[0] && after[1] != before[1] && after[2] == before[2],
+          "갱신 뒤 둘째 잎은 같은 페이지를 가리킴");
+    CHECK(heap_matches_model(fx.heap), "갱신한 행과 나머지 행이 모델과 일치");
+    fx_reopen(&fx);
+    CHECK(heap_matches_model(fx.heap), "다시 열어도 일치");
+    memcpy(before, after, sizeof(before));
+
+    /* 마지막 행 삭제: 새 루트와 새 둘째 잎만 쓰고 첫 잎은 그대로 */
+    find_targets(fx.heap, first, &last);
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    CHECK(heap_batch_delete(batch, last.at) == HEAP_OK, "마지막 행 삭제");
+    clear_row(g_model[last.id].cells);
+    g_model[last.id].present = false;
+    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    after_count = directory_pages(fx.heap, after, fx.file);
+    CHECK(after_count == 3 && after[0] != before[0] && after[1] == before[1] && after[2] != before[2],
+          "삭제 뒤 첫 잎은 같은 페이지를 가리킴");
+    CHECK(heap_matches_model(fx.heap), "삭제 뒤 모델과 일치");
+    memcpy(before, after, sizeof(before));
+
+    /* 행 삽입(끝에 붙임): 첫 잎은 그대로 */
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    model_put(TREE_ROWS, 2);
+    value_view_t views[COLUMNS];
+    to_views(g_model[TREE_ROWS].cells, views);
+    heap_locator_t placed;
+    CHECK(heap_batch_insert(batch, views, COLUMNS, &placed) == HEAP_OK, "행 삽입");
+    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    after_count = directory_pages(fx.heap, after, fx.file);
+    CHECK(after_count == 3 && after[0] != before[0] && after[1] == before[1], "삽입 뒤 첫 잎은 같은 페이지를 가리킴");
+    fx_reopen(&fx);
+    CHECK(heap_matches_model(fx.heap), "삽입 뒤 다시 열어도 일치");
+    fx_close(&fx);
+    model_reset();
+    clean_dir();
+}
+
+/* 옛 코드가 쓴 LHD1 여러 장짜리 체인을 읽고, 다음 변경에서 트리로 바꾸며 체인 페이지를 모두 반환한다. */
+static void test_legacy_chain_directory_is_read_and_replaced(void)
+{
+    printf("\n[test_legacy_chain_directory_is_read_and_replaced]\n");
+    fx_t fx;
+    fx_create(&fx);
+    model_reset();
+    load_many_pages(&fx, TREE_ROWS);
+    uint32_t tree[MAX_DIRS];
+    assert(directory_pages(fx.heap, tree, fx.file) == 3);
+
+    /* 같은 record page를 LHD1 규칙(문서화된 형식)대로 체인 두 장에 다시 적는다 */
+    uint32_t chain[2];
+    uint8_t leaf_body[2][PAGE_BODY_BYTES];
+    for (int i = 0; i < 2; i++) {
+        assert(page_file_read(fx.file, tree[1 + i], PAGE_KIND_DIRECTORY, fx.tid, leaf_body[i]) == PAGE_FILE_OK);
+        assert(page_file_alloc(fx.file, &chain[i]) == PAGE_FILE_OK);
+    }
+    for (int i = 0; i < 2; i++) {
+        uint32_t next = i == 0 ? chain[1] : 0;
+        for (unsigned b = 0; b < 4; b++) leaf_body[i][12 + b] = (uint8_t)(next >> (8 * b));
+        assert(page_file_write(fx.file, chain[i], PAGE_KIND_DIRECTORY, fx.tid, leaf_body[i]) == PAGE_FILE_OK);
+    }
+    assert(catalog_set_locators(fx.catalog, fx.tid, chain[0], 0) == CATALOG_OK);
+    assert(catalog_store_save(fx.file, fx.catalog) == CATALOG_STORE_OK);
+    fx_reopen(&fx);
+    CHECK(!root_has_magic(&fx, HEAP_TREE_ROOT_MAGIC) && catalog_heap_root(fx.catalog, fx.tid) == chain[0],
+          "체인으로 게시한 상태");
+    CHECK(heap_matches_model(fx.heap), "LHD1 체인의 모든 행을 순서대로 읽음");
+
+    target_t first[TARGETS], last;
+    find_targets(fx.heap, first, &last);
+    set_targets_model(first, true);
+    heap_batch_t *batch;
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    CHECK(update_targets(batch, first) == HEAP_OK, "체인 heap의 행 갱신");
+    heap_batch_result_t result;
+    assert(heap_batch_finish(batch, &result) == HEAP_OK);
+    CHECK(contains_page(result.old_pages, result.old_count, chain[0]) &&
+              contains_page(result.old_pages, result.old_count, chain[1]),
+          "옛 체인 페이지를 모두 반환 대상에 넣음");
+    CHECK(count_directory_pages(fx.file, result.new_pages, result.new_count) == 3, "트리 전체(루트와 잎 둘)를 새로 씀");
+    assert(fx_save_finished(&fx, batch, &result) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    fx_reopen(&fx);
+    CHECK(root_has_magic(&fx, HEAP_TREE_ROOT_MAGIC), "다음 변경으로 트리가 됨");
+    CHECK(heap_matches_model(fx.heap), "변환 뒤 모든 행이 모델과 일치");
+    fx_close(&fx);
+    model_reset();
+    clean_dir();
+}
+
+/* 잎이 한 장일 때는 옛 형식 그대로 쓴다(트리로 올리지 않음). */
+static void test_single_leaf_heap_keeps_legacy_format(void)
+{
+    printf("\n[test_single_leaf_heap_keeps_legacy_format]\n");
+    fx_t fx;
+    fx_create(&fx);
+    model_reset();
+    load_many_pages(&fx, 400);
+    uint32_t dirs[MAX_DIRS];
+    CHECK(directory_pages(fx.heap, dirs, fx.file) == 1 && root_has_magic(&fx, HEAP_DIRECTORY_MAGIC),
+          "항목이 한 장 안이면 LHD1 한 장");
+    fx_close(&fx);
+    model_reset();
+    clean_dir();
+}
+
+/*
+ * 트리 heap에서 한 단계씩 실패시킨다. 게시 전 실패는 abort 뒤 다시 열어도 옛 상태이고, 불확정이면 옛 상태나 새 상태
+ * 중 하나다. 어느 경우든 같은 변경을 다시 해 성공하고, 이어지는 commit이 재사용 중인 잎을 덮어쓰지 않는다.
+ */
+static void test_tree_failures_keep_every_leaf_reachable(void)
+{
+    printf("\n[test_tree_failures_keep_every_leaf_reachable]\n");
+    fx_t fx;
+    fx_create(&fx);
+    model_reset();
+    load_many_pages(&fx, TREE_ROWS);
+    target_t targets[TARGETS], last;
+    find_targets(fx.heap, targets, &last);
+    fx_close(&fx);
+    size_t size;
+    uint8_t *original = slurp(DB_PATH, &size);
+    page_file_set_default_io(&HOOKED);
+    static const char *names[] = {"pwrite", "pread", "fsync", "alloc"};
+    int failures = 0, not_applied = 0, unknown = 0, new_state_after_unknown = 0;
+    for (int kind = FAIL_PWRITE; kind <= FAIL_ALLOC; kind++) {
+        for (int n = 1; n <= 200; n++) {
+            disarm();
+            spit(DB_PATH, original, size);
+            fx_open_existing(&fx);
+            set_targets_model(targets, true);
+            heap_batch_t *batch;
+            assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+            arm((fail_kind_t)kind, n);
+            heap_status_t finish_status = HEAP_OK;
+            catalog_store_status_t saved = CATALOG_STORE_OK;
+            heap_status_t failure = update_targets(batch, targets);
+            if (failure == HEAP_OK) saved = fx_publish(&fx, batch, &finish_status);
+            bool triggered = failure != HEAP_OK || finish_status != HEAP_OK || saved != CATALOG_STORE_OK ||
+                             (kind == FAIL_ALLOC ? g_alloc_calls >= n
+                                                 : kind == FAIL_PWRITE   ? g_hooks.pwrite_calls >= n
+                                                 : kind == FAIL_PREAD    ? g_hooks.pread_calls >= n
+                                                                         : g_hooks.fsync_calls >= n);
+            disarm();
+            if (!triggered) {
+                heap_batch_free(batch);
+                fx_close(&fx);
+                break;  /* 이 단계 번호가 이 변경의 호출 수를 넘었다 */
+            }
+            failures++;
+            bool new_state = false;
+            bool batch_stage = failure != HEAP_OK || finish_status != HEAP_OK;
+            if (!batch_stage && (saved == CATALOG_STORE_OK || saved == CATALOG_STORE_UNRECLAIMED)) {
+                heap_batch_free(batch);  /* 게시는 성공했다 */
+                new_state = true;
+            } else if (!batch_stage && saved == CATALOG_STORE_OUTCOME_UNKNOWN) {
+                unknown++;
+                heap_batch_free(batch);  /* 불확정이면 abort도 release도 하지 않는다 */
+            } else {
+                if (!batch_stage) not_applied++;
+                CHECK(heap_batch_abort(batch) == HEAP_OK, "%s %d: abort", names[kind], n);
+                heap_batch_free(batch);
+            }
+            fx_close(&fx);
+            fx_open_existing(&fx);
+            set_targets_model(targets, new_state);
+            bool at_expected = heap_matches_model(fx.heap);
+            if (!at_expected && !batch_stage && saved == CATALOG_STORE_OUTCOME_UNKNOWN) {
+                set_targets_model(targets, true);
+                at_expected = heap_matches_model(fx.heap);
+                new_state = at_expected;
+                new_state_after_unknown += at_expected;
+            }
+            CHECK(at_expected, "%s %d: 재시작 뒤 옛 상태 또는 새 상태가 온전히 읽힘", names[kind], n);
+
+            /* 같은 변경을 다시 한다. 이미 새 상태면 건너뛴다 */
+            if (!new_state) {
+                set_targets_model(targets, true);
+                assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+                CHECK(update_targets(batch, targets) == HEAP_OK, "%s %d: 재시도 갱신", names[kind], n);
+                CHECK(fx_commit(&fx, batch) == CATALOG_STORE_OK, "%s %d: 재시도 게시", names[kind], n);
+                heap_batch_free(batch);
+            }
+            CHECK(heap_matches_model(fx.heap), "%s %d: 재시도 뒤 새 상태", names[kind], n);
+            /* 이어지는 commit을 여러 번 해 반환한 페이지가 재사용돼도 살아 있는 잎이 덮이지 않는지 본다 */
+            for (int round = 0; round < 3; round++) {
+                for (int i = 0; i < TARGETS; i++) model_put(targets[i].id, round % 2 == 0 ? 2 : 0);
+                assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+                CHECK(update_targets(batch, targets) == HEAP_OK, "%s %d: 이어진 갱신 %d", names[kind], n, round);
+                CHECK(fx_commit(&fx, batch) == CATALOG_STORE_OK, "%s %d: 이어진 게시 %d", names[kind], n, round);
+                heap_batch_free(batch);
+            }
+            fx_reopen(&fx);
+            CHECK(heap_matches_model(fx.heap), "%s %d: 이어진 commit 뒤 다시 열어도 일치", names[kind], n);
+            fx_close(&fx);
+            set_targets_model(targets, false);
+        }
+    }
+    disarm();
+    page_file_set_default_io(NULL);
+    free(original);
+    CHECK(failures > 20, "실패 지점을 충분히 지남 (%d)", failures);
+    CHECK(not_applied > 0 && unknown > 0, "게시 전 실패(%d)와 불확정(%d) 경로를 모두 지남", not_applied, unknown);
+    printf("  (실패 지점 %d, 제어 쓰기 전 게시 실패 %d, 불확정 %d, 그 중 새 상태 %d)\n", failures, not_applied, unknown,
+           new_state_after_unknown);
+    model_reset();
+    clean_dir();
+}
+
 int main(void)
 {
     /* 할당 치환이 적용된 빌드인지 확인한다. */
@@ -1177,6 +1528,10 @@ int main(void)
     test_locator_kinds_are_distinguished();
     test_copy_on_write_keeps_published_pages();
     test_failures_never_change_published_state();
+    test_one_row_change_rewrites_only_its_leaf();
+    test_legacy_chain_directory_is_read_and_replaced();
+    test_single_leaf_heap_keeps_legacy_format();
+    test_tree_failures_keep_every_leaf_reachable();
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
     return g_fail == 0 ? 0 : 1;
