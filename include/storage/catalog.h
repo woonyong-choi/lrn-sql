@@ -153,6 +153,12 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
 size_t catalog_memory_bytes(const catalog_t *catalog);
 /* 지금 catalog_encode하면 나오는 바이트 수(catalog_store_save의 부호화 buffer 크기) */
 size_t catalog_encoded_bytes(const catalog_t *catalog);
+/*
+ * encoded_bytes 길이의 부호화 buffer를 catalog_decode하는 동안 decode가 요청하는 바이트의 순간 최대치 상한
+ * (입력 buffer 제외). 부호화 형식의 최소 테이블·컬럼 크기로 개수를 제한한 값이라 실제보다 크다. 성공한
+ * 카탈로그의 catalog_memory_bytes도 이 값 이하다.
+ */
+size_t catalog_decode_peak_bytes(size_t encoded_bytes);
 size_t catalog_clone_peak_bytes(const catalog_t *catalog);
 size_t catalog_create_peak_bytes(const catalog_t *catalog, size_t column_count, size_t names_bytes);
 
