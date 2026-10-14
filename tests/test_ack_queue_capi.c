@@ -13,9 +13,11 @@
 #include <stdlib.h>
 
 static long g_realloc_calls, g_realloc_fail_at;
+static size_t g_realloc_largest;   /* 요청한 가장 큰 크기. 선언한 상한을 넘지 않는지 본다 */
 
 static void *capi_test_realloc(void *pointer, size_t size)
 {
+    if (size > g_realloc_largest) g_realloc_largest = size;
     if (g_realloc_fail_at != 0 && ++g_realloc_calls == g_realloc_fail_at) return NULL;
     return realloc(pointer, size);
 }
@@ -196,6 +198,19 @@ static void test_output_cap(void)
     put_bytes(&c, "x", 1);
     CHECK(c.error == ACKQ_LIMIT && c.size == 10, "상한을 넘는 쓰기는 거절하고 내용을 바꾸지 않는다");
     free(c.data);
+    lrn_set_max_result_bytes(original);
+    /* 아주 작은 상한(1~255)에서도 선언한 상한보다 크게 할당하지 않는다 */
+    for (size_t cap = 1; cap <= 300; cap += (cap < 20 ? 1 : 37)) {
+        lrn_set_max_result_bytes(cap);
+        buffer_t e = {0};
+        g_realloc_largest = 0;
+        for (size_t i = 0; i < cap && e.error == ACKQ_OK; i++) put_bytes(&e, "z", 1);
+        CHECK(e.error == ACKQ_OK && e.size == cap, "상한 %zu까지 채운다", cap);
+        CHECK(g_realloc_largest <= cap, "상한 %zu: 요청한 최대 크기 %zu가 상한 이하", cap, g_realloc_largest);
+        put_bytes(&e, "z", 1);
+        CHECK(e.error == ACKQ_LIMIT && e.size == cap, "상한 %zu를 넘는 쓰기는 거절", cap);
+        free(e.data);
+    }
     lrn_set_max_result_bytes(original);
     buffer_t d = {0};
     put_bytes(&d, "a", 1);
