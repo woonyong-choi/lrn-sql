@@ -565,23 +565,24 @@ result_status_t result_builder_finish(result_builder_t **builder, result_t **out
     *out = NULL;
     if (builder == NULL || *builder == NULL) return RESULT_INVALID;
     result_t *result = (*builder)->result;
-    /* builder 구조체는 여기서 사라지므로 그 몫은 돌려주고, 나머지는 결과가 쥔다 */
-    if (result->accounted >= sizeof(result_builder_t)) {
-        result->accounted -= sizeof(result_builder_t);
-        mem_release(&result->ledger, result->scope, sizeof(result_builder_t));
-    }
+    /* builder 구조체는 여기서 사라지므로 해제한 뒤 그 몫을 돌려주고, 나머지는 결과가 쥔다 */
+    bool return_builder_bytes = result->accounted >= sizeof(result_builder_t);
+    if (return_builder_bytes) result->accounted -= sizeof(result_builder_t);
     *out = result;
     free(*builder);
     *builder = NULL;
+    if (return_builder_bytes) mem_release(&result->ledger, result->scope, sizeof(result_builder_t));
     return RESULT_OK;
 }
 
 void result_builder_destroy(result_builder_t **builder)
 {
     if (builder == NULL || *builder == NULL) return;
-    result_release(&(*builder)->result);  /* 계상 전체(builder 구조체 포함)를 돌려준다 */
+    /* builder 구조체를 먼저 해제한다. 그 몫은 결과의 계상에 들어 있어 result_release가 결과를 해제한 뒤 함께 돌려준다 */
+    result_t *result = (*builder)->result;
     free(*builder);
     *builder = NULL;
+    result_release(&result);
 }
 
 result_kind_t result_kind(const result_t *result)
@@ -646,8 +647,11 @@ void result_release(result_t **result)
     if (result == NULL || *result == NULL) return;
     close_source(*result);
     mem_ledger_t ledger = (*result)->ledger;
-    mem_release(&ledger, (*result)->scope, (*result)->accounted);
+    mem_scope_t scope = (*result)->scope;
+    size_t accounted = (*result)->accounted;
     free(*result);
+    /* 몫은 메모리를 해제한 뒤에 돌려준다. 먼저 돌려주면 다른 곳이 그 몫으로 할당해 아직 살아 있는 이 결과와 겹친다 */
+    mem_release(&ledger, scope, accounted);
     mem_ledger_drop(&ledger);
     *result = NULL;
 }
