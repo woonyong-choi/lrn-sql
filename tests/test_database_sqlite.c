@@ -152,7 +152,7 @@ static int compare_lines(const void *a, const void *b) { return strcmp(*(char *c
 
 static char *join_sorted(char **lines, size_t count)
 {
-    qsort(lines, count, sizeof(*lines), compare_lines);
+    if (count > 1) qsort(lines, count, sizeof(*lines), compare_lines);
     buffer_t out = {NULL, 0, 0};
     char head[32];
     snprintf(head, sizeof(head), "[%zu]", count);

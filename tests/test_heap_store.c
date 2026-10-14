@@ -700,6 +700,8 @@ static void test_locator_kinds_are_distinguished(void)
     heap_t *probe = NULL;
 
     /* #77이 만든 단일 record root는 디렉터리로 재해석하지 않는다. 파일 내용은 그대로다 */
+    heap_close(fx.heap);
+    fx.heap = NULL;
     page_file_close(fx.file);
     uint64_t before = file_hash();
     assert(page_file_open(DB_PATH, false, &fx.file, NULL) == PAGE_FILE_OK);
