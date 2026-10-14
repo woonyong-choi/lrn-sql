@@ -27,6 +27,7 @@ struct page_file {
     bool writable;
     bool published;
     bool poisoned;
+    page_file_commit_outcome_t commit_outcome;
     char *path;
     char *partial_path;
     page_file_io_t io;
@@ -604,6 +605,32 @@ page_file_status_t page_file_write(page_file_t *file, uint32_t page_id, page_kin
     return status;
 }
 
+page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
+                                       page_file_page_info_t *info)
+{
+    if (file == NULL || info == NULL || !data_page_in_range(file, page_id)) {
+        return PAGE_FILE_INVALID;
+    }
+    uint8_t page[PAGE_FILE_PAGE_BYTES];
+    page_file_status_t status = read_full(file, page, sizeof(page),
+                                          (uint64_t)page_id * PAGE_FILE_PAGE_BYTES);
+    if (status != PAGE_FILE_OK) return status;
+    envelope_t envelope;
+    slot_state_t state = decode_envelope(page, page_id, &envelope);
+    if (state == SLOT_UNSUPPORTED) return PAGE_FILE_UNSUPPORTED;
+    if (state != SLOT_VALID || envelope.body_len != PAGE_BODY_BYTES) {
+        errno = EBADMSG;
+        return PAGE_FILE_CORRUPT;
+    }
+    if (envelope.kind != PAGE_KIND_RECORD && envelope.kind != PAGE_KIND_OVERFLOW &&
+        envelope.kind != PAGE_KIND_DIRECTORY) {
+        return PAGE_FILE_UNSUPPORTED;
+    }
+    info->kind = envelope.kind;
+    info->table_id = envelope.table_id;
+    return PAGE_FILE_OK;
+}
+
 /* ── 할당·해제 ── */
 
 static bool grow(uint32_t **list, size_t *cap, size_t needed)
@@ -680,9 +707,11 @@ page_file_status_t page_file_commit(page_file_t *file)
 {
     if (file == NULL || !file->writable) return PAGE_FILE_INVALID;
     if (file->poisoned) {
+        /* 거절한 호출이 poison을 일으킨 commit의 결과를 덮어쓰지 않는다. */
         errno = EIO;
         return PAGE_FILE_IO;
     }
+    file->commit_outcome = PAGE_FILE_COMMIT_NOT_APPLIED;
     if (file->committed.generation >= UINT64_MAX - 1) return PAGE_FILE_LIMIT;
     /* 성공한 commit 뒤에 실패할 수 있는 할당은 미리 해 둔다. */
     if (!grow(&file->reusable, &file->reusable_cap, file->reusable_len + file->pending_len)) {
@@ -710,15 +739,31 @@ page_file_status_t page_file_commit(page_file_t *file)
     encode_control_body(body, &next);
     uint32_t slot = (uint32_t)(next.generation % 2);
     encode_page(page, PAGE_KIND_CONTROL, slot, 0, CONTROL_BODY_BYTES, body);
+    /* 여기서부터는 실패해도 디스크에 새 세대가 남았는지 알 수 없다. */
+    file->commit_outcome = PAGE_FILE_COMMIT_UNKNOWN;
     status = write_full(file, page, sizeof(page), (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
-    if (status != PAGE_FILE_OK) return status;
+    if (status != PAGE_FILE_OK) {
+        file->poisoned = true;
+        return status;
+    }
     status = sync_file(file);
     if (status != PAGE_FILE_OK) return status;
 
+    file->commit_outcome = PAGE_FILE_COMMIT_APPLIED;
     file->committed = next;
     for (size_t i = 0; i < file->pending_len; i++) file->reusable[file->reusable_len++] = file->pending[i];
     file->pending_len = 0;
     return PAGE_FILE_OK;
+}
+
+page_file_commit_outcome_t page_file_last_commit_outcome(const page_file_t *file)
+{
+    return file != NULL ? file->commit_outcome : PAGE_FILE_COMMIT_NONE;
+}
+
+bool page_file_is_poisoned(const page_file_t *file)
+{
+    return file != NULL && file->poisoned;
 }
 
 /* ── overflow 어댑터 ── */
