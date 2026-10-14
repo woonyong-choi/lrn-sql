@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "fault_runtime.h"
@@ -69,6 +70,28 @@ static int file_write(fault_runtime_t *runtime, const char *path) {
     return status;
 }
 
+// cost: time O(1), heap O(1), stack O(1), io O(1)
+// basis: estimate
+static int socket_write(fault_runtime_t *runtime) {
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) return FIXTURE_ERROR;
+    int probe = fault_probe(runtime, fault_find(runtime, "socket.write"), 3);
+    int status = probe > 0 ? FIXTURE_INJECTED : 0;
+    if (probe < 0) status = FIXTURE_ERROR;
+    if (probe == 0 && send(pair[0], "ack", 3, 0) != 3) status = FIXTURE_ERROR;
+    char received[3];
+    size_t count = 0;
+    while (status == 0 && count < sizeof(received)) {
+        ssize_t bytes = read(pair[1], received + count, sizeof(received) - count);
+        if (bytes <= 0) { status = FIXTURE_ERROR; break; }
+        count += (size_t)bytes;
+    }
+    if (status == 0 && memcmp(received, "ack", 3) != 0) status = FIXTURE_ERROR;
+    if (close(pair[0]) != 0) status = FIXTURE_ERROR;
+    if (close(pair[1]) != 0) status = FIXTURE_ERROR;
+    return status;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return FIXTURE_ERROR;
     fault_runtime_t runtime;
@@ -77,6 +100,7 @@ int main(int argc, char **argv) {
     int status = FIXTURE_ERROR;
     if (strcmp(argv[1], "alloc") == 0) status = allocation(&runtime);
     else if (strcmp(argv[1], "lock") == 0) status = locking(&runtime);
+    else if (strcmp(argv[1], "socket") == 0) status = socket_write(&runtime);
     else if (strcmp(argv[1], "file") == 0 && argc == 3) status = file_write(&runtime, argv[2]);
     else if (strcmp(argv[1], "kill") == 0) {
         int probe = fault_probe(&runtime, fault_find(&runtime, "process.kill"), 0);

@@ -62,6 +62,8 @@ def run_fixture(
         ("alloc", "alloc.realloc", 2),
         ("lock", None, 1),
         ("lock", "lock.wait", 1),
+        ("socket", None, 1),
+        ("socket", "socket.write", 1),
         ("file", None, 1),
         ("file", "file.pwrite", 1),
         ("file", "file.fsync", 1),
