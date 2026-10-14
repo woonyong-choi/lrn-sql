@@ -151,6 +151,8 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
  *   catalog_create_table로 추가하는 동안의 순간 최대치 상한. tables 배열을 늘릴 때의 old+new를 포함한다.
  */
 size_t catalog_memory_bytes(const catalog_t *catalog);
+/* 지금 catalog_encode하면 나오는 바이트 수(catalog_store_save의 부호화 buffer 크기) */
+size_t catalog_encoded_bytes(const catalog_t *catalog);
 size_t catalog_clone_peak_bytes(const catalog_t *catalog);
 size_t catalog_create_peak_bytes(const catalog_t *catalog, size_t column_count, size_t names_bytes);
 

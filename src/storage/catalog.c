@@ -643,3 +643,8 @@ size_t catalog_create_peak_bytes(const catalog_t *catalog, size_t column_count, 
     }
     return refs + built + grow;
 }
+
+size_t catalog_encoded_bytes(const catalog_t *catalog)
+{
+    return catalog == NULL ? 0 : catalog->encoded_bytes;
+}

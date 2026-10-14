@@ -107,6 +107,14 @@ lexer_status_t lexer_scan(const uint8_t *input, size_t size, const lexer_limits_
                           lexed_t **out, lexer_error_t *error);
 void lexer_free(lexed_t *lexed);
 
+/*
+ * 메모리 회계용 상한. 길이 input_size인 입력을 limits로 lexer_scan하는 동안 요청 바이트의 순간 최대치 상한이며
+ * 성공한 lexed_t가 lexer_free까지 쥐는 몫도 이 값 이하다. 모든 토큰은 입력 바이트를 하나 이상 덮으므로
+ * 토큰과 문장 수는 min(input_size, max_tokens) 이하이고 arena는 input_size 이하다. 요청 바이트 기준이며
+ * allocator 오버헤드는 포함하지 않는다. 입력이 한도를 넘어 scan이 할당 전에 거절하는 경우에도 같은 식이다.
+ */
+size_t lexer_scan_peak_bytes(size_t input_size, const lexer_limits_t *limits);
+
 size_t lexed_token_count(const lexed_t *lexed);
 const lexer_token_t *lexed_tokens(const lexed_t *lexed);
 size_t lexed_statement_count(const lexed_t *lexed);

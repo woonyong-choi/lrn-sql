@@ -456,6 +456,15 @@ void lexer_free(lexed_t *lexed)
     free(lexed);
 }
 
+size_t lexer_scan_peak_bytes(size_t input_size, const lexer_limits_t *limits)
+{
+    if (limits == NULL) return 0;
+    size_t tokens = input_size < limits->max_tokens ? input_size : limits->max_tokens;
+    size_t seen_bytes = limits->max_parameters / 8 + 1;
+    return seen_bytes + sizeof(lexed_t) + tokens * (sizeof(lexer_token_t) + sizeof(lexer_statement_t)) +
+           input_size;
+}
+
 size_t lexed_token_count(const lexed_t *lexed)
 {
     return lexed == NULL ? 0 : lexed->token_count;

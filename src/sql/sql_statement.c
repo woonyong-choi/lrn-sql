@@ -735,6 +735,35 @@ static bool parse_create(parser_t *p, sqlstmt_t *statement)
     return parse_end(p);
 }
 
+size_t sqlstmt_parse_peak_bytes(const lexer_statement_t *statement, const lexer_binding_t *binding)
+{
+    if (statement == NULL || statement->tokens == NULL) return 0;
+    size_t items = statement->token_count < CATALOG_MAX_COLUMNS ? statement->token_count : CATALOG_MAX_COLUMNS;
+    if (items < 4) items = 4;
+    /* INSERT는 이름 배열과 값 배열을 함께 쥔다. 다른 문장은 이 합보다 작다 */
+    size_t element = sizeof(sqlstmt_name_t) + sizeof(value_t);
+    if (sizeof(sqlstmt_column_def_t) > element) element = sizeof(sqlstmt_column_def_t);
+    if (sizeof(sqlstmt_assignment_t) > element) element = sizeof(sqlstmt_assignment_t);
+    size_t total = sizeof(sqlstmt_t) + 3 * items * element;
+    for (size_t i = 0; i < statement->token_count; i++) {
+        const lexer_token_t *token = &statement->tokens[i];
+        switch (token->kind) {
+            case LEXER_WORD:
+            case LEXER_QUOTED_IDENT:
+            case LEXER_STRING: total += 2 * token->text_size; break;
+            case LEXER_NUMBER: total += token->text_size + 16; break;
+            case LEXER_PARAMETER:
+                if (binding != NULL && binding->values != NULL && token->parameter_id >= 1 &&
+                    token->parameter_id <= binding->count) {
+                    total += binding->values[token->parameter_id - 1].size_bytes;
+                }
+                break;
+            default: break;
+        }
+    }
+    return total;
+}
+
 sqlstmt_status_t sqlstmt_parse(const lexer_statement_t *statement, const lexer_binding_t *binding,
                                sqlstmt_t **out, sqlstmt_error_t *error)
 {
