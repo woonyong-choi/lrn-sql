@@ -60,6 +60,7 @@ struct database {
     work_state_t work;
     bool replaying;
     bool read_only_call;
+    database_control_t *control_sink;
     const database_layer_t *layer;
     void *layer_ctx;
     const uint8_t *cur_sql;
@@ -1797,10 +1798,6 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
     if (db->poisoned) {
         return fail_result(db, RESULT_E_IO, 19, "이 핸들은 불확정한 커밋 결과 또는 fsync 실패로 더 쓸 수 없습니다");
     }
-    if (db->work.inside && db->work.failed) {
-        return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_WORK_FAILED,
-                           "이 트랜잭션은 이전 문장 오류로 실패한 상태입니다. rollback해야 합니다");
-    }
     if (cancel_requested(db)) return cancelled_result(db);
 
     bool bounded = mem_ledger_enabled(&db->ledger);
@@ -1877,6 +1874,25 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
         }
         goto done;
     }
+    if (statement->kind == SQLSTMT_BEGIN || statement->kind == SQLSTMT_COMMIT || statement->kind == SQLSTMT_ROLLBACK) {
+        if (db->control_sink == NULL) {
+            status = fail_result(db, RESULT_E_SEMANTIC, 34, "트랜잭션 제어문은 연결(session)에서만 실행할 수 있습니다");
+            goto done;
+        }
+        db->control_sink->kind = statement->kind == SQLSTMT_BEGIN ? DATABASE_CONTROL_BEGIN
+                                 : statement->kind == SQLSTMT_COMMIT ? DATABASE_CONTROL_COMMIT
+                                                                     : DATABASE_CONTROL_ROLLBACK;
+        db->control_sink->mode = statement->txn.mode == SQLSTMT_TXN_DURABLE ? DATABASE_CONTROL_DURABLE
+                                 : statement->txn.mode == SQLSTMT_TXN_VOLATILE ? DATABASE_CONTROL_VOLATILE
+                                                                              : DATABASE_CONTROL_DEFAULT;
+        status = DATABASE_EXEC_CONTROL;
+        goto done;
+    }
+    if (db->work.inside && db->work.failed) {
+        status = fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_WORK_FAILED,
+                             "이 트랜잭션은 이전 문장 오류로 실패한 상태입니다. rollback해야 합니다");
+        goto done;
+    }
     if (statement->kind != SQLSTMT_SELECT && db->read_only_call) {
         status = fail_result(db, RESULT_E_BUSY, DATABASE_CODE_WRITER_BUSY,
                              "다른 트랜잭션이 쓰기 중이라 변경 문장을 실행할 수 없습니다");
@@ -1896,6 +1912,7 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
         case SQLSTMT_UPDATE: status = exec_update(db, &statement->update, out); break;
         case SQLSTMT_DELETE: status = exec_delete(db, &statement->del, out); break;
         case SQLSTMT_DROP_TABLE: status = exec_drop(db, &statement->drop, out); break;
+        default: status = fail_result(db, RESULT_E_INTERNAL, 21, "문장을 실행하지 못했습니다"); break;
     }
 done:
     db->cur_sql = NULL;
@@ -1945,6 +1962,25 @@ database_exec_status_t database_exec_read_only(database_t *db, const database_ex
     return status;
 }
 
+void database_set_control_sink(database_t *db, database_control_t *sink)
+{
+    if (db == NULL) return;
+    db->control_sink = sink;
+    if (sink != NULL) *sink = (database_control_t){DATABASE_CONTROL_NONE, DATABASE_CONTROL_DEFAULT};
+}
+
+database_exec_status_t database_command_result(database_t *db, const database_exec_options_t *opts, const char *tag,
+                                               result_t **out)
+{
+    if (db == NULL || out == NULL || tag == NULL) return DATABASE_EXEC_INVALID;
+    *out = NULL;
+    db->ledger = opts != NULL && opts->ledger != NULL ? *opts->ledger : (mem_ledger_t){NULL, NULL};
+    result_status_t opened = open_command(db, tag, 0, out);
+    db->ledger = (mem_ledger_t){NULL, NULL};
+    if (opened == RESULT_NOMEM) return DATABASE_EXEC_NOMEM;
+    return opened == RESULT_OK ? DATABASE_EXEC_OK : DATABASE_EXEC_INVALID;
+}
+
 void *database_layer_ctx(const database_t *db) { return db != NULL ? db->layer_ctx : NULL; }
 
 database_exec_status_t database_error_result(database_t *db, const database_exec_options_t *opts,
@@ -1975,7 +2011,7 @@ database_exec_status_t database_exec_in_work(database_t *db, const database_exec
     database_exec_status_t status = run_statement(db, opts, sql, size, binding, out);
     db->replaying = false;
     db->work.inside = false;
-    bool failed = status != DATABASE_EXEC_OK ||
+    bool failed = (status != DATABASE_EXEC_OK && status != DATABASE_EXEC_CONTROL) ||
                   (*out != NULL && result_kind(*out) == RESULT_KIND_ERROR);
     if (failed) db->work.failed = true;
     return status;

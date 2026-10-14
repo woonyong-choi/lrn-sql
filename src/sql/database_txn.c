@@ -447,6 +447,153 @@ uint32_t database_txn_epoch(const database_t *db)
     return l != NULL ? txn_manager_epoch(l->manager) : 0;
 }
 
+/* ── 연결 ── */
+
+struct database_conn {
+    database_t *db;
+    layer_t *layer;
+    database_txn_t *txn;
+    uint32_t begin_timeout_ms;
+    bool begin_busy;
+};
+
+database_status_t database_conn_open(database_t *db, const database_conn_options_t *options, database_conn_t **out)
+{
+    if (db == NULL || out == NULL) return DATABASE_INVALID;
+    *out = NULL;
+    layer_t *l = database_layer_ctx(db);
+    if (l == NULL) return DATABASE_INVALID;
+    database_conn_t *conn = calloc(1, sizeof(*conn));
+    if (conn == NULL) return DATABASE_NOMEM;
+    conn->db = db;
+    conn->layer = l;
+    conn->begin_timeout_ms = options != NULL ? options->begin_timeout_ms : 0;
+    *out = conn;
+    return DATABASE_OK;
+}
+
+database_status_t database_conn_close(database_conn_t **conn)
+{
+    if (conn == NULL || *conn == NULL) return DATABASE_OK;
+    database_txn_release(&(*conn)->txn);  /* 열린 트랜잭션은 rollback이다 */
+    free(*conn);
+    *conn = NULL;
+    return DATABASE_OK;
+}
+
+bool database_conn_in_txn(const database_conn_t *conn)
+{
+    return conn != NULL && conn->txn != NULL && database_txn_state(conn->txn) == TXN_STATE_ACTIVE;
+}
+
+bool database_conn_failed(const database_conn_t *conn) { return conn != NULL && database_txn_failed(conn->txn); }
+bool database_conn_begin_busy(const database_conn_t *conn) { return conn != NULL && conn->begin_busy; }
+database_txn_t *database_conn_txn(database_conn_t *conn) { return conn != NULL ? conn->txn : NULL; }
+
+txn_status_t database_conn_begin(database_conn_t *conn, const txn_begin_options_t *options)
+{
+    if (conn == NULL) return TXN_INVALID;
+    conn->begin_busy = false;
+    if (conn->txn != NULL) return TXN_INVALID;
+    txn_status_t st = database_txn_begin(conn->db, options, &conn->txn);
+    if (st == TXN_BUSY || st == TXN_TIMEOUT) conn->begin_busy = true;
+    return st;
+}
+
+txn_status_t database_conn_commit(database_conn_t *conn, txn_commit_info_t *info)
+{
+    if (conn == NULL || conn->txn == NULL) return TXN_NOT_ACTIVE;
+    txn_status_t st = database_txn_commit(conn->txn, info);
+    if (st == TXN_INVALID && database_txn_failed(conn->txn)) return st;  /* rollback을 기다린다 */
+    database_txn_release(&conn->txn);
+    return st;
+}
+
+txn_status_t database_conn_rollback(database_conn_t *conn)
+{
+    if (conn == NULL || conn->txn == NULL) return TXN_NOT_ACTIVE;
+    txn_status_t st = database_txn_rollback(conn->txn);
+    database_txn_release(&conn->txn);
+    return st;
+}
+
+static database_exec_status_t control_error(database_conn_t *conn, const database_exec_options_t *opts,
+                                            result_error_class_t error_class, int code, const char *message,
+                                            result_t **out)
+{
+    return database_error_result(conn->db, opts, error_class, code, message, out);
+}
+
+static database_exec_status_t control_begin(database_conn_t *conn, const database_exec_options_t *opts,
+                                            database_control_mode_t mode, result_t **out)
+{
+    if (conn->txn != NULL) {
+        return control_error(conn, opts, RESULT_E_SEMANTIC, 35, "이미 트랜잭션 안입니다", out);
+    }
+    bool has_wal = conn->layer->wal != NULL;
+    if (mode == DATABASE_CONTROL_DURABLE && !has_wal) {
+        return control_error(conn, opts, RESULT_E_SEMANTIC, 37,
+                             "WAL 없이 열린 데이터베이스에서는 DURABLE 트랜잭션을 시작할 수 없습니다", out);
+    }
+    bool durable = mode == DATABASE_CONTROL_DURABLE || (mode == DATABASE_CONTROL_DEFAULT && has_wal);
+    txn_begin_options_t o = {TXN_ACCESS_READ_WRITE, TXN_ISOLATION_SNAPSHOT,
+                             durable ? TXN_GUARANTEE_DURABLE : TXN_GUARANTEE_SYNCED, conn->begin_timeout_ms, NULL};
+    txn_status_t st = database_conn_begin(conn, &o);
+    if (st == TXN_OK) return database_command_result(conn->db, opts, "BEGIN", out);
+    if (st == TXN_BUSY || st == TXN_TIMEOUT) {
+        return control_error(conn, opts, RESULT_E_BUSY, DATABASE_CODE_WRITER_BUSY,
+                             "다른 트랜잭션이 쓰는 중이라 시작하지 못했습니다", out);
+    }
+    return error_from_txn(conn->db, opts, st, out);
+}
+
+static database_exec_status_t control_commit(database_conn_t *conn, const database_exec_options_t *opts,
+                                             result_t **out)
+{
+    if (conn->txn == NULL) return control_error(conn, opts, RESULT_E_SEMANTIC, 36, "진행 중인 트랜잭션이 없습니다", out);
+    txn_status_t st = database_conn_commit(conn, NULL);
+    switch (st) {
+        case TXN_OK: return database_command_result(conn->db, opts, "COMMIT", out);
+        case TXN_INVALID:
+            return control_error(conn, opts, RESULT_E_SEMANTIC, DATABASE_CODE_WORK_FAILED,
+                                 "이 트랜잭션은 이전 문장 오류로 실패한 상태입니다. rollback해야 합니다", out);
+        case TXN_COMMIT_UNCERTAIN:
+            return control_error(conn, opts, RESULT_E_IO, 32,
+                                 "커밋 결과를 알 수 없습니다. 데이터베이스를 닫고 다시 열어 확인하세요", out);
+        case TXN_COMMIT_FAILED:
+        case TXN_CANCELLED:
+            return control_error(conn, opts, RESULT_E_IO, 33, "커밋하지 못했습니다. 아무것도 반영하지 않았습니다", out);
+        default: return error_from_txn(conn->db, opts, st, out);
+    }
+}
+
+database_exec_status_t database_conn_exec(database_conn_t *conn, const database_exec_options_t *opts,
+                                          const uint8_t *sql, size_t size, const lexer_binding_t *binding,
+                                          result_t **out)
+{
+    if (conn == NULL || out == NULL) return DATABASE_EXEC_INVALID;
+    database_t *db = conn->db;
+    conn->begin_busy = false;
+    database_control_t control;
+    database_set_control_sink(db, &control);
+    database_exec_status_t status = conn->txn != NULL ? database_txn_exec(conn->txn, opts, sql, size, binding, out)
+                                                      : database_exec_ex(db, opts, sql, size, binding, out);
+    database_set_control_sink(db, NULL);
+    if (status != DATABASE_EXEC_CONTROL) return status;
+    *out = NULL;
+    switch (control.kind) {
+        case DATABASE_CONTROL_BEGIN: return control_begin(conn, opts, control.mode, out);
+        case DATABASE_CONTROL_COMMIT: return control_commit(conn, opts, out);
+        case DATABASE_CONTROL_ROLLBACK:
+            if (conn->txn == NULL) {
+                return control_error(conn, opts, RESULT_E_SEMANTIC, 36, "진행 중인 트랜잭션이 없습니다", out);
+            }
+            database_conn_rollback(conn);
+            return database_command_result(db, opts, "ROLLBACK", out);
+        default: return control_error(conn, opts, RESULT_E_INTERNAL, 21, "문장을 실행하지 못했습니다", out);
+    }
+}
+
 /* ── 열기와 복구 ── */
 
 typedef struct {

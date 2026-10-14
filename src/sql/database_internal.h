@@ -44,6 +44,23 @@ typedef struct {
     database_status_t (*close)(void *ctx, database_t *db);
 } database_layer_t;
 
+/*
+ * 트랜잭션 제어문(BEGIN·COMMIT·ROLLBACK). 연결(database_conn)이 sink를 걸어 두면 database_exec_ex·
+ * database_exec_in_work는 제어문을 실행하지 않고 요청만 sink에 적고 DATABASE_EXEC_CONTROL을 돌려준다(결과 없음).
+ * sink가 없으면 제어문은 RESULT_E_SEMANTIC 오류 결과다(연결 밖에서는 의미가 없다).
+ */
+#define DATABASE_EXEC_CONTROL ((database_exec_status_t)101)
+typedef enum { DATABASE_CONTROL_NONE, DATABASE_CONTROL_BEGIN, DATABASE_CONTROL_COMMIT, DATABASE_CONTROL_ROLLBACK } database_control_kind_t;
+typedef enum { DATABASE_CONTROL_DEFAULT, DATABASE_CONTROL_DURABLE, DATABASE_CONTROL_VOLATILE } database_control_mode_t;
+typedef struct {
+    database_control_kind_t kind;
+    database_control_mode_t mode;
+} database_control_t;
+void database_set_control_sink(database_t *db, database_control_t *sink);
+/* 성공 결과(COMMAND, 영향 행 0)를 만든다. ledger는 opts를 따른다 */
+database_exec_status_t database_command_result(database_t *db, const database_exec_options_t *opts, const char *tag,
+                                               result_t **out);
+
 /* 계층을 붙인다. 한 번만 붙일 수 있다. layer와 ctx는 database_close까지 살아 있어야 한다 */
 database_status_t database_set_layer(database_t *db, const database_layer_t *layer, void *ctx);
 

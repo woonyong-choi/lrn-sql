@@ -104,6 +104,47 @@ uint64_t database_txn_id(const database_txn_t *txn);
 /* 응답을 잃은 호출자가 id의 commit 결과를 조회한다(transaction.h의 txn_query_commit). */
 txn_status_t database_txn_query_commit(database_t *db, uint64_t txn_id, txn_commit_info_t *info);
 
+/*
+ * 연결(connection). 한 연결은 열린 트랜잭션을 최대 하나 쥔다. BEGIN·COMMIT·ROLLBACK 문장과 C API가 같은
+ * database_txn_t를 쓴다. 연결 안에서 문장은 열린 트랜잭션이 있으면 그 안에서, 없으면 자동 commit으로 실행된다.
+ * 한 연결은 한 번에 한 스레드만 쓴다. 같은 database를 쓰는 여러 연결의 호출 직렬화는 호출자 몫이다(session 계층이 한다).
+ *
+ * SQL 제어문(정의: sql_statement.h)
+ *   BEGIN [TRANSACTION] [DURABLE | VOLATILE], START TRANSACTION [...] -> COMMAND "BEGIN"
+ *   COMMIT [TRANSACTION]  -> COMMAND "COMMIT",  ROLLBACK [TRANSACTION] -> COMMAND "ROLLBACK"
+ *   BEGIN의 기본 보증은 WAL이 있으면 DURABLE, 없으면 VOLATILE이다. WAL 없이 DURABLE을 요청하거나(RESULT_E_SEMANTIC),
+ *   이미 트랜잭션 안에서 BEGIN하거나 밖에서 COMMIT·ROLLBACK하면 오류 결과다(트랜잭션은 그대로). 다른 연결이 쓰는 중이면
+ *   BEGIN은 RESULT_E_BUSY 오류 결과이고 database_conn_begin_busy가 true다(호출자가 기다렸다 다시 시도할 수 있다).
+ *   문장 오류로 실패한 트랜잭션의 COMMIT은 거절되고(DATABASE_CODE_WORK_FAILED) ROLLBACK만 받는다.
+ *   연결 밖(database_exec)에서 실행한 제어문은 RESULT_E_SEMANTIC 오류 결과다.
+ */
+typedef struct database_conn database_conn_t;
+
+typedef struct {
+    uint32_t begin_timeout_ms;   /* BEGIN 문장이 다른 writer를 기다리는 시간. 0이면 기다리지 않고 BUSY */
+} database_conn_options_t;
+
+/* 트랜잭션 계층이 붙은 database에서만 연다. 아니면 DATABASE_INVALID */
+database_status_t database_conn_open(database_t *db, const database_conn_options_t *options, database_conn_t **out);
+/* 열린 트랜잭션은 rollback한다. *conn은 NULL이 된다 */
+database_status_t database_conn_close(database_conn_t **conn);
+database_exec_status_t database_conn_exec(database_conn_t *conn, const database_exec_options_t *opts,
+                                          const uint8_t *sql, size_t size, const lexer_binding_t *binding,
+                                          result_t **out);
+/* C API. 열린 트랜잭션이 있으면 TXN_INVALID. 나머지는 transaction.h의 begin과 같다 */
+txn_status_t database_conn_begin(database_conn_t *conn, const txn_begin_options_t *options);
+/*
+ * 실패한 트랜잭션(database_conn_failed)이면 TXN_INVALID이고 그대로다. 그 밖에는 결과와 무관하게 트랜잭션이 끝나
+ * 연결에는 열린 트랜잭션이 남지 않는다(TXN_OK, TXN_COMMIT_FAILED, TXN_COMMIT_UNCERTAIN 등).
+ */
+txn_status_t database_conn_commit(database_conn_t *conn, txn_commit_info_t *info);
+txn_status_t database_conn_rollback(database_conn_t *conn);
+bool database_conn_in_txn(const database_conn_t *conn);
+bool database_conn_failed(const database_conn_t *conn);
+/* 마지막 BEGIN이 다른 writer 때문에 거절됐다(재시도 가능) */
+bool database_conn_begin_busy(const database_conn_t *conn);
+database_txn_t *database_conn_txn(database_conn_t *conn);
+
 /* manager 상태 조회 */
 bool database_txn_layer_poisoned(const database_t *db);
 uint32_t database_txn_epoch(const database_t *db);
