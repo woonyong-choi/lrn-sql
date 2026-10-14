@@ -23,6 +23,7 @@
 
 #include "storage/bptree.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -143,17 +144,31 @@ static void ls_release_all(pager_t* p, latch_stack_t* s) {
   s->size = 0;
 }
 
+/*
+ * 구조 변경(분할·병합·차용) 도중 페이지를 얻지 못했을 때의 마무리.
+ * 이미 바꾼 페이지를 되돌릴 방법(WAL)이 없으므로 pager를 poison해 이후 접근과
+ * flush를 막고, 다른 스레드가 영원히 기다리지 않도록 스택 래치만 푼다.
+ * 호출자가 따로 쥔 래치는 이 함수 전에 풀어야 한다. 반환값은 BPTREE_ERR_IO.
+ */
+static int structural_fail(pager_t* pager, latch_stack_t* stack, int err) {
+  pager_poison(pager, err);
+  ls_release_all(pager, stack);
+  return BPTREE_ERR_IO;
+}
+
 /* ══════════════════════════════════════════════════════════════════════
  *  래치 커플링 탐색
  *
  *  find_leaf_rlatch: 검색용. rlatch coupling으로 leaf까지 내려간다.
  *    - 반환: leaf 페이지의 데이터 포인터 (rlatch 유지 상태)
  *    - 호출자가 pager_unlatch_r()로 해제해야 한다.
+ *    - 페이지 읽기에 실패하면 래치를 모두 풀고 NULL을 반환한다.
  *
  *  find_leaf_wlatch: 삽입/삭제용. wlatch coupling + safe-node 최적화.
  *    - 반환: leaf 페이지의 데이터 포인터 (wlatch 유지 상태)
  *    - stack에 wlatch 중인 조상 page_id가 담겨 있다.
  *    - 호출자가 ls_release_all()로 해제해야 한다.
+ *    - 페이지 읽기에 실패하면 스택 래치를 모두 풀고 NULL을 반환한다.
  * ══════════════════════════════════════════════════════════════════════ */
 
 /*
@@ -199,6 +214,10 @@ retry:;
     pager_unlatch_r(pager, pid); /* 부모 해제 (Crab Protocol) */
     pid = child_pid;
     page = child_page;
+    if (!page) {
+      *out_pid = pid;
+      return NULL;
+    }
   }
 }
 
@@ -225,6 +244,10 @@ retry:
   {
     uint32_t pid = root_id(pager);
     uint8_t* page = pager_get_page_wlatch(pager, pid);
+    if (!page) {
+      *out_pid = pid;
+      return NULL;
+    }
 
     /* 래치 대기 중 root가 변경되었으면 재시도 */
     if (pid != root_id(pager)) {
@@ -253,6 +276,11 @@ retry:
 
       /* 자식 wlatch 획득 */
       uint8_t* child_page = pager_get_page_wlatch(pager, child_pid);
+      if (!child_page) {
+        ls_release_all(pager, stack);
+        *out_pid = child_pid;
+        return NULL;
+      }
 
       /* ── safe-node 판별 ── */
       uint32_t child_ptype;
@@ -301,6 +329,9 @@ retry:
  *
  * rlatch coupling으로 leaf까지 내려가서 이진 탐색한다.
  * 동시에 다른 스레드의 삽입/삭제와 안전하게 공존한다.
+ *
+ * 페이지 읽기에 실패하면 false를 반환하고 pager의 io_error_seq가 늘어난다.
+ * 호출자는 "키 없음"과 구분하려면 호출 전후의 pager_io_error_seq를 비교한다.
  */
 bool bptree_search(pager_t* pager, uint64_t key, row_ref_t* out_ref) {
   uint32_t leaf_pid;
@@ -360,17 +391,21 @@ retry:;
     pager_unlatch_r(pager, pid);
     pid = child_pid;
     page = child_page;
+    if (!page) {
+      *out_pid = pid;
+      return NULL;
+    }
   }
 }
 
-void bptree_range_scan(pager_t* pager,
+int bptree_range_scan(pager_t* pager,
                        bool has_lo, uint64_t lo, bool lo_inclusive,
                        bool has_hi, uint64_t hi, bool hi_inclusive,
                        bptree_range_cb cb, void* ctx) {
   uint32_t pid;
   uint8_t* page = has_lo ? find_leaf_rlatch(pager, lo, &pid)
                          : find_leftmost_leaf_rlatch(pager, &pid);
-  if (!page) return;
+  if (!page) return BPTREE_ERR_IO;
 
   leaf_page_header_t lph;
   memcpy(&lph, page, sizeof(lph));
@@ -393,12 +428,12 @@ void bptree_range_scan(pager_t* pager,
         bool over = hi_inclusive ? (k > hi) : (k >= hi);
         if (over) {
           pager_unlatch_r(pager, pid);
-          return;
+          return 0;
         }
       }
       if (!cb(k, entries[idx].row_ref, ctx)) {
         pager_unlatch_r(pager, pid);
-        return;
+        return 0;
       }
     }
 
@@ -406,11 +441,11 @@ void bptree_range_scan(pager_t* pager,
     uint32_t next = lph.next_leaf_page_id;
     if (next == 0) {
       pager_unlatch_r(pager, pid);
-      return;
+      return 0;
     }
     uint8_t* npage = pager_get_page_rlatch(pager, next);
     pager_unlatch_r(pager, pid);
-    if (!npage) return;
+    if (!npage) return BPTREE_ERR_IO;
     pid = next;
     page = npage;
     memcpy(&lph, page, sizeof(lph));
@@ -459,9 +494,11 @@ static void leaf_insert_entry(uint8_t* page, leaf_page_header_t* lph,
  *   key       - 부모에 삽입할 separator 키
  *   right_pid - 분할로 생성된 새 오른쪽 노드의 page_id
  *   stack     - wlatch 중인 노드 스택 (top = 방금 분할한 노드)
+ *
+ * 반환값: 0 = 성공, BPTREE_ERR_IO = 분할 도중 페이지를 얻지 못함 (pager poison됨)
  */
-static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
-                             latch_stack_t* stack) {
+static int propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
+                            latch_stack_t* stack) {
   int level = stack->size - 1; /* 방금 분할한 노드의 스택 인덱스 */
   uint64_t cur_key = key;
   uint32_t cur_right = right_pid;
@@ -470,6 +507,7 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
     /* 부모는 level - 1 위치 */
     uint32_t parent_pid = stack->pids[level - 1];
     uint8_t* pp = pager_get_page(pager, parent_pid); /* pin++ (wlatch 유지) */
+    if (!pp) return structural_fail(pager, stack, errno);
     internal_page_header_t iph;
     memcpy(&iph, pp, sizeof(iph));
 
@@ -488,12 +526,13 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
 
       /* 오른쪽 자식의 parent_page_id 갱신 */
       uint8_t* rcp = pager_get_page(pager, cur_right);
+      if (!rcp) return structural_fail(pager, stack, errno);
       memcpy(rcp + 4, &parent_pid, sizeof(uint32_t));
       pager_mark_dirty(pager, cur_right);
       pager_unpin(pager, cur_right);
 
       ls_release_all(pager, stack);
-      return;
+      return 0;
     }
 
     /* ── 부모도 가득 참 → 부모를 분할 ── */
@@ -501,6 +540,7 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
     /* 오른쪽 자식의 parent를 현재 부모로 설정 (분할 후 재조정됨) */
     {
       uint8_t* rcp = pager_get_page(pager, cur_right);
+      if (!rcp) return structural_fail(pager, stack, errno);
       memcpy(rcp + 4, &parent_pid, sizeof(uint32_t));
       pager_mark_dirty(pager, cur_right);
       pager_unpin(pager, cur_right);
@@ -526,7 +566,12 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
 
     /* 오른쪽 절반을 새 internal 페이지에 저장 */
     uint32_t new_pid = pager_alloc_page(pager);
-    uint8_t* new_page = pager_get_page(pager, new_pid);
+    uint8_t* new_page = new_pid ? pager_get_page(pager, new_pid) : NULL;
+    if (!new_page) {
+      int err = errno;
+      free(tmp);
+      return structural_fail(pager, stack, err);
+    }
     memset(new_page, 0, pager->page_size);
 
     internal_page_header_t new_iph = {
@@ -543,6 +588,11 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
     {
       uint8_t* cp = pager_get_page(pager, new_iph.leftmost_child_page_id);
       uint32_t pp_val = new_pid;
+      if (!cp) {
+        int err = errno;
+        free(tmp);
+        return structural_fail(pager, stack, err);
+      }
       memcpy(cp + 4, &pp_val, sizeof(uint32_t));
       pager_mark_dirty(pager, new_iph.leftmost_child_page_id);
       pager_unpin(pager, new_iph.leftmost_child_page_id);
@@ -550,6 +600,11 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
       internal_entry_t* ne = internal_entries(new_page);
       for (uint32_t i = 0; i < new_iph.key_count; i++) {
         cp = pager_get_page(pager, ne[i].right_child_page_id);
+        if (!cp) {
+          int err = errno;
+          free(tmp);
+          return structural_fail(pager, stack, err);
+        }
         memcpy(cp + 4, &pp_val, sizeof(uint32_t));
         pager_mark_dirty(pager, ne[i].right_child_page_id);
         pager_unpin(pager, ne[i].right_child_page_id);
@@ -577,7 +632,8 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
   /* ── level == 0: 루트가 분할됨 → 새 루트 생성 ── */
   uint32_t old_root = stack->pids[0];
   uint32_t new_root = pager_alloc_page(pager);
-  uint8_t* rp = pager_get_page(pager, new_root);
+  uint8_t* rp = new_root ? pager_get_page(pager, new_root) : NULL;
+  if (!rp) return structural_fail(pager, stack, errno);
   memset(rp, 0, pager->page_size);
 
   internal_page_header_t root_iph = {.page_type = PAGE_TYPE_INTERNAL,
@@ -592,11 +648,13 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
 
   /* 양쪽 자식의 parent를 새 루트로 갱신 */
   uint8_t* lp = pager_get_page(pager, old_root);
+  if (!lp) return structural_fail(pager, stack, errno);
   memcpy(lp + 4, &new_root, sizeof(uint32_t));
   pager_mark_dirty(pager, old_root);
   pager_unpin(pager, old_root);
 
   uint8_t* rrp = pager_get_page(pager, cur_right);
+  if (!rrp) return structural_fail(pager, stack, errno);
   memcpy(rrp + 4, &new_root, sizeof(uint32_t));
   pager_mark_dirty(pager, cur_right);
   pager_unpin(pager, cur_right);
@@ -607,17 +665,22 @@ static void propagate_insert(pager_t* pager, uint64_t key, uint32_t right_pid,
   pager->header.root_index_page_id = new_root;
   pager->header_dirty = true;
   ls_release_all(pager, stack);
+  return 0;
 }
 
 /*
  * bptree_insert - B+ 트리에 (key, row_ref) 쌍을 삽입한다.
  *
- * 반환값: 0 = 성공, -1 = 중복 키
+ * 반환값: 0 = 성공, -1 = 중복 키, BPTREE_ERR_IO = 페이지 읽기·할당 실패
+ *
+ * 리프 분할 전에 실패하면 트리는 그대로다. 분할을 시작한 뒤 실패하면 되돌릴 수
+ * 없어 pager가 poison된다 (pager_is_poisoned).
  */
 int bptree_insert(pager_t* pager, uint64_t key, row_ref_t ref) {
   latch_stack_t stack;
   uint32_t leaf_pid;
   uint8_t* page = find_leaf_wlatch(pager, key, &leaf_pid, &stack, true);
+  if (!page) return BPTREE_ERR_IO;
 
   leaf_page_header_t lph;
   memcpy(&lph, page, sizeof(lph));
@@ -647,6 +710,26 @@ int bptree_insert(pager_t* pager, uint64_t key, row_ref_t ref) {
   uint32_t total = lph.key_count;
   uint32_t mk = max_leaf_keys(pager);
 
+  /*
+   * 아무것도 바꾸기 전에 분할에 필요한 페이지(오른쪽 이웃, 새 리프)를 모두 확보한다.
+   * 여기서 실패하면 트리는 그대로이므로 poison 없이 오류만 돌려준다.
+   */
+  uint8_t* rp = NULL;
+  if (lph.next_leaf_page_id != 0) {
+    rp = pager_get_page(pager, lph.next_leaf_page_id);
+    if (!rp) {
+      ls_release_all(pager, &stack);
+      return BPTREE_ERR_IO;
+    }
+  }
+  uint32_t new_pid = pager_alloc_page(pager);
+  uint8_t* new_page = new_pid ? pager_get_page(pager, new_pid) : NULL;
+  if (!new_page) {
+    if (rp) pager_unpin(pager, lph.next_leaf_page_id);
+    ls_release_all(pager, &stack);
+    return BPTREE_ERR_IO;
+  }
+
   /* 기존 + 새 엔트리를 임시 배열에 정렬 합침 */
   leaf_entry_t* tmp =
       (leaf_entry_t*)malloc((total + 1) * sizeof(leaf_entry_t));
@@ -660,8 +743,6 @@ int bptree_insert(pager_t* pager, uint64_t key, row_ref_t ref) {
   uint32_t split = total / 2;
 
   /* 오른쪽 절반을 새 leaf 페이지에 저장 */
-  uint32_t new_pid = pager_alloc_page(pager);
-  uint8_t* new_page = pager_get_page(pager, new_pid);
   memset(new_page, 0, pager->page_size);
 
   leaf_page_header_t new_lph = {
@@ -676,8 +757,7 @@ int bptree_insert(pager_t* pager, uint64_t key, row_ref_t ref) {
   pager_mark_dirty(pager, new_pid);
 
   /* 기존 다음 이웃의 prev 포인터를 새 노드로 갱신 */
-  if (lph.next_leaf_page_id != 0) {
-    uint8_t* rp = pager_get_page(pager, lph.next_leaf_page_id);
+  if (rp) {
     leaf_page_header_t rlph;
     memcpy(&rlph, rp, sizeof(rlph));
     rlph.prev_leaf_page_id = new_pid;
@@ -700,8 +780,7 @@ int bptree_insert(pager_t* pager, uint64_t key, row_ref_t ref) {
   pager_unpin(pager, new_pid);
 
   /* 부모에 separator 전파 (스택을 사용하여 반복적으로 올라감) */
-  propagate_insert(pager, promote_key, new_pid, &stack);
-  return 0;
+  return propagate_insert(pager, promote_key, new_pid, &stack);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -760,20 +839,23 @@ static int find_child_idx(uint8_t* parent_page, uint32_t child_pid) {
 }
 
 /* 전방 선언 */
-static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
-                                       uint8_t* leaf_page,
-                                       latch_stack_t* stack);
-static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
-                                           uint8_t* node_page,
-                                           latch_stack_t* stack,
-                                           int node_level);
+static int fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
+                                      uint8_t* leaf_page,
+                                      latch_stack_t* stack);
+static int fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
+                                          uint8_t* node_page,
+                                          latch_stack_t* stack,
+                                          int node_level);
 
-static void update_child_parent_page(pager_t* pager, uint32_t child_pid,
-                                     uint32_t parent_pid) {
+/* 자식의 parent_page_id를 갱신한다. 0 = 성공, -1 = 페이지 읽기 실패 (errno 유지) */
+static int update_child_parent_page(pager_t* pager, uint32_t child_pid,
+                                    uint32_t parent_pid) {
   uint8_t* cp = pager_get_page(pager, child_pid);
+  if (!cp) return -1;
   memcpy(cp + 4, &parent_pid, sizeof(uint32_t));
   pager_mark_dirty(pager, child_pid);
   pager_unpin(pager, child_pid);
+  return 0;
 }
 
 /*
@@ -787,13 +869,14 @@ static void update_child_parent_page(pager_t* pager, uint32_t child_pid,
  *   - 루트 아니고 key < min → 최소 구현에서는 허용
  *     (internal borrow/merge는 미구현. 정합성에 영향 없음)
  */
-static void propagate_delete(pager_t* pager, latch_stack_t* stack,
-                             int parent_level) {
+static int propagate_delete(pager_t* pager, latch_stack_t* stack,
+                            int parent_level) {
   uint32_t node_pid = stack->pids[parent_level];
 
   if (node_pid == root_id(pager)) {
     /* 루트 축소: key가 0이면 유일한 자식을 새 루트로 승격 */
     uint8_t* page = pager_get_page(pager, node_pid); /* pin++ */
+    if (!page) return structural_fail(pager, stack, errno);
     internal_page_header_t iph;
     memcpy(&iph, page, sizeof(iph));
     if (iph.key_count == 0) {
@@ -806,6 +889,7 @@ static void propagate_delete(pager_t* pager, latch_stack_t* stack,
 
       /* 새 루트의 parent를 0으로 설정 */
       uint8_t* cp = pager_get_page(pager, child);
+      if (!cp) return structural_fail(pager, stack, errno);
       uint32_t zero = 0;
       memcpy(cp + 4, &zero, sizeof(uint32_t));
       pager_mark_dirty(pager, child);
@@ -814,35 +898,38 @@ static void propagate_delete(pager_t* pager, latch_stack_t* stack,
       pager_unpin(pager, node_pid);
     }
     ls_release_all(pager, stack);
-    return;
+    return 0;
   }
 
   /* 루트가 아닌 internal 노드의 underflow 확인 */
   uint8_t* page = pager_get_page(pager, node_pid);
+  if (!page) return structural_fail(pager, stack, errno);
   internal_page_header_t iph;
   memcpy(&iph, page, sizeof(iph));
   pager_unpin(pager, node_pid);
 
   if (iph.key_count >= min_internal_keys(pager)) {
     ls_release_all(pager, stack);
-    return;
+    return 0;
   }
 
-  fix_internal_underflow_latched(pager, node_pid, page, stack, parent_level);
+  return fix_internal_underflow_latched(pager, node_pid, page, stack,
+                                        parent_level);
 }
 
-static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
-                                           uint8_t* node_page,
-                                           latch_stack_t* stack,
-                                           int node_level) {
+static int fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
+                                          uint8_t* node_page,
+                                          latch_stack_t* stack,
+                                          int node_level) {
   if (node_level == 0) {
     pager_unpin(pager, node_pid);
     ls_release_all(pager, stack);
-    return;
+    return 0;
   }
 
   uint32_t parent_pid = stack->pids[node_level - 1];
   uint8_t* pp = pager_get_page(pager, parent_pid);
+  if (!pp) return structural_fail(pager, stack, errno);
   internal_page_header_t iph;
   memcpy(&iph, pp, sizeof(iph));
   internal_entry_t* pentries = internal_entries(pp);
@@ -856,7 +943,7 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
     pager_unpin(pager, node_pid);
     pager_unpin(pager, parent_pid);
     ls_release_all(pager, stack);
-    return;
+    return 0;
   }
 
   /* ── 1순위: 오른쪽 형제에서 borrow ── */
@@ -864,6 +951,10 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
     uint32_t sep_idx = (uint32_t)child_idx;
     uint32_t rsib_pid = pentries[sep_idx].right_child_page_id;
     uint8_t* rpage = pager_get_page_wlatch(pager, rsib_pid);
+    if (!rpage) {
+      pager_unpin(pager, parent_pid);
+      return structural_fail(pager, stack, errno);
+    }
     internal_page_header_t riph;
     memcpy(&riph, rpage, sizeof(riph));
 
@@ -888,13 +979,15 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
       pager_mark_dirty(pager, node_pid);
       pager_mark_dirty(pager, rsib_pid);
       pager_mark_dirty(pager, parent_pid);
-      update_child_parent_page(pager, moved_child, node_pid);
+      int uerr = update_child_parent_page(pager, moved_child, node_pid);
+      int err = errno;
 
       pager_unpin(pager, node_pid);
       pager_unlatch_w(pager, rsib_pid);
       pager_unpin(pager, parent_pid);
+      if (uerr != 0) return structural_fail(pager, stack, err);
       ls_release_all(pager, stack);
-      return;
+      return 0;
     }
     pager_unlatch_w(pager, rsib_pid);
   }
@@ -906,6 +999,10 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
                             ? iph.leftmost_child_page_id
                             : pentries[child_idx - 2].right_child_page_id;
     uint8_t* lpage = pager_get_page_wlatch(pager, lsib_pid);
+    if (!lpage) {
+      pager_unpin(pager, parent_pid);
+      return structural_fail(pager, stack, errno);
+    }
     internal_page_header_t liph;
     memcpy(&liph, lpage, sizeof(liph));
 
@@ -930,13 +1027,16 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
       pager_mark_dirty(pager, node_pid);
       pager_mark_dirty(pager, lsib_pid);
       pager_mark_dirty(pager, parent_pid);
-      update_child_parent_page(pager, niph.leftmost_child_page_id, node_pid);
+      int uerr = update_child_parent_page(pager, niph.leftmost_child_page_id,
+                                          node_pid);
+      int err = errno;
 
       pager_unpin(pager, node_pid);
       pager_unlatch_w(pager, lsib_pid);
       pager_unpin(pager, parent_pid);
+      if (uerr != 0) return structural_fail(pager, stack, err);
       ls_release_all(pager, stack);
-      return;
+      return 0;
     }
     pager_unlatch_w(pager, lsib_pid);
   }
@@ -948,6 +1048,10 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
                             ? iph.leftmost_child_page_id
                             : pentries[child_idx - 2].right_child_page_id;
     uint8_t* lpage = pager_get_page_wlatch(pager, lsib_pid);
+    if (!lpage) {
+      pager_unpin(pager, parent_pid);
+      return structural_fail(pager, stack, errno);
+    }
     internal_page_header_t liph;
     memcpy(&liph, lpage, sizeof(liph));
     internal_entry_t* lentries = internal_entries(lpage);
@@ -960,9 +1064,18 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
     memcpy(lpage, &liph, sizeof(liph));
     pager_mark_dirty(pager, lsib_pid);
 
-    update_child_parent_page(pager, niph.leftmost_child_page_id, lsib_pid);
-    for (uint32_t i = 0; i < niph.key_count; i++) {
-      update_child_parent_page(pager, nentries[i].right_child_page_id, lsib_pid);
+    int uerr = update_child_parent_page(pager, niph.leftmost_child_page_id,
+                                        lsib_pid);
+    for (uint32_t i = 0; uerr == 0 && i < niph.key_count; i++) {
+      uerr = update_child_parent_page(pager, nentries[i].right_child_page_id,
+                                      lsib_pid);
+    }
+    if (uerr != 0) {
+      int err = errno;
+      pager_unpin(pager, parent_pid);
+      pager_unpin(pager, node_pid);
+      pager_unlatch_w(pager, lsib_pid);
+      return structural_fail(pager, stack, err);
     }
 
     delete_entry_from_internal(pp, &iph, sep_idx);
@@ -972,11 +1085,14 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
     pager_unpin(pager, node_pid);
     pager_unlatch_w(pager, lsib_pid);
     pager_free_page(pager, node_pid);
-    propagate_delete(pager, stack, node_level - 1);
-    return;
+    return propagate_delete(pager, stack, node_level - 1);
   } else {
     uint32_t rsib_pid = pentries[0].right_child_page_id;
     uint8_t* rpage = pager_get_page_wlatch(pager, rsib_pid);
+    if (!rpage) {
+      pager_unpin(pager, parent_pid);
+      return structural_fail(pager, stack, errno);
+    }
     internal_page_header_t riph;
     memcpy(&riph, rpage, sizeof(riph));
     internal_entry_t* rentries = internal_entries(rpage);
@@ -989,9 +1105,18 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
     memcpy(node_page, &niph, sizeof(niph));
     pager_mark_dirty(pager, node_pid);
 
-    update_child_parent_page(pager, riph.leftmost_child_page_id, node_pid);
-    for (uint32_t i = 0; i < riph.key_count; i++) {
-      update_child_parent_page(pager, rentries[i].right_child_page_id, node_pid);
+    int uerr = update_child_parent_page(pager, riph.leftmost_child_page_id,
+                                        node_pid);
+    for (uint32_t i = 0; uerr == 0 && i < riph.key_count; i++) {
+      uerr = update_child_parent_page(pager, rentries[i].right_child_page_id,
+                                      node_pid);
+    }
+    if (uerr != 0) {
+      int err = errno;
+      pager_unpin(pager, parent_pid);
+      pager_unpin(pager, node_pid);
+      pager_unlatch_w(pager, rsib_pid);
+      return structural_fail(pager, stack, err);
     }
 
     delete_entry_from_internal(pp, &iph, 0);
@@ -1001,8 +1126,7 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
     pager_unpin(pager, node_pid);
     pager_unlatch_w(pager, rsib_pid);
     pager_free_page(pager, rsib_pid);
-    propagate_delete(pager, stack, node_level - 1);
-    return;
+    return propagate_delete(pager, stack, node_level - 1);
   }
 }
 
@@ -1018,20 +1142,21 @@ static void fix_internal_underflow_latched(pager_t* pager, uint32_t node_pid,
  *   2. 왼쪽 형제에서 borrow
  *   3. 형제와 merge
  */
-static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
-                                       uint8_t* leaf_page,
-                                       latch_stack_t* stack) {
+static int fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
+                                      uint8_t* leaf_page,
+                                      latch_stack_t* stack) {
   int leaf_level = stack->size - 1;
 
   /* 스택에 부모가 없으면 (leaf가 root) → 복구 불필요 */
   if (leaf_level == 0) {
     ls_release_all(pager, stack);
-    return;
+    return 0;
   }
 
   /* 부모 접근 (wlatch 유지 중, pin++ 추가) */
   uint32_t parent_pid = stack->pids[leaf_level - 1];
   uint8_t* pp = pager_get_page(pager, parent_pid);
+  if (!pp) return structural_fail(pager, stack, errno);
   internal_page_header_t iph;
   memcpy(&iph, pp, sizeof(iph));
   internal_entry_t* pentries = internal_entries(pp);
@@ -1040,7 +1165,7 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
   if (child_idx < 0) {
     pager_unpin(pager, parent_pid);
     ls_release_all(pager, stack);
-    return;
+    return 0;
   }
 
   /* ── 1순위: 오른쪽 형제에서 borrow ── */
@@ -1050,6 +1175,10 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
 
     /* 형제를 wlatch (부모 wlatch가 있으므로 데드락 없음) */
     uint8_t* rpage = pager_get_page_wlatch(pager, rsib_pid);
+    if (!rpage) {
+      pager_unpin(pager, parent_pid);
+      return structural_fail(pager, stack, errno);
+    }
     leaf_page_header_t rlph;
     memcpy(&rlph, rpage, sizeof(rlph));
 
@@ -1077,7 +1206,7 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
       pager_unpin(pager, parent_pid);
 
       ls_release_all(pager, stack);
-      return;
+      return 0;
     }
     pager_unlatch_w(pager, rsib_pid);
   }
@@ -1090,6 +1219,10 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
                             : pentries[child_idx - 2].right_child_page_id;
 
     uint8_t* lpage = pager_get_page_wlatch(pager, lsib_pid);
+    if (!lpage) {
+      pager_unpin(pager, parent_pid);
+      return structural_fail(pager, stack, errno);
+    }
     leaf_page_header_t llph;
     memcpy(&llph, lpage, sizeof(llph));
 
@@ -1115,7 +1248,7 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
       pager_unpin(pager, parent_pid);
 
       ls_release_all(pager, stack);
-      return;
+      return 0;
     }
     pager_unlatch_w(pager, lsib_pid);
   }
@@ -1135,6 +1268,10 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
                             : pentries[child_idx - 2].right_child_page_id;
 
     uint8_t* lpage = pager_get_page_wlatch(pager, lsib_pid);
+    if (!lpage) {
+      pager_unpin(pager, parent_pid);
+      return structural_fail(pager, stack, errno);
+    }
     leaf_page_header_t llph;
     memcpy(&llph, lpage, sizeof(llph));
 
@@ -1155,6 +1292,11 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
     /* 다음 이웃의 prev 포인터를 왼쪽 형제로 갱신 */
     if (lph.next_leaf_page_id != 0) {
       uint8_t* np = pager_get_page(pager, lph.next_leaf_page_id);
+      if (!np) {
+        int err = errno;
+        pager_unpin(pager, parent_pid);
+        return structural_fail(pager, stack, err);
+      }
       leaf_page_header_t nlph;
       memcpy(&nlph, np, sizeof(nlph));
       nlph.prev_leaf_page_id = lsib_pid;
@@ -1172,7 +1314,7 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
     pager_free_page(pager, leaf_pid);
 
     /* 부모 underflow 확인 */
-    propagate_delete(pager, stack, leaf_level - 1);
+    return propagate_delete(pager, stack, leaf_level - 1);
   } else {
     /*
      * 오른쪽 형제와 merge (child_idx == 0):
@@ -1186,6 +1328,10 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
     leaf_entry_t* cur_entries = leaf_entries(leaf_page);
 
     uint8_t* rpage = pager_get_page_wlatch(pager, rsib_pid);
+    if (!rpage) {
+      pager_unpin(pager, parent_pid);
+      return structural_fail(pager, stack, errno);
+    }
     leaf_page_header_t rlph;
     memcpy(&rlph, rpage, sizeof(rlph));
     leaf_entry_t* rentries = leaf_entries(rpage);
@@ -1202,6 +1348,11 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
     /* 오른쪽 형제의 다음 이웃의 prev를 현재 leaf로 갱신 */
     if (rlph.next_leaf_page_id != 0) {
       uint8_t* np = pager_get_page(pager, rlph.next_leaf_page_id);
+      if (!np) {
+        int err = errno;
+        pager_unpin(pager, parent_pid);
+        return structural_fail(pager, stack, err);
+      }
       leaf_page_header_t nlph;
       memcpy(&nlph, np, sizeof(nlph));
       nlph.prev_leaf_page_id = leaf_pid;
@@ -1219,19 +1370,23 @@ static void fix_leaf_underflow_latched(pager_t* pager, uint32_t leaf_pid,
     pager_free_page(pager, rsib_pid);
 
     /* 부모 underflow 확인 */
-    propagate_delete(pager, stack, leaf_level - 1);
+    return propagate_delete(pager, stack, leaf_level - 1);
   }
 }
 
 /*
  * bptree_delete - B+ 트리에서 key를 삭제한다.
  *
- * 반환값: 0 = 성공, -1 = 키 없음
+ * 반환값: 0 = 성공, -1 = 키 없음, BPTREE_ERR_IO = 페이지 읽기 실패
+ *
+ * 키를 지우기 전에 실패하면 트리는 그대로다. 지운 뒤 재균형 도중 실패하면
+ * 되돌릴 수 없어 pager가 poison된다 (pager_is_poisoned).
  */
 int bptree_delete(pager_t* pager, uint64_t key) {
   latch_stack_t stack;
   uint32_t leaf_pid;
   uint8_t* page = find_leaf_wlatch(pager, key, &leaf_pid, &stack, false);
+  if (!page) return BPTREE_ERR_IO;
 
   leaf_page_header_t lph;
   memcpy(&lph, page, sizeof(lph));
@@ -1255,8 +1410,7 @@ int bptree_delete(pager_t* pager, uint64_t key) {
   }
 
   /* underflow → borrow 또는 merge 수행 */
-  fix_leaf_underflow_latched(pager, leaf_pid, page, &stack);
-  return 0;
+  return fix_leaf_underflow_latched(pager, leaf_pid, page, &stack);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -1267,6 +1421,10 @@ int bptree_delete(pager_t* pager, uint64_t key) {
 
 static void print_node(pager_t* pager, uint32_t pid, int depth) {
   uint8_t* page = pager_get_page(pager, pid);
+  if (!page) {
+    printf("[page=%u 읽기 실패]\n", pid);
+    return;
+  }
   uint32_t ptype;
   memcpy(&ptype, page, sizeof(uint32_t));
 
@@ -1294,6 +1452,10 @@ static void print_node(pager_t* pager, uint32_t pid, int depth) {
     pager_unpin(pager, pid);
 
     page = pager_get_page(pager, pid);
+    if (!page) {
+      printf("[page=%u 읽기 실패]\n", pid);
+      return;
+    }
     memcpy(&iph, page, sizeof(iph));
     entries = internal_entries(page);
 
@@ -1317,6 +1479,7 @@ int bptree_height(pager_t* pager) {
   while (1) {
     h++;
     uint8_t* page = pager_get_page(pager, pid);
+    if (!page) return -1;
     uint32_t ptype;
     memcpy(&ptype, page, sizeof(uint32_t));
     if (ptype == PAGE_TYPE_LEAF) {
