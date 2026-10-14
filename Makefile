@@ -101,6 +101,20 @@ $(BUILD_DIR)/test_page_file: $(BUILD_DIR)/tests/test_page_file.o $(STORAGE_OBJS)
 $(BUILD_DIR)/test_catalog_store: $(BUILD_DIR)/tests/test_catalog_store.o $(STORAGE_OBJS)
 $(BUILD_DIR)/test_legacy_migrate: $(BUILD_DIR)/tests/test_legacy_migrate.o $(STORAGE_OBJS)
 
+$(BUILD_DIR)/test_result: $(BUILD_DIR)/tests/test_result.o $(BUILD_DIR)/sql/result.o $(BUILD_DIR)/storage/value.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/test_result_fault: $(BUILD_DIR)/tests/test_result_fault.o $(BUILD_DIR)/sql/result_fault.o $(BUILD_DIR)/storage/value.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/sql/result_fault.o: src/sql/result.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=result_test_malloc -Dcalloc=result_test_calloc -Drealloc=result_test_realloc -Dfree=result_test_free -c -o $@ $<
+
+test-result: $(BUILD_DIR)/test_result $(BUILD_DIR)/test_result_fault
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_result.json -- ./$(BUILD_DIR)/test_result
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_result_fault.json -- ./$(BUILD_DIR)/test_result_fault
+
 $(TEST_BINS) $(BUILD_DIR)/test_overflow_file $(BUILD_DIR)/test_value_sqlite:
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -277,6 +291,16 @@ $(BUILD_DIR)/test_concurrency_barrier: $(BUILD_DIR)/hooks/tests/test_concurrency
 $(BUILD_DIR)/test_concurrency_insert: $(BUILD_DIR)/hooks/tests/test_concurrency_insert.o $(HOOK_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+$(BUILD_DIR)/test_result_allocation: $(BUILD_DIR)/hooks/tests/test_result_allocation.o $(HOOK_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/minidb_hooks: $(BUILD_DIR)/hooks/main.o $(HOOK_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-result-allocation: $(BUILD_DIR)/test_result_allocation $(BUILD_DIR)/minidb_hooks
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_result_allocation.json -- ./$(BUILD_DIR)/test_result_allocation
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_result_allocation_cli.json -- $(PYTHON) tests/test_result_allocation_cli.py --minidb ./$(BUILD_DIR)/minidb_hooks --workdir $(BUILD_DIR)/result-allocation-cli
+
 test-concurrency: $(BUILD_DIR)/test_concurrency_barrier $(BUILD_DIR)/test_concurrency_insert
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_concurrency_barrier.json -- ./$(BUILD_DIR)/test_concurrency_barrier
 	@set -e; iteration=1; while [ $$iteration -le $(CONCURRENCY_RUNS) ]; do \
@@ -293,10 +317,12 @@ test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
 
-.PHONY: test-runner test-fault test-concurrency test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
+.PHONY: test-runner test-fault test-concurrency test-result test-result-allocation test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
 -include $(OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BUILD_DIR)/main.d
 -include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d $(BUILD_DIR)/sql/lexer*.d)
 -include $(HOOK_OBJS:.o=.d) $(wildcard $(BUILD_DIR)/hooks/tests/*.d)
+-include $(BUILD_DIR)/hooks/main.d
+-include $(BUILD_DIR)/sql/result.d $(BUILD_DIR)/sql/result_fault.d
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
