@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -188,8 +189,9 @@ static bool is_cell_structure_valid(const value_view_t *cell)
     switch (cell->type) {
         case VALUE_NULL:
         case VALUE_INTEGER:
-        case VALUE_REAL:
             return cell->bytes == NULL && cell->size_bytes == 0;
+        case VALUE_REAL:
+            return cell->bytes == NULL && cell->size_bytes == 0 && isfinite(cell->real);
         case VALUE_TEXT:
             return cell->size_bytes == 0 || (cell->bytes != NULL &&
                                              is_text_valid(cell->bytes, cell->size_bytes));
@@ -210,6 +212,7 @@ static result_status_t check_cell(const result_column_t *column, const value_vie
                                   size_t *remaining_bytes)
 {
     if (!is_type_valid(cell->type) || !is_cell_type_allowed(column, cell)) return RESULT_INVALID;
+    if ((uint64_t)cell->size_bytes > VALUE_MAX_BYTES) return RESULT_LIMIT;
     if (cell->size_bytes > *remaining_bytes) return RESULT_LIMIT;
     *remaining_bytes -= cell->size_bytes;
     return is_cell_structure_valid(cell) ? RESULT_OK : RESULT_INVALID;
@@ -217,7 +220,7 @@ static result_status_t check_cell(const result_column_t *column, const value_vie
 
 /*
  * 행의 형태·타입·한도를 검사하고 행 비용(셀 배열 + 바이트)을 *row_bytes에 채운다.
- * REAL이 유한한지는 value 모듈이 만드는 view만 받는다는 전제로 확인하지 않는다.
+ * 셀은 value.h의 유효한 view여야 한다: TEXT는 UTF-8, REAL은 유한값, 바이트는 VALUE_MAX_BYTES 이하.
  */
 // cost: time O(c + t), heap O(1), stack O(1)
 // vars: c = column_count, t = TEXT 셀 바이트 합
@@ -379,9 +382,11 @@ static void close_memory_rows(void *ctx)
 
 static const result_source_ops_t memory_ops = {next_memory_row, close_memory_rows};
 
-static size_t metadata_bytes(const result_t *result)
+/* 결과 구조, builder 보조 구조, 컬럼 metadata처럼 행 수와 무관한 고정 할당 크기 */
+static size_t fixed_bytes(const result_t *result)
 {
-    size_t total = result->column_count * sizeof(result_column_t);
+    size_t total = sizeof(result_t) + sizeof(mem_rows_t) + sizeof(result_builder_t);
+    total += result->column_count * sizeof(result_column_t);
     for (size_t i = 0; i < result->column_count; i++) total += result->columns[i].name_len;
     return total;
 }
@@ -401,7 +406,7 @@ result_status_t result_builder_create(const result_builder_spec_t *spec, result_
         free(mem);
         return status;
     }
-    mem->used_bytes = metadata_bytes(result);
+    mem->used_bytes = fixed_bytes(result);
     if (mem->used_bytes > result->limits.max_total_bytes) {
         result_release(&result);
         return RESULT_LIMIT;
@@ -446,6 +451,7 @@ static size_t growth_slots(const mem_rows_t *mem)
 static bool grow_rows(mem_rows_t *mem, size_t slots)
 {
     size_t capacity = mem->capacity + slots;
+    if (capacity > SIZE_MAX / sizeof(*mem->rows)) return false;
     value_view_t **rows = realloc(mem->rows, capacity * sizeof(*rows));
     if (rows == NULL) return false;
     mem->rows = rows;
@@ -464,6 +470,7 @@ result_status_t result_builder_add_row(result_builder_t *builder, const value_vi
     result_status_t status = check_cells(result, cells, cell_count, &row_bytes);
     if (status != RESULT_OK) return status;
     size_t slots = growth_slots(mem);
+    if (slots > (SIZE_MAX - row_bytes) / sizeof(value_view_t *)) return RESULT_LIMIT;
     size_t charge = row_bytes + slots * sizeof(value_view_t *);
     if (charge > result->limits.max_total_bytes - mem->used_bytes) return RESULT_LIMIT;
     value_view_t *row = copy_row(cells, cell_count, row_bytes);
