@@ -8,6 +8,8 @@
  *   2. 같은 tail이 찬 것을 본 두 스레드가 동시에 확장하려는 경우: 페이지는 하나만 늘어난다.
  *   3. 루트를 읽은 뒤 latch를 기다리는 사이 루트가 분할된 경우: latch 뒤 재검증으로 다시 내려간다.
  *   4. flush가 header를 스냅샷한 뒤 들어온 변경, flush 실패: dirty 표시를 잃지 않는다.
+ * 기본 실행은 위 정상 경로만 검사한다. 잠금 순서 검사기가 역순을 세는지는 일부러 역순으로 잠그는
+ * 음성 시험이라 --check-order-detector로 별도 프로세스에서만 실행한다(TSan은 이 모드에서 진단하고 66으로 끝난다).
  * 모든 대기에는 제한 시간이 있어 정지하면 멈춘 위치를 출력하고 종료한다.
  */
 
@@ -548,9 +550,9 @@ static void test_lock_order_checker_detects_reverse_order(void)
     close_db(&pager);
 }
 
-int main(void)
+/* 정상 경로: 모든 sanitizer에서 성공해야 한다. */
+static int run_normal(void)
 {
-    test_lock_order_checker_detects_reverse_order();
     test_tail_publish_window();
     test_two_extenders_add_one_page();
     test_search_revalidates_root_after_split();
@@ -558,4 +560,23 @@ int main(void)
     test_header_dirty_survives_flush();
     puts("concurrency barrier: tail window, single extension, root revalidation, header dirty and flush failure");
     return 0;
+}
+
+/* 음성 시험: 일부러 역순으로 잠가 검사기가 센다. 실제 lock-order-inversion이므로 TSan은 이 프로세스에서
+ * 진단하고 종료 코드 66으로 끝나는 것이 기대 동작이다. 정상 경로와 같은 프로세스에 두지 않는다. */
+static int run_order_detector(void)
+{
+    test_lock_order_checker_detects_reverse_order();
+    puts("concurrency barrier: lock order detector counts a reverse acquisition");
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 1)
+        return run_normal();
+    if (argc == 2 && strcmp(argv[1], "--check-order-detector") == 0)
+        return run_order_detector();
+    fprintf(stderr, "usage: %s [--check-order-detector]\n", argv[0]);
+    return 2;
 }
