@@ -922,7 +922,8 @@ heap_status_t heap_collect_pages(heap_t *heap, uint32_t **pages, size_t *count)
     }
     if (fields == NULL || page == NULL) result = HEAP_NOMEM;
     if (result == HEAP_OK && (!list_reserve(&list, heap->dir_count + heap->entry_count, ledger))) result = HEAP_NOMEM;
-    if (result == HEAP_OK && heap->indexed && heap->index_root != PAGE_FILE_NO_PAGE) {
+    /* 읽기에 쓰지 않는 어긋난 색인도 DROP 때는 그 페이지를 회수해야 한다. */
+    if (result == HEAP_OK && heap->index_root != PAGE_FILE_NO_PAGE) {
         result = collect_index_pages(heap, &list);
     }
     for (size_t i = 0; result == HEAP_OK && i < heap->dir_count; i++) list.items[list.len++] = heap->dirs[i];
