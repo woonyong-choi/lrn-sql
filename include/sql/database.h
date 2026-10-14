@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "sql/lexer.h"
+#include "sql/mem_ledger.h"
 #include "sql/result.h"
 
 /*
@@ -81,5 +82,61 @@ size_t database_table_count(const database_t *db);
  */
 database_exec_status_t database_exec(database_t *db, const uint8_t *sql, size_t size,
                                      const lexer_binding_t *binding, result_t **out);
+
+/*
+ * 메모리 예산과 취소. database_exec_ex는 database_exec와 같고 선택 옵션을 받는다. opts가 NULL이거나 모든
+ * 필드가 0이면 database_exec와 같은 동작이다(계상도 제한도 없다).
+ *
+ * ledger가 있으면 이 문장이 쓰는 모든 메모리를 할당하기 전에 MEM_SCOPE_QUERY로 reserve하고 끝날 때 모두
+ * 돌려준다. 이전된 결과의 몫(result_accounted_bytes)만 호출자에게 남으며 result_rebind_ledger로 옮긴다.
+ * 요청 바이트 기준이며 allocator 오버헤드·정렬·단편화·프로세스 RSS와 스택은 포함하지 않는다. 한도는
+ * RSS를 보장하지 않는다. 계상은 다음과 같다.
+ *   - database·heap_store·result가 직접 만드는 할당: 정확한 요청 크기. 재할당은 새 크기를 먼저 reserve해
+ *     순간 최대치가 old+new다.
+ *   - lexer·parser·카탈로그 복제와 저장·값 변환처럼 다른 모듈 안에서 일어나는 할당: 그 모듈이 입력과 객체
+ *     한도로 계산해 주는 요청 바이트의 상한(lexer_scan_peak_bytes, sqlstmt_parse_peak_bytes,
+ *     catalog_clone_peak_bytes 등)을 호출 전에 reserve한다. 상한이므로 실제 사용량보다 클 수 있다.
+ *   - 입력 SQL은 max_sql_bytes(0이면 DATABASE_BOUNDED_SQL_BYTES)를 넘으면 lexer를 부르기 전에
+ *     RESULT_E_LIMIT으로 거절한다. ledger가 없으면 이 제한을 적용하지 않는다(기존 lexer 한도만).
+ * reserve가 거절돼 문장을 끝낼 수 없으면 아무것도 반영하지 않고 RESULT_E_NOMEM 오류 결과로 돌아온다.
+ * 그 오류 결과조차 reserve할 수 없으면 DATABASE_EXEC_NOMEM이다. ledger가 있는 호출에서는 실제 할당 실패도
+ * 같은 방식으로 보고한다.
+ *
+ * cancel은 협력형이다. 행을 하나 읽기 전과 게시(commit)하기 직전에 확인하고 요청이 보이면 아무것도 반영하지
+ * 않고 RESULT_E_CANCELLED 오류 결과로 끝낸다. 게시를 시작한 뒤에는 확인하지 않으며 그 결과(성공, 미반영,
+ * 불확정)를 그대로 보고한다. 취소 요청이 게시 뒤에 와도 성공을 취소로 바꾸지 않는다.
+ */
+#define DATABASE_BOUNDED_SQL_BYTES ((size_t)1 << 20)
+/* 취소 오류 결과의 code */
+#define DATABASE_CODE_CANCELLED 23
+/* 메모리 예산 거절 오류 결과의 code */
+#define DATABASE_CODE_BUDGET 24
+
+typedef struct {
+    bool (*requested)(void *ctx);
+    void *ctx;
+} database_cancel_t;
+
+typedef struct {
+    const mem_ledger_t *ledger;
+    const database_cancel_t *cancel;
+    size_t max_sql_bytes;
+} database_exec_options_t;
+
+database_exec_status_t database_exec_ex(database_t *db, const database_exec_options_t *opts,
+                                        const uint8_t *sql, size_t size,
+                                        const lexer_binding_t *binding, result_t **out);
+
+/*
+ * 상주 메모리. 핸들이 열려 있는 동안 남는 몫(핸들 구조체, page_file 핸들, 게시된 카탈로그, page_file 해제
+ * 목록의 상한)을 MEM_SCOPE_RESIDENT로 계상한다. attach가 현재 몫을 reserve하고 거절되면 DATABASE_NOMEM이며
+ * 붙지 않는다. 붙은 뒤에는 카탈로그가 커지거나 페이지 수가 늘어 목록 상한이 커질 때 게시 전에 늘어난 만큼을
+ * reserve하고(거절되면 그 문장은 반영되지 않는다), 줄어든 카탈로그 몫은 게시 뒤에 돌려준다. 해제 목록 몫은
+ * 줄이지 않는다. database_close가 남은 몫을 돌려주고 ledger를 drop한다. 열기(database_open·create)가 쓰는
+ * 임시 메모리는 계상하지 않는다. 한 핸들에 한 번만 붙일 수 있으며 ledger가 없으면 아무 일도 하지 않는다.
+ * 같은 핸들을 쓰는 exec와 동시에 부르면 안 된다.
+ */
+database_status_t database_attach_ledger(database_t *db, const mem_ledger_t *resident);
+size_t database_resident_bytes(const database_t *db);
 
 #endif
