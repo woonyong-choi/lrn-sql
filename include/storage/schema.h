@@ -19,7 +19,7 @@
 typedef union {
     int32_t  int_val;       /* INT 타입 값 (4바이트) */
     int64_t  bigint_val;    /* BIGINT 타입 값 (8바이트) */
-    char     str_val[256];  /* VARCHAR 타입 값 (최대 255자 + null) */
+    char     str_val[256];  /* VARCHAR 타입 값 (최대 255바이트 + null) */
 } row_value_t;
 
 /* 컬럼 오프셋을 계산하고 row_size를 헤더에 기록한다 */
