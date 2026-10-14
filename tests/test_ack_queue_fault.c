@@ -240,8 +240,10 @@ static void prepare_enqueue(void)
 
 static ackq_status_t run_enqueue(ackq_t *q)
 {
-    uint64_t id;
-    return ackq_enqueue(q, NULL, (const uint8_t *)"payload", 7, "key-1", &id, NULL);
+    uint64_t id = 99;
+    ackq_status_t st = ackq_enqueue(q, NULL, (const uint8_t *)"payload", 7, "key-1", &id, NULL);
+    CHECK(st == ACKQ_OK ? id != 0 : id == 0, "성공이 아니면 id를 주지 않는다 (st=%s)", ackq_status_name(st));
+    return st;
 }
 
 static void verify_enqueue(database_t *db, ackq_t *q, ackq_status_t st, bool acknowledged)
@@ -279,6 +281,7 @@ static ackq_status_t run_claim(ackq_t *q)
     ackq_claim_t items[2];
     size_t n = 0;
     ackq_status_t st = ackq_claim(q, NULL, 2, 1000, items, &n);
+    CHECK(st == ACKQ_OK ? n == 2 : n == 0, "성공이 아니면 claim한 항목을 주지 않는다 (st=%s n=%zu)", ackq_status_name(st), n);
     ackq_claims_release(items, n);
     return st;
 }
