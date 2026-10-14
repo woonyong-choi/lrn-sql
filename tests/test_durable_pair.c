@@ -8,6 +8,7 @@
  *  3. 승인된 durable 거래를 조용히 durable이 아닌 것으로 여는 길이 없다(DOWNGRADED), 슬롯 손상 뒤 판정
  *  4. 뒤늦은 WAL 누락과 불일치는 복구가 아니라 오류이며 어느 파일도 바꾸지 않는다
  *  5. epoch 영속화, 예산(admission, WAL 한도) 거절은 파일을 만들지도 바꾸지도 않는다
+ *  6. epoch는 두 슬롯에 commit한 뒤에만 노출한다(종료·I/O 실패 지점과 슬롯 손상 뒤 floor), 손상 v1은 PLAIN으로 열지 않는다
  *
  * 다루지 않는 것: 전원 장애, lost write, 실제 database·catalog·heap의 replay.
  *
@@ -671,6 +672,196 @@ static void test_epoch_and_budgets(void)
     snap_free(&before);
 }
 
+/* ---- 6. epoch 이중 슬롯, v1 손상 거절 ---- */
+
+/* 가장 높은 generation의 제어 슬롯 */
+static int newest_slot(void)
+{
+    uint8_t *all = NULL;
+    size_t len = 0;
+    uint64_t best = 0;
+    int newest = 0;
+    if (read_all(DB, &all, &len) && len >= 2 * PAGE_FILE_PAGE_BYTES) {
+        for (int slot = 0; slot < 2; slot++) {
+            uint64_t gen = 0;
+            for (int i = 7; i >= 0; i--) gen = (gen << 8) | all[(size_t)slot * PAGE_FILE_PAGE_BYTES + 32 + 20 + i];
+            if (gen > best) {
+                best = gen;
+                newest = slot;
+            }
+        }
+    }
+    free(all);
+    return newest;
+}
+
+/* 노출한 epoch를 어느 한 슬롯의 손상 뒤에도 floor가 넘는지: 손상 없음, 최신 슬롯 손상, 이전 슬롯 손상 */
+static bool floor_survives(const char *label, uint32_t exposed)
+{
+    snap_t s;
+    snap_take(&s);
+    int newest = newest_slot();
+    bool ok = true;
+    for (int variant = 0; variant < 3; variant++) {
+        snap_restore(&s);
+        if (variant == 1) damage_slot(newest);
+        if (variant == 2) damage_slot(1 - newest);
+        durable_pair_t pair;
+        durable_pair_info_t info;
+        durable_pair_status_t st = open_pair(false, &pair, &info);
+        if (st != DURABLE_PAIR_OK) {
+            printf("  [%s] 변형 %d: 열리지 않는다 %s\n", label, variant, durable_pair_status_name(st));
+            ok = false;
+            continue;
+        }
+        uint32_t floor_epoch = page_file_control(pair.file)->durable_epoch;
+        if (floor_epoch < EPOCH || (exposed != 0 && floor_epoch < exposed)) {
+            printf("  [%s] 변형 %d: floor %u < 노출 %u\n", label, variant, floor_epoch, exposed);
+            ok = false;
+        }
+        durable_pair_close(&pair);
+    }
+    snap_free(&s);
+    return ok;
+}
+
+/* 전환을 마치고 거래 하나를 게시해 두 제어 슬롯이 모두 ready인 짝 */
+static void make_two_ready_slots(void)
+{
+    durable_pair_t pair;
+    fresh_dir();
+    make_v1_db();
+    CHECK(open_pair(true, &pair, NULL) == DURABLE_PAIR_OK && approve(&pair, 1, true, NULL), "전환과 게시");
+    durable_pair_close(&pair);
+    CHECK(slot_ready_flag(0) == 1 && slot_ready_flag(1) == 1, "두 슬롯이 모두 ready");
+}
+
+static void test_epoch_two_slots(void)
+{
+    printf("\n[epoch 이중 슬롯 영속화]\n");
+    durable_pair_t pair;
+
+    /* 성공: 두 슬롯 모두 같은 epoch를 담는다 */
+    make_two_ready_slots();
+    CHECK(open_pair(false, &pair, NULL) == DURABLE_PAIR_OK, "열기");
+    CHECK(durable_pair_persist_epoch(&pair, EPOCH + 1) == DURABLE_PAIR_OK, "epoch 영속화");
+    durable_pair_close(&pair);
+    CHECK(floor_survives("성공", EPOCH + 1), "한 슬롯이 손상돼도 floor가 노출 epoch 이상");
+
+    /* 지점 수 */
+    make_two_ready_slots();
+    snap_t base;
+    snap_take(&base);
+    hooks_on();
+    CHECK(open_pair(false, &pair, NULL) == DURABLE_PAIR_OK, "열기");
+    g_fail_mode = true;
+    g_fail_at = 0;
+    g_points_seen = 0;
+    CHECK(durable_pair_persist_epoch(&pair, EPOCH + 1) == DURABLE_PAIR_OK, "기준 영속화");
+    long total = g_points_seen;
+    durable_pair_close(&pair);
+    hooks_off();
+    g_fail_mode = false;
+    CHECK(total >= 4, "지점 수 %ld", total);
+
+    /* 종료: 자식이 OK를 돌려받기 전까지 노출하지 않는다. OK(0)로 끝난 자식만 노출한 것이다 */
+    int bad = 0, crashed = 0;
+    for (long k = 0; k <= total; k++) {
+        snap_restore(&base);
+        pid_t pid = fork();
+        if (pid == 0) {
+            durable_pair_t p;
+            hooks_on();
+            if (open_pair(false, &p, NULL) != DURABLE_PAIR_OK) _exit(4);
+            g_points_left = k;
+            durable_pair_status_t st = durable_pair_persist_epoch(&p, EPOCH + 1);
+            _exit(st == DURABLE_PAIR_OK ? 0 : 3);
+        }
+        int status;
+        waitpid(pid, &status, 0);
+        bool died = WIFEXITED(status) && WEXITSTATUS(status) == 137;
+        bool done = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (!died && !done) {
+            printf("  k=%ld 자식이 예상 밖으로 끝남 status=%d\n", k, status);
+            bad++;
+            continue;
+        }
+        crashed += died;
+        char label[48];
+        snprintf(label, sizeof(label), "종료 k=%ld", k);
+        if (!floor_survives(label, done ? EPOCH + 1 : 0)) bad++;
+    }
+    CHECK(bad == 0 && crashed > 0, "종료 지점 %ld곳 어긋남 %d (비정상 종료 %d)", total + 1, bad, crashed);
+
+    /* I/O 실패: OK가 아니면 노출하지 않고, 같은 핸들은 새 epoch를 내주지 않는다(재열기뿐) */
+    bad = 0;
+    long failed = 0;
+    for (long k = 1; k <= total; k++) {
+        snap_restore(&base);
+        hooks_on();
+        CHECK(open_pair(false, &pair, NULL) == DURABLE_PAIR_OK, "열기");
+        g_fail_mode = true;
+        g_fail_at = k;
+        g_fail_seen = 0;
+        durable_pair_status_t st = durable_pair_persist_epoch(&pair, EPOCH + 1);
+        failed += g_fail_seen >= k;
+        g_fail_mode = false;
+        hooks_off();
+        char label[48];
+        snprintf(label, sizeof(label), "실패 k=%ld", k);
+        if (st != DURABLE_PAIR_OK) {
+            if (durable_pair_persist_epoch(&pair, EPOCH + 1) == DURABLE_PAIR_OK ||
+                durable_pair_persist_epoch(&pair, EPOCH + 2) == DURABLE_PAIR_OK) {
+                printf("  [%s] 실패한 핸들이 새 epoch를 내준다\n", label);
+                bad++;
+            }
+        }
+        durable_pair_close(&pair);
+        if (!floor_survives(label, st == DURABLE_PAIR_OK ? EPOCH + 1 : 0)) bad++;
+    }
+    CHECK(bad == 0 && failed > 0, "실패 지점 어긋남 %d (주입 %ld)", bad, failed);
+
+    /* 두 슬롯 모두 손상은 기존대로 fail-closed */
+    snap_restore(&base);
+    damage_slot(0);
+    damage_slot(1);
+    CHECK(open_pair(true, &pair, NULL) == DURABLE_PAIR_CORRUPT, "이중 슬롯 손상은 CORRUPT");
+    snap_free(&base);
+}
+
+static void test_v1_damage_rejected(void)
+{
+    printf("\n[v1 + WAL 없음 + 손상 슬롯]\n");
+    durable_pair_t pair;
+    durable_pair_info_t info;
+    fresh_dir();
+    make_v1_db();
+    {
+        /* v1 commit을 한 번 더 해서 두 슬롯 모두 v1이 되게 한다 */
+        page_file_t *f = NULL;
+        CHECK(page_file_open(DB, true, &f, NULL) == PAGE_FILE_OK, "v1 열기");
+        if (f != NULL) {
+            CHECK(page_file_commit(f) == PAGE_FILE_OK, "v1 commit");
+            page_file_close(f);
+        }
+    }
+    snap_t clean;
+    snap_take(&clean);
+    CHECK(open_pair(false, &pair, &info) == DURABLE_PAIR_OK && pair.wal == NULL && info.file_info.damaged_slots == 0,
+          "손상 없는 v1은 PLAIN");
+    durable_pair_close(&pair);
+
+    damage_slot(newest_slot());
+    snap_t damaged;
+    snap_take(&damaged);
+    CHECK(open_pair(false, &pair, &info) == DURABLE_PAIR_CORRUPT, "손상 v1은 PLAIN으로 열지 않는다");
+    CHECK(info.file_info.damaged_slots == 1 && pair.file == NULL && pair.wal == NULL, "손상 1을 알리고 핸들 없음");
+    CHECK(open_pair(true, &pair, &info) == DURABLE_PAIR_CORRUPT, "convert여도 자동 전환하지 않는다");
+    CHECK(snap_same(&damaged) && !exists(WAL), "어느 파일도 바꾸거나 WAL을 만들지 않는다");
+    snap_free(&clean);
+    snap_free(&damaged);
+}
+
 int main(void)
 {
     mkdir(DIR_NAME, 0700);
@@ -680,6 +871,8 @@ int main(void)
     test_downgrade_paths();
     test_late_missing_and_mismatch();
     test_epoch_and_budgets();
+    test_epoch_two_slots();
+    test_v1_damage_rejected();
     fresh_dir();
     rmdir(DIR_NAME);
     printf("\n%d checks, %d failed\n", g_run, g_fail);
