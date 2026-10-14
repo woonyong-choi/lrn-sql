@@ -69,6 +69,8 @@ typedef struct {
 
 /* 이후 열리는 핸들이 쓰는 I/O 진입점을 바꾼다. NULL이면 libc로 복원한다. 테스트 전용. */
 void page_file_set_default_io(const page_file_io_t *io);
+/* 현재 기본 I/O 진입점. 옛 파일 읽기(legacy_migrate)가 같은 실패 주입 자리를 쓴다. */
+page_file_io_t page_file_default_io(void);
 
 typedef struct page_file page_file_t;
 

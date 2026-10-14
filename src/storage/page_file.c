@@ -60,6 +60,11 @@ void page_file_set_default_io(const page_file_io_t *io)
     g_default_io = io != NULL ? *io : LIBC_IO;
 }
 
+page_file_io_t page_file_default_io(void)
+{
+    return g_default_io;
+}
+
 static void put_u16(uint8_t *at, uint16_t value)
 {
     at[0] = (uint8_t)value;
