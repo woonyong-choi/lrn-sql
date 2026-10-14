@@ -278,6 +278,27 @@ static size_t known_differences(sqlite3 *db)
     assert(strcmp(buffer, "0.10000000000000001") == 0);
     differences++;
     sqlite3_finalize(to_text);
+
+    /*
+     * VARCHAR(n): SQLite는 n을 강제하지 않아 n+1 문자도 절단 없이 저장한다. 이 모듈은 n+1 문자를 거절하고
+     * n 문자는 통과시킨다. 문자 수 기준이라 바이트 수가 n을 넘는 한글 n 문자도 통과한다.
+     */
+    assert(sqlite3_exec(db, "CREATE TABLE narrow(v VARCHAR(2))", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_stmt *insert = prepare(db, "INSERT INTO narrow VALUES (?1)");
+    sqlite3_stmt *sizes = prepare(db, "SELECT length(v), length(CAST(v AS BLOB)) FROM narrow WHERE rowid = ?1");
+    static const char hangul3[] = "\xea\xb0\x80\xea\xb0\x80\xea\xb0\x80";   /* 3문자 9바이트 */
+    value_view_t within = text_view(hangul3, 6);                           /* 2문자 6바이트 */
+    value_view_t beyond = text_view(hangul3, 9);
+    assert(value_check_varchar(&within, 2) == VALUE_OK);
+    assert(value_check_varchar(&beyond, 2) == VALUE_LIMIT);
+    bind_view(insert, 1, &beyond);
+    assert(sqlite3_step(insert) == SQLITE_DONE);
+    sqlite3_bind_int64(sizes, 1, sqlite3_last_insert_rowid(db));
+    assert(sqlite3_step(sizes) == SQLITE_ROW);
+    assert(sqlite3_column_int(sizes, 0) == 3 && sqlite3_column_int(sizes, 1) == 9);   /* 절단 없음 */
+    differences++;
+    sqlite3_finalize(sizes);
+    sqlite3_finalize(insert);
     return differences;
 }
 
