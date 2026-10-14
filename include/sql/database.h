@@ -34,13 +34,14 @@
  * 문장도 성공으로 응답하지 않는다. 다시 열면 이전 상태일 수도 새 상태일 수도 있다.
  * commit 전에 실패했다고 확인된 경우에도 fsync가 실패했다면 핸들이 poison될 수 있다.
  *
- * 기본 키: 기본 키 중복은 첫 범위 스캔으로 검사한다. 실제 index는 구현하지 않았다(primary_root는
- * 항상 비어 있다). identity(AUTOINCREMENT)는 카탈로그 카운터가 주며, 명시한 값이 카운터보다 크면
+ * 기본 키: INTEGER 기본 키는 지속형 색인(storage/pk_tree.h)으로 중복 검사와 `기본 키 = 값` 조회·갱신·삭제를
+ * 전체 스캔 없이 한다. 색인은 힙 변경과 같은 commit으로 게시된다(catalog의 primary_root). 색인이 없는 표(옛 파일에서
+ * 행이 이미 있는 표, INTEGER가 아닌 기본 키)는 전체 스캔으로 검사한다. identity(AUTOINCREMENT)는 카탈로그 카운터가 주며, 명시한 값이 카운터보다 크면
  * 이후 자동 값은 그 값을 넘을 때까지 카운터를 올려 건너뛴다(한도 DATABASE_IDENTITY_SKIP_LIMIT).
  *
  * 보장하지 않는 것: WAL, 여러 문장 거래, 전원 손실 복구, lost write 탐지, 동시 접근(단일 스레드,
  * 쓰기 핸들은 파일 잠금이 배타), 재시작 뒤 해제 페이지 회수(page_file이 메모리에만 둔다),
- * 큰 테이블의 성능(모든 조회가 전체 스캔이고 문장마다 카탈로그를 다시 쓴다), SQLite와 같은
+ * 큰 테이블의 성능(기본 키 등가 밖의 조회는 전체 스캔이고 문장마다 카탈로그를 다시 쓴다), SQLite와 같은
  * 타입 친화성(여기서는 정확히 변환되는 값만 받고 아니면 오류).
  */
 
@@ -76,6 +77,14 @@ database_status_t database_close(database_t *db);
 /* 불확정 commit 결과나 fsync 실패로 더는 쓸 수 없는 핸들인지. */
 bool database_is_poisoned(const database_t *db);
 size_t database_table_count(const database_t *db);
+
+/* 이 핸들이 연 뒤 문장들이 누적한 읽기 비용. 전체 스캔이 얼마나 일어났는지 대조하는 데 쓴다. */
+typedef struct {
+    uint64_t rows_scanned;      /* 전체 스캔이 돌려준 행 수 */
+    uint64_t index_lookups;     /* 기본 키 색인 조회 횟수 */
+    uint64_t index_pages_read;  /* 색인 노드 페이지 읽기 횟수 */
+} database_scan_stats_t;
+void database_scan_stats(const database_t *db, database_scan_stats_t *out);
 
 /*
  * 문장 하나를 실행한다. binding은 NULL이면 매개변수가 없는 SQL이어야 한다. 성공한 *out은 호출자가

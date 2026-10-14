@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -93,7 +94,11 @@ static const step_t STEPS[] = {
     {STEP_SELECT, "SELECT * FROM logs"},
 };
 
-#define STEP_COUNT (sizeof(STEPS) / sizeof(STEPS[0]))
+#define FIXED_STEP_COUNT (sizeof(STEPS) / sizeof(STEPS[0]))
+
+/* 고정 단계 뒤에 기본 키 색인용으로 만든 단계를 붙인 전체 목록 */
+static step_t *g_steps;
+static size_t g_step_count;
 
 /* ── 표준 표기 ── */
 typedef struct {
@@ -286,12 +291,102 @@ static int g_fail = 0;
 /* sql이 NULL인 STEP_OK는 큰 값 삽입이다. 앞에서부터 순서대로 a, b를 쓴다. */
 static const char *step_sql(size_t i, char *storage_a, char *storage_b)
 {
-    if (STEPS[i].sql != NULL) return STEPS[i].sql;
+    if (g_steps[i].sql != NULL) return g_steps[i].sql;
     size_t ordinal = 0;
     for (size_t k = 0; k < i; k++) {
-        if (STEPS[k].kind == STEP_OK && STEPS[k].sql == NULL) ordinal++;
+        if (g_steps[k].kind == STEP_OK && g_steps[k].sql == NULL) ordinal++;
     }
     return ordinal == 0 ? storage_a : storage_b;
+}
+
+/*
+ * 기본 키 색인 단계. 키 -1000..1000에 대한 삽입(중복 포함)·조회·값 갱신·키 갱신·삭제를 정해진 난수열로 섞는다.
+ * 성공·실패 기대는 두 엔진이 아니라 이 모델(key -> 존재 여부)에서 얻는다. 키가 한 leaf(508개)를 넘게 쌓여
+ * 색인이 쪼개지고, 중간에 다시 열어 재시작 뒤 색인을 읽는다.
+ */
+#define KEY_LOW (-1000)
+#define KEY_SPAN 2001
+#define GENERATED_INSERTS 1100
+#define GENERATED_OPERATIONS 900
+
+static unsigned g_seed = 20260715u;
+
+static unsigned next_random(void)
+{
+    g_seed = g_seed * 1664525u + 1013904223u;
+    return g_seed >> 8;
+}
+
+static void add_step(step_kind_t kind, const char *format, ...) __attribute__((format(printf, 2, 3)));
+
+static void add_step(step_kind_t kind, const char *format, ...)
+{
+    char *sql = NULL;
+    if (format != NULL) {
+        sql = malloc(160);
+        assert(sql != NULL);
+        va_list args;
+        va_start(args, format);
+        vsnprintf(sql, 160, format, args);
+        va_end(args);
+    }
+    g_steps = realloc(g_steps, (g_step_count + 1) * sizeof(*g_steps));
+    assert(g_steps != NULL);
+    g_steps[g_step_count++] = (step_t){kind, sql};
+}
+
+static void build_steps(void)
+{
+    g_steps = malloc(FIXED_STEP_COUNT * sizeof(*g_steps));
+    assert(g_steps != NULL);
+    memcpy(g_steps, STEPS, sizeof(STEPS));
+    g_step_count = FIXED_STEP_COUNT;
+
+    bool exists[KEY_SPAN] = {false};
+    add_step(STEP_OK, "CREATE TABLE kv (k INTEGER PRIMARY KEY, v TEXT NOT NULL)");
+    for (int i = 0; i < GENERATED_INSERTS; i++) {
+        int key = KEY_LOW + (int)(next_random() % KEY_SPAN);
+        add_step(exists[key - KEY_LOW] ? STEP_ERROR : STEP_OK, "INSERT INTO kv VALUES (%d, 'v%d')", key, i);
+        exists[key - KEY_LOW] = true;
+    }
+    add_step(STEP_SELECT, "SELECT * FROM kv");
+    add_step(STEP_REOPEN, NULL);
+    add_step(STEP_SELECT, "SELECT * FROM kv");
+    for (int i = 0; i < GENERATED_OPERATIONS; i++) {
+        int key = KEY_LOW + (int)(next_random() % KEY_SPAN);
+        int other = KEY_LOW + (int)(next_random() % KEY_SPAN);
+        bool has_key = exists[key - KEY_LOW];
+        switch (next_random() % 5) {
+            case 0:
+                add_step(STEP_SELECT, "SELECT k, v FROM kv WHERE k = %d", key);
+                break;
+            case 1:
+                add_step(has_key ? STEP_ERROR : STEP_OK, "INSERT INTO kv VALUES (%d, 'again%d')", key, i);
+                exists[key - KEY_LOW] = true;
+                break;
+            case 2:
+                add_step(STEP_OK, "UPDATE kv SET v = 'u%d' WHERE k = %d", i, key);
+                break;
+            case 3: {
+                bool is_conflict = has_key && other != key && exists[other - KEY_LOW];
+                add_step(is_conflict ? STEP_ERROR : STEP_OK, "UPDATE kv SET k = %d WHERE k = %d", other, key);
+                if (has_key && !is_conflict) {
+                    exists[key - KEY_LOW] = key == other;
+                    exists[other - KEY_LOW] = true;
+                }
+                break;
+            }
+            default:
+                add_step(STEP_OK, "DELETE FROM kv WHERE k = %d", key);
+                exists[key - KEY_LOW] = false;
+                break;
+        }
+        if (i % 300 == 299) {
+            add_step(STEP_REOPEN, NULL);
+            add_step(STEP_SELECT, "SELECT * FROM kv");
+        }
+    }
+    for (int key = KEY_LOW; key < KEY_LOW + KEY_SPAN; key += 7) add_step(STEP_SELECT, "SELECT k, v FROM kv WHERE k = %d", key);
 }
 
 int main(void)
@@ -300,6 +395,7 @@ int main(void)
         printf("SKIPPED: sqlite3 CLI가 없어 비교하지 않았다\n");
         return 77;
     }
+    build_steps();
     memset(g_big_literal, 'b', sizeof(g_big_literal) - 1);
     memset(g_bigger_literal, 'z', sizeof(g_bigger_literal) - 1);
     for (size_t i = 0; i < sizeof(g_big_literal) - 1; i += 97) g_big_literal[i] = (char)('A' + i % 26);
@@ -316,8 +412,8 @@ int main(void)
     FILE *script = fopen(SCRIPT_PATH, "wb");
     assert(script != NULL);
     fprintf(script, ".mode quote\n.headers off\n");
-    for (size_t i = 0; i < STEP_COUNT; i++) {
-        if (STEPS[i].kind == STEP_REOPEN) continue;
+    for (size_t i = 0; i < g_step_count; i++) {
+        if (g_steps[i].kind == STEP_REOPEN) continue;
         fprintf(script, "%s;\nSELECT '@@%zu';\n", step_sql(i, step44, step45), i);
     }
     fclose(script);
@@ -325,8 +421,8 @@ int main(void)
     assert(pipe != NULL);
 
     /* 출력을 표지 단위로 나눈다 */
-    bool *errored = calloc(STEP_COUNT, sizeof(*errored));
-    char **rows = calloc(STEP_COUNT, sizeof(*rows));
+    bool *errored = calloc(g_step_count, sizeof(*errored));
+    char **rows = calloc(g_step_count, sizeof(*rows));
     assert(errored != NULL && rows != NULL);
     size_t cap = 0;
     char *line = NULL;
@@ -363,8 +459,8 @@ int main(void)
     database_t *db;
     assert(database_create(DB_PATH, &db) == DATABASE_OK);
     size_t selects = 0, compared_rows = 0;
-    for (size_t i = 0; i < STEP_COUNT; i++) {
-        if (STEPS[i].kind == STEP_REOPEN) {
+    for (size_t i = 0; i < g_step_count; i++) {
+        if (g_steps[i].kind == STEP_REOPEN) {
             assert(database_close(db) == DATABASE_OK);
             assert(database_open(DB_PATH, true, &db) == DATABASE_OK);
             continue;
@@ -375,9 +471,9 @@ int main(void)
         assert(status == DATABASE_EXEC_OK && result != NULL);
         bool ours_error = result_kind(result) == RESULT_KIND_ERROR;
         CHECK(ours_error == errored[i], "단계 %zu: %.60s -> 이쪽 오류 %d, sqlite 오류 %d", i, sql, ours_error, errored[i]);
-        if (STEPS[i].kind == STEP_ERROR) CHECK(ours_error && errored[i], "단계 %zu: 둘 다 오류여야 함", i);
-        if (STEPS[i].kind == STEP_OK) CHECK(!ours_error && !errored[i], "단계 %zu: 둘 다 성공이어야 함: %.60s", i, sql);
-        if (STEPS[i].kind == STEP_SELECT && !ours_error) {
+        if (g_steps[i].kind == STEP_ERROR) CHECK(ours_error && errored[i], "단계 %zu: 둘 다 오류여야 함", i);
+        if (g_steps[i].kind == STEP_OK) CHECK(!ours_error && !errored[i], "단계 %zu: 둘 다 성공이어야 함: %.60s", i, sql);
+        if (g_steps[i].kind == STEP_SELECT && !ours_error) {
             selects++;
             char *mine = ours_rows(result);
             CHECK(strcmp(mine, rows[i]) == 0, "단계 %zu: %s\n--- 이쪽\n%.600s\n--- sqlite\n%.600s", i, sql, mine, rows[i]);
@@ -387,11 +483,13 @@ int main(void)
         result_release(&result);
     }
     assert(database_close(db) == DATABASE_OK);
-    for (size_t i = 0; i < STEP_COUNT; i++) free(rows[i]);
+    for (size_t i = 0; i < g_step_count; i++) free(rows[i]);
     free(rows);
     free(errored);
     free(step44);
     free(step45);
+    for (size_t i = FIXED_STEP_COUNT; i < g_step_count; i++) free((char *)g_steps[i].sql);
+    free(g_steps);
     clean_dir();
     printf("sqlite 비교: SELECT %zu개, 비교한 행 %zu개\n", selects, compared_rows);
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
