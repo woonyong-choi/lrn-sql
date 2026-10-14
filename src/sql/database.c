@@ -98,8 +98,9 @@ static size_t value_bytes(const value_t *value)
 static void owned_clear(database_t *db, value_t *cells, size_t count)
 {
     for (size_t i = 0; i < count; i++) {
-        q_release(db, value_bytes(&cells[i]));
+        size_t bytes = value_bytes(&cells[i]);
         value_clear(&cells[i]);
+        q_release(db, bytes);  /* 비운 뒤에 몫을 돌려준다 */
     }
 }
 
