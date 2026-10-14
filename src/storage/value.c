@@ -445,6 +445,36 @@ static int compare_bytes(const value_view_t *left, const value_view_t *right)
     return sign_of(left->size_bytes < right->size_bytes, left->size_bytes > right->size_bytes);
 }
 
+/* 유효한 UTF-8에서 이어 바이트가 아닌 바이트 하나가 문자 하나의 시작이다. */
+static size_t utf8_char_count(const uint8_t *bytes, size_t size)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < size; i++) {
+        if ((bytes[i] & 0xc0u) != 0x80u) count++;
+    }
+    return count;
+}
+
+value_status_t value_text_chars(const value_view_t *text, size_t *chars)
+{
+    if (chars == NULL) return VALUE_INVALID;
+    value_status_t status = check_view(text);
+    if (status != VALUE_OK) return status;
+    if (text->type != VALUE_TEXT) return VALUE_MISMATCH;
+    *chars = utf8_char_count(text->bytes, text->size_bytes);
+    return VALUE_OK;
+}
+
+value_status_t value_check_varchar(const value_view_t *value, size_t max_chars)
+{
+    if (max_chars == 0) return VALUE_INVALID;
+    value_status_t status = check_view(value);
+    if (status != VALUE_OK) return status;
+    if (value->type == VALUE_NULL) return VALUE_OK;
+    if (value->type != VALUE_TEXT) return VALUE_MISMATCH;
+    return utf8_char_count(value->bytes, value->size_bytes) <= max_chars ? VALUE_OK : VALUE_LIMIT;
+}
+
 value_status_t value_compare(const value_view_t *left, const value_view_t *right, int *order)
 {
     if (order == NULL) return VALUE_INVALID;
