@@ -494,6 +494,45 @@ static void test_collect_pages_includes_index_nodes(void)
     assert(page_file_close(file) == PAGE_FILE_OK);
 }
 
+/* 디렉터리가 두 잎으로 넘어갈 때 색인의 게시·재시작 경계도 함께 검사한다. */
+static void test_index_with_tree_directory(void)
+{
+    printf("\n[test_index_with_tree_directory]\n");
+    database_t *db = create_db();
+    ok(db, "CREATE TABLE t (id INTEGER PRIMARY KEY, bio TEXT)");
+    /* 3900바이트 값은 inline이고 한 record page에는 최대 두 행만 들어간다. */
+    const int rows = (int)HEAP_DIRECTORY_ENTRIES * 2 + 8;
+    for (int id = 1; id <= rows; id++) exec_row(db, id, 3900, false);
+    CHECK(stats_of(db).rows_scanned == 0, "디렉터리 경계를 넘는 삽입도 전체 행을 스캔하지 않음");
+    assert(database_close(db) == DATABASE_OK);
+
+    page_file_t *file;
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    catalog_t *catalog;
+    assert(catalog_store_load(file, &catalog) == CATALOG_STORE_OK);
+    catalog_table_id_t id;
+    assert(catalog_find(catalog, "t", 1, &id) == CATALOG_OK);
+    catalog_table_view_t view;
+    assert(catalog_describe(catalog, id, &view) == CATALOG_OK);
+    uint8_t body[PAGE_BODY_BYTES];
+    assert(page_file_read(file, view.heap_root, PAGE_KIND_DIRECTORY, id, body) == PAGE_FILE_OK);
+    CHECK(memcmp(body, "LHD2", 4) == 0, "실제 디렉터리 루트가 두 잎 형식으로 전환됨");
+    catalog_close(catalog);
+    assert(page_file_close(file) == PAGE_FILE_OK);
+    assert(database_open(DB_PATH, true, &db) == DATABASE_OK);
+
+    char sql[96];
+    snprintf(sql, sizeof(sql), "SELECT id FROM t WHERE id = %d", rows);
+    CHECK(run(db, sql).rows == 1, "둘째 잎의 마지막 키를 색인으로 찾음");
+    exec_row(db, rows, 3950, true);
+    ok(db, "DELETE FROM t WHERE id = 1");
+    db = reopen(db);
+    CHECK(run(db, sql).rows == 1, "둘째 잎의 행 변경 뒤 재시작 조회");
+    CHECK(run(db, "SELECT id FROM t WHERE id = 1").rows == 0, "첫째 잎의 삭제 뒤 재시작 조회");
+    CHECK(stats_of(db).rows_scanned == 0, "두 잎 디렉터리에서도 키 조회는 스캔하지 않음");
+    assert(database_close(db) == DATABASE_OK);
+}
+
 int main(void)
 {
     test_key_statements_do_not_scan();
@@ -502,6 +541,7 @@ int main(void)
     test_index_out_of_step_with_heap_is_not_used();
     test_wrong_locator_is_reported_not_returned();
     test_collect_pages_includes_index_nodes();
+    test_index_with_tree_directory();
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
     return g_fail == 0 ? 0 : 1;
