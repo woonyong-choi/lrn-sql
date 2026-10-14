@@ -43,9 +43,99 @@ static int g_fail = 0;
 /* ── 주입 ── */
 static long g_alloc_fail_at, g_alloc_calls;
 static int alloc_fails(void) { return g_alloc_fail_at != 0 && ++g_alloc_calls == g_alloc_fail_at; }
-void *db_test_malloc(size_t n) { return alloc_fails() ? NULL : malloc(n); }
-void *db_test_calloc(size_t a, size_t b) { return alloc_fails() ? NULL : calloc(a, b); }
-void *db_test_realloc(void *p, size_t n) { return alloc_fails() ? NULL : realloc(p, n); }
+
+/*
+ * 소유권 검사: 치환한 database.c·heap_store.c가 받은 할당만 등록부에 올리고, 해제할 때 내린다.
+ * 그 두 모듈 밖에서 만든 할당(catalog·result·lexer·page_file 등)은 등록부에 없으므로 이 검사로는
+ * 보지 못한다. 해제된 포인터는 quarantine_flush 전까지 실제로 free하지 않고 보관해, 같은 주소가 다른
+ * 모듈의 할당으로 재사용되어 생기는 오탐 없이 이중 해제를 센다. 이 검사는 실행한 경로에 대한 것이며
+ * 프로그램 전체에 누수가 없다는 증거가 아니다.
+ */
+static void **g_live;
+static size_t g_live_count, g_live_cap;
+static void **g_freed;
+static size_t g_freed_count, g_freed_cap;
+static long g_double_frees;
+
+static void list_add(void ***list, size_t *count, size_t *cap, void *p)
+{
+    if (*count == *cap) {
+        *cap = *cap == 0 ? 256 : *cap * 2;
+        *list = realloc(*list, *cap * sizeof(**list));
+        assert(*list != NULL);
+    }
+    (*list)[(*count)++] = p;
+}
+
+static bool list_take(void **list, size_t *count, void *p)
+{
+    for (size_t i = *count; i > 0; i--) {
+        if (list[i - 1] == p) {
+            list[i - 1] = list[--*count];
+            return true;
+        }
+    }
+    return false;
+}
+
+static size_t tracked_live(void) { return g_live_count; }
+
+static void quarantine_flush(void)
+{
+    for (size_t i = 0; i < g_freed_count; i++) free(g_freed[i]);
+    g_freed_count = 0;
+}
+
+static void track(void *p)
+{
+    if (p == NULL) return;
+    list_add(&g_live, &g_live_count, &g_live_cap, p);
+}
+
+void *db_test_malloc(size_t n)
+{
+    if (alloc_fails()) return NULL;
+    void *p = malloc(n);
+    track(p);
+    return p;
+}
+
+void *db_test_calloc(size_t a, size_t b)
+{
+    if (alloc_fails()) return NULL;
+    void *p = calloc(a, b);
+    track(p);
+    return p;
+}
+
+void *db_test_realloc(void *p, size_t n)
+{
+    if (alloc_fails()) return NULL;
+    bool owned = p != NULL && list_take(g_live, &g_live_count, p);
+    void *q = realloc(p, n);
+    if (q == NULL) {
+        if (owned) list_add(&g_live, &g_live_count, &g_live_cap, p);
+        return NULL;
+    }
+    if (p == NULL || owned) track(q);
+    return q;
+}
+
+void db_test_free(void *p)
+{
+    if (p == NULL) return;
+    if (list_take(g_live, &g_live_count, p)) {
+        list_add(&g_freed, &g_freed_count, &g_freed_cap, p);  /* 실제 해제는 quarantine_flush에서 */
+        return;
+    }
+    for (size_t i = 0; i < g_freed_count; i++) {
+        if (g_freed[i] == p) {
+            g_double_frees++;
+            return;
+        }
+    }
+    free(p);  /* 이 모듈들이 만들지 않은 포인터 */
+}
 
 typedef struct {
     int pwrite_fail_at, pwrite_calls;
@@ -289,12 +379,15 @@ static void test_statement(const statement_case_t *c)
     int errors = 0, unknown = 0, successes = 0, nomem = 0, poisoned_total = 0;
     for (int kind = KIND_PWRITE; kind <= KIND_ALLOC; kind++) {
         for (int n = 1; n <= 3000; n++) {
+            quarantine_flush();
             page_file_set_default_io(NULL);
             build_baseline();
             page_file_set_default_io(&HOOKED);
             disarm();
             database_t *db;
             assert(database_open(DB_PATH, true, &db) == DATABASE_OK);
+            size_t live_baseline = tracked_live();
+            long doubles_before = g_double_frees;
             result_t *result = NULL;
             arm((kind_t)kind, n);
             database_exec_status_t status = run_case(db, c, &result);
@@ -302,7 +395,11 @@ static void test_statement(const statement_case_t *c)
             disarm();
             if (!hit && status == DATABASE_EXEC_OK && result != NULL && result_kind(result) == RESULT_KIND_COMMAND) {
                 result_release(&result);
+                CHECK(tracked_live() == live_baseline && g_double_frees == doubles_before,
+                      "%s %s: 주입 없이 성공한 문장도 할당을 모두 해제함 (남은 %zu, 기준 %zu)", c->name, KIND_NAMES[kind],
+                      tracked_live(), live_baseline);
                 assert(database_close(db) == DATABASE_OK);
+                quarantine_flush();
                 break;  /* 이 종류의 주입 지점을 모두 지났다 */
             }
             bool poisoned = database_is_poisoned(db);
@@ -355,7 +452,11 @@ static void test_statement(const statement_case_t *c)
                 CHECK(answered_error && poisoned, "%s: 제어 쓰기 뒤 fsync 실패는 오류 응답이고 핸들 poison", label);
             }
             result_release(&result);
+            CHECK(tracked_live() == live_baseline && g_double_frees == doubles_before,
+                  "%s: 문장 하나가 끝나면 database.c·heap_store.c의 할당이 모두 정확히 한 번 해제됨 (남은 %zu, 기준 %zu, 이중 해제 %ld)",
+                  label, tracked_live(), live_baseline, g_double_frees - doubles_before);
             assert(database_close(db) == DATABASE_OK);
+            quarantine_flush();
 
             /* 다시 열었을 때의 상태 */
             page_file_set_default_io(NULL);

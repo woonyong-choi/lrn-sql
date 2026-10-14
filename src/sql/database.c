@@ -309,13 +309,17 @@ static bool where_matches(const where_t *where, const value_t *row)
 /* ── 게시 ── */
 
 /*
- * 변경을 게시한다. work·success는 이 함수가 소비한다(성공하면 work가 새 카탈로그가 되고 success가
- * *out이 된다). batch가 있으면 finish부터 한다. 호출자는 batch·heap을 이 함수 뒤에 해제한다.
+ * 변경을 게시한다. work·success·batch는 이 함수가 소비한다: 성공하면 work가 새 카탈로그가 되고
+ * success가 *out이 되며, 어느 경우에도 batch는 메모리를 정확히 한 번 해제한다. 디스크 페이지는
+ * 결과에 따라 다르다. 게시 성공이면 옛 페이지를 release하고, 제어 쓰기 전의 실패면 새로 할당한
+ * 페이지를 release(abort)하며, 불확정이면 어느 페이지도 놓지 않는다(메모리만 해제). batch가 NULL이면
+ * 페이지 변경이 없는 문장이다. 호출자는 이 함수를 부른 뒤 batch를 쓰거나 해제하지 않는다.
+ * heap은 호출자가 닫는다.
  */
-static database_exec_status_t publish(database_t *db, catalog_t *work, catalog_table_id_t id,
-                                      uint32_t primary_root, heap_batch_t *batch,
-                                      const uint32_t *drop_pages, size_t drop_count,
-                                      result_t *success, result_t **out)
+static database_exec_status_t publish_inner(database_t *db, catalog_t *work, catalog_table_id_t id,
+                                            uint32_t primary_root, heap_batch_t *batch,
+                                            const uint32_t *drop_pages, size_t drop_count,
+                                            result_t *success, result_t **out)
 {
     if (batch != NULL) {
         heap_batch_result_t finished;
@@ -364,6 +368,17 @@ static database_exec_status_t publish(database_t *db, catalog_t *work, catalog_t
     errno = saved_errno;
     return fail_result(out, RESULT_E_IO, (int)saved, "게시하지 못했습니다(상태 %d, errno %d). 기존 데이터는 그대로입니다",
                        (int)saved, saved_errno);
+}
+
+static database_exec_status_t publish(database_t *db, catalog_t *work, catalog_table_id_t id,
+                                      uint32_t primary_root, heap_batch_t *batch,
+                                      const uint32_t *drop_pages, size_t drop_count,
+                                      result_t *success, result_t **out)
+{
+    database_exec_status_t status = publish_inner(db, work, id, primary_root, batch, drop_pages,
+                                                  drop_count, success, out);
+    heap_batch_free(batch);
+    return status;
 }
 
 static result_status_t open_command(const char *tag, uint64_t affected, result_t **result)
