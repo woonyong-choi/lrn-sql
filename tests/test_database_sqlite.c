@@ -240,7 +240,8 @@ static char *sqlite_line(const char *s)
                 snprintf(out, sizeof(out), "R:%.15g", strtod(token, NULL));
                 append_str(&line, out);
             } else {
-                char out[64];
+                /* "I:" + token(최대 sizeof(token)-1바이트) + NUL이 모두 들어가는 크기 */
+                char out[2 + sizeof(token)];
                 snprintf(out, sizeof(out), "I:%s", token);
                 append_str(&line, out);
             }
