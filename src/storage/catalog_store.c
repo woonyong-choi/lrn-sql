@@ -52,6 +52,10 @@ static catalog_store_status_t from_catalog(catalog_status_t status)
 catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *catalog)
 {
     if (file == NULL || catalog == NULL) return CATALOG_STORE_INVALID;
+    if (page_file_is_poisoned(file)) {
+        errno = EIO;
+        return CATALOG_STORE_IO;
+    }
     const page_file_control_t *control = page_file_control(file);
     uint32_t old_head = control->catalog_head;
     uint32_t old_size = control->catalog_size;
@@ -76,7 +80,15 @@ catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *ca
     page_file_status_t committed = staged == PAGE_FILE_OK ? page_file_commit(file) : staged;
     if (committed != PAGE_FILE_OK) {
         saved_errno = errno;
-        /* 새 체인은 어떤 제어 페이지도 가리키지 않으므로 보류 해제해도 안전하다. 옛 참조를 되돌려 둔다. */
+        if (staged == PAGE_FILE_OK && page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_UNKNOWN) {
+            /*
+             * 제어 쓰기를 시도했으므로 디스크가 새 체인을 가리킬 수 있다. 어느 체인도 놓지 않는다.
+             * 놓으면 다시 열었을 때 보이는 쪽의 페이지가 재사용될 수 있다.
+             */
+            errno = saved_errno;
+            return CATALOG_STORE_OUTCOME_UNKNOWN;
+        }
+        /* 제어 쓰기 전의 실패라 새 체인은 어떤 제어 페이지도 가리키지 않아 보류 해제해도 안전하다. 옛 참조를 되돌려 둔다. */
         overflow_free(&io, created);
         page_file_stage_catalog(file, old_head, old_size, old_generation);
         errno = saved_errno;
