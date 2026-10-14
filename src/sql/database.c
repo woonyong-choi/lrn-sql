@@ -66,6 +66,7 @@ struct database {
     const uint8_t *cur_sql;
     size_t cur_size;
     const lexer_binding_t *cur_binding;
+    heap_stats_t stats;   /* 문장이 연 heap들이 올리는 누적 계수기 */
 };
 
 static const lexer_limits_t LEXER_LIMITS = {
@@ -362,6 +363,12 @@ database_status_t database_close(database_t *db)
 
 bool database_is_poisoned(const database_t *db) { return db != NULL && db->poisoned; }
 
+void database_scan_stats(const database_t *db, database_scan_stats_t *out)
+{
+    if (db == NULL || out == NULL) return;
+    *out = (database_scan_stats_t){db->stats.rows_scanned, db->stats.index_lookups, db->stats.index_pages_read};
+}
+
 size_t database_table_count(const database_t *db)
 {
     return db != NULL ? catalog_table_count(db->catalog) : 0;
@@ -549,6 +556,7 @@ static database_exec_status_t heap_failure(database_t *db, heap_status_t status,
             return fail_result(db, RESULT_E_IO, (int)status, "저장소 I/O 오류 (%s, errno %d)", where, errno);
         case HEAP_LIMIT:
             return fail_result(db, RESULT_E_LIMIT, (int)status, "행이 저장 한도를 넘습니다 (%s)", where);
+        case HEAP_KEY_EXISTS: return fail_result(db, RESULT_E_CONSTRAINT, 11, "기본 키가 중복됩니다 (%s)", where);
         default:
             return fail_result(db, RESULT_E_INTERNAL, (int)status,
                                "저장소가 손상됐거나 지원하지 않는 형식입니다 (%s, 상태 %d)", where, (int)status);
@@ -600,7 +608,8 @@ static heap_status_t open_heap(database_t *db, const catalog_table_view_t *view,
     if (types == NULL) return HEAP_NOMEM;
     for (size_t i = 0; i < view->column_count; i++) types[i] = view->columns[i].type;
     heap_schema_t schema = {types, view->column_count};
-    heap_status_t status = heap_open_ex(db->file, id, view->heap_root, &schema, &db->ledger, heap);
+    heap_index_spec_t index = {view->primary_key_column, view->primary_root, &db->stats};
+    heap_status_t status = heap_open_indexed(db->file, id, view->heap_root, &schema, &index, &db->ledger, heap);
     q_free(db, types, bytes);
     return status;
 }
@@ -863,7 +872,7 @@ static database_exec_status_t stage_adopt(database_t *db, work_t *work, heap_bat
  * heap은 호출자가 닫는다. 취소는 이 함수의 첫머리에서만 확인한다. 게시를 시작한 뒤에는 보지 않는다.
  */
 static database_exec_status_t publish_inner(database_t *db, work_t *work, catalog_table_id_t id,
-                                            uint32_t primary_root, heap_batch_t *batch,
+                                            heap_batch_t *batch,
                                             const uint32_t *drop_pages, size_t drop_count,
                                             result_t *success, result_t **out)
 {
@@ -872,7 +881,7 @@ static database_exec_status_t publish_inner(database_t *db, work_t *work, catalo
         return cancelled_result(db);
     }
     size_t new_pages = 0;
-    heap_batch_result_t finished = {0, NULL, 0, NULL, 0};
+    heap_batch_result_t finished = {0, NULL, 0, NULL, 0, 0};
     if (batch != NULL) {
         heap_status_t finish = heap_batch_finish(batch, &finished);
         if (finish != HEAP_OK) {
@@ -880,7 +889,7 @@ static database_exec_status_t publish_inner(database_t *db, work_t *work, catalo
             return heap_failure(db, finish, "finish");
         }
         new_pages = finished.new_count;
-        if (catalog_set_locators(work->cat, id, finished.new_root, primary_root) != CATALOG_OK) {
+        if (catalog_set_locators(work->cat, id, finished.new_root, finished.new_primary_root) != CATALOG_OK) {
             publish_discard(db, work, batch, &success);
             return fail_result(db, RESULT_E_INTERNAL, 3, "카탈로그 locator를 갱신하지 못했습니다");
         }
@@ -940,11 +949,11 @@ static database_exec_status_t publish_inner(database_t *db, work_t *work, catalo
 }
 
 static database_exec_status_t publish(database_t *db, work_t *work, catalog_table_id_t id,
-                                      uint32_t primary_root, heap_batch_t *batch,
+                                      heap_batch_t *batch,
                                       const uint32_t *drop_pages, size_t drop_count,
                                       result_t *success, result_t **out)
 {
-    database_exec_status_t status = publish_inner(db, work, id, primary_root, batch, drop_pages,
+    database_exec_status_t status = publish_inner(db, work, id, batch, drop_pages,
                                                   drop_count, success, out);
     heap_batch_free(batch);
     return status;
@@ -1008,7 +1017,7 @@ static database_exec_status_t exec_create(database_t *db, const sqlstmt_create_t
         status = DATABASE_EXEC_NOMEM;
         goto done;
     }
-    status = publish(db, &work, id, 0, NULL, NULL, 0, success, out);
+    status = publish(db, &work, id, NULL, NULL, 0, success, out);
     success = NULL;
 done:
     work_close(db, &work);
@@ -1049,7 +1058,7 @@ static database_exec_status_t exec_drop(database_t *db, const sqlstmt_drop_t *dr
         status = DATABASE_EXEC_NOMEM;
         goto done;
     }
-    status = publish(db, &work, id, 0, NULL, pages, page_count, success, out);
+    status = publish(db, &work, id, NULL, pages, page_count, success, out);
     success = NULL;
 done:
     work_close(db, &work);
@@ -1057,6 +1066,41 @@ done:
     heap_free_pages(heap, pages, page_count);
     heap_close(heap);
     return status;
+}
+
+/* ── 기본 키 색인 ── */
+
+/* WHERE가 색인된 기본 키 컬럼의 등가 비교(NULL이 아닌 값)이면 색인으로 풀 수 있다. */
+static bool is_key_equality(const catalog_table_view_t *view, const heap_t *heap, const where_t *where)
+{
+    return heap_is_indexed(heap) && where->present && !where->never && where->op == SQLSTMT_OP_EQ &&
+           where->column == view->primary_key_column;
+}
+
+static database_exec_status_t locate_key(database_t *db, heap_t *heap, const where_t *where, bool *is_hit,
+                                         heap_locator_t *at)
+{
+    heap_status_t found = heap_find_key(heap, where->literal.view.integer, at);
+    *is_hit = found == HEAP_OK;
+    return found == HEAP_OK || found == HEAP_NOT_FOUND ? DATABASE_EXEC_OK : heap_failure(db, found, "lookup");
+}
+
+/* INSERT의 중복 검사와 identity의 현재 최대 키를 전체 스캔 없이 색인에서 얻는다. */
+static database_exec_status_t probe_key_index(database_t *db, const catalog_table_view_t *view, heap_t *heap,
+                                              const value_t *key, bool check_pk, bool *any, int64_t *max_key)
+{
+    if (check_pk) {
+        heap_locator_t at;
+        heap_status_t found = heap_find_key(heap, key->view.integer, &at);
+        if (found == HEAP_OK) {
+            size_t pk = view->primary_key_column;
+            return fail_result(db, RESULT_E_CONSTRAINT, 11, "기본 키가 중복됩니다: %.*s",
+                               name_len(view->columns[pk].name_bytes), view->columns[pk].name);
+        }
+        if (found != HEAP_NOT_FOUND) return heap_failure(db, found, "lookup");
+    }
+    heap_status_t maximum = heap_max_key(heap, any, max_key);
+    return maximum == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, maximum, "max");
 }
 
 /* ── INSERT ── */
@@ -1134,38 +1178,43 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
     if (auto_id || check_pk) {
         int64_t max_key = INT64_MIN;
         bool any = false;
-        scanned = q_calloc(db, n, sizeof(*scanned));
-        if (scanned == NULL) {
-            status = DATABASE_EXEC_NOMEM;
-            goto done;
-        }
-        heap_status_t opened_cursor = heap_cursor_open(heap, &cursor);
-        if (opened_cursor != HEAP_OK) {
-            status = heap_failure(db, opened_cursor, "cursor");
-            goto done;
-        }
-        for (;;) {
-            if (cancel_requested(db)) {
-                status = cancelled_result(db);
+        if (heap_is_indexed(heap)) {
+            status = probe_key_index(db, &view, heap, &cells[pk], check_pk, &any, &max_key);
+            if (status != DATABASE_EXEC_OK) goto done;
+        } else {
+            scanned = q_calloc(db, n, sizeof(*scanned));
+            if (scanned == NULL) {
+                status = DATABASE_EXEC_NOMEM;
                 goto done;
             }
-            heap_locator_t at;
-            heap_status_t next = heap_cursor_next(cursor, scanned, &at);
-            if (next == HEAP_DONE) break;
-            if (next != HEAP_OK) {
-                status = heap_failure(db, next, "scan");
+            heap_status_t opened_cursor = heap_cursor_open(heap, &cursor);
+            if (opened_cursor != HEAP_OK) {
+                status = heap_failure(db, opened_cursor, "cursor");
                 goto done;
             }
-            if (check_pk && values_equal(&scanned[pk].view, &cells[pk].view)) {
-                status = fail_result(db, RESULT_E_CONSTRAINT, 11, "기본 키가 중복됩니다: %.*s",
-                                     name_len(view.columns[pk].name_bytes), view.columns[pk].name);
-                goto done;
+            for (;;) {
+                if (cancel_requested(db)) {
+                    status = cancelled_result(db);
+                    goto done;
+                }
+                heap_locator_t at;
+                heap_status_t next = heap_cursor_next(cursor, scanned, &at);
+                if (next == HEAP_DONE) break;
+                if (next != HEAP_OK) {
+                    status = heap_failure(db, next, "scan");
+                    goto done;
+                }
+                if (check_pk && values_equal(&scanned[pk].view, &cells[pk].view)) {
+                    status = fail_result(db, RESULT_E_CONSTRAINT, 11, "기본 키가 중복됩니다: %.*s",
+                                         name_len(view.columns[pk].name_bytes), view.columns[pk].name);
+                    goto done;
+                }
+                if (auto_id && scanned[pk].view.type == VALUE_INTEGER) {
+                    if (!any || scanned[pk].view.integer > max_key) max_key = scanned[pk].view.integer;
+                    any = true;
+                }
+                clear_cells(scanned, n);
             }
-            if (auto_id && scanned[pk].view.type == VALUE_INTEGER) {
-                if (!any || scanned[pk].view.integer > max_key) max_key = scanned[pk].view.integer;
-                any = true;
-            }
-            clear_cells(scanned, n);
         }
         if (auto_id) {
             uint64_t next_value = 0;
@@ -1222,7 +1271,7 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
     }
     q_free(db, views, views_bytes);
     views = NULL;
-    status = publish(db, &work, id, view.primary_root, batch, NULL, 0, success, out);
+    status = publish(db, &work, id, batch, NULL, 0, success, out);
     success = NULL;
     batch = NULL;
 done:
@@ -1244,6 +1293,36 @@ done:
 }
 
 /* ── SELECT ── */
+
+typedef struct {
+    result_builder_t *builder;
+    const size_t *picks;
+    size_t selected;
+    value_view_t *cells;
+} projection_t;
+
+static database_exec_status_t append_result_row(database_t *db, const projection_t *projection, const value_t *row)
+{
+    for (size_t i = 0; i < projection->selected; i++) projection->cells[i] = row[projection->picks[i]].view;
+    result_status_t added = result_builder_add_row(projection->builder, projection->cells, projection->selected);
+    if (added == RESULT_NOMEM) return DATABASE_EXEC_NOMEM;
+    if (added != RESULT_OK) return fail_result(db, RESULT_E_LIMIT, 16, "결과가 한도를 넘습니다");
+    return DATABASE_EXEC_OK;
+}
+
+static database_exec_status_t select_by_key(database_t *db, heap_t *heap, const where_t *where, value_t *row,
+                                            const projection_t *projection)
+{
+    bool is_hit;
+    heap_locator_t at;
+    database_exec_status_t status = locate_key(db, heap, where, &is_hit, &at);
+    if (status != DATABASE_EXEC_OK || !is_hit) return status;
+    heap_status_t got = heap_get(heap, at, row);
+    if (got != HEAP_OK) return heap_failure(db, got, "lookup");
+    status = append_result_row(db, projection, row);
+    heap_release_row(heap, row);
+    return status;
+}
 
 static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
 {
@@ -1288,7 +1367,8 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         status = heap_failure(db, opened, "open");
         goto done;
     }
-    heap_status_t made = heap_cursor_open(heap, &cursor);
+    bool by_key = is_key_equality(&view, heap, &where);
+    heap_status_t made = by_key ? HEAP_OK : heap_cursor_open(heap, &cursor);
     if (made != HEAP_OK) {
         status = heap_failure(db, made, "cursor");
         goto done;
@@ -1303,7 +1383,12 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         status = fail_result(db, RESULT_E_LIMIT, 15, "결과 컬럼 한도를 넘습니다");
         goto done;
     }
-    for (;;) {
+    projection_t projection = {builder, picks, selected, cells};
+    if (by_key) {
+        status = select_by_key(db, heap, &where, row, &projection);
+        if (status != DATABASE_EXEC_OK) goto done;
+    }
+    while (!by_key) {
         if (cancel_requested(db)) {
             status = cancelled_result(db);
             goto done;
@@ -1316,16 +1401,8 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
             goto done;
         }
         if (where_matches(&where, row)) {
-            for (size_t i = 0; i < selected; i++) cells[i] = row[picks[i]].view;
-            result_status_t added = result_builder_add_row(builder, cells, selected);
-            if (added == RESULT_NOMEM) {
-                status = DATABASE_EXEC_NOMEM;
-                goto done;
-            }
-            if (added != RESULT_OK) {
-                status = fail_result(db, RESULT_E_LIMIT, 16, "결과가 한도를 넘습니다");
-                goto done;
-            }
+            status = append_result_row(db, &projection, row);
+            if (status != DATABASE_EXEC_OK) goto done;
         }
         clear_cells(row, n);
     }
@@ -1415,6 +1492,23 @@ static bool matches_add(database_t *db, matches_t *matches, heap_locator_t locat
     return true;
 }
 
+/* 기본 키 등가 WHERE에 맞는 행(있다면 하나)을 색인으로 찾아 모은다. row는 호출자가 쓰는 임시 배열이다. */
+static database_exec_status_t match_by_key(database_t *db, heap_t *heap, const where_t *where, value_t *row,
+                                           bool keep_values, matches_t *matches)
+{
+    bool is_hit;
+    heap_locator_t at;
+    database_exec_status_t status = locate_key(db, heap, where, &is_hit, &at);
+    if (status != DATABASE_EXEC_OK || !is_hit) return status;
+    if (keep_values) {
+        heap_status_t got = heap_get(heap, at, row);
+        if (got != HEAP_OK) return heap_failure(db, got, "lookup");
+    }
+    bool is_added = matches_add(db, matches, at, row, keep_values);
+    if (keep_values) heap_release_row(heap, row);
+    return is_added ? DATABASE_EXEC_OK : DATABASE_EXEC_NOMEM;
+}
+
 typedef struct {
     const value_view_t *view;
 } key_ref_t;
@@ -1457,6 +1551,30 @@ typedef struct {
     size_t column;
     value_t value;
 } assignment_c;
+
+/*
+ * 색인을 쓰는 표에서 UPDATE가 쓰는 새 기본 키가 유일한지 본다. 같은 값을 둘 이상의 행에 쓰거나 일치하지 않은
+ * 다른 행이 이미 가진 키이면 중복이다.
+ */
+static database_exec_status_t check_new_keys(database_t *db, heap_t *heap, const catalog_table_view_t *view,
+                                             const assignment_c *assigns, size_t assign_count,
+                                             const matches_t *matches)
+{
+    size_t pk = view->primary_key_column;
+    for (size_t i = 0; i < assign_count; i++) {
+        if (assigns[i].column != pk || assigns[i].value.view.type == VALUE_NULL) continue;
+        heap_locator_t at;
+        heap_status_t found = heap_find_key(heap, assigns[i].value.view.integer, &at);
+        if (found != HEAP_OK && found != HEAP_NOT_FOUND) return heap_failure(db, found, "lookup");
+        bool is_other = found == HEAP_OK && !(matches->count == 1 && matches->items[0].locator.slot == at.slot &&
+                                              matches->items[0].locator.directory_index == at.directory_index);
+        if (matches->count > 1 || is_other) {
+            return fail_result(db, RESULT_E_CONSTRAINT, 11, "기본 키가 중복됩니다: %.*s",
+                               name_len(view->columns[pk].name_bytes), view->columns[pk].name);
+        }
+    }
+    return DATABASE_EXEC_OK;
+}
 
 static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t *update, result_t **out)
 {
@@ -1522,12 +1640,18 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
         status = heap_failure(db, opened, "open");
         goto done;
     }
-    heap_status_t made = heap_cursor_open(heap, &cursor);
+    bool by_key = is_key_equality(&view, heap, &where);
+    bool is_indexed = heap_is_indexed(heap);
+    heap_status_t made = by_key ? HEAP_OK : heap_cursor_open(heap, &cursor);
     if (made != HEAP_OK) {
         status = heap_failure(db, made, "cursor");
         goto done;
     }
-    for (;;) {
+    if (by_key) {
+        status = match_by_key(db, heap, &where, row, true, &matches);
+        if (status != DATABASE_EXEC_OK) goto done;
+    }
+    while (!by_key) {
         if (cancel_requested(db)) {
             status = cancelled_result(db);
             goto done;
@@ -1544,7 +1668,7 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
                 status = DATABASE_EXEC_NOMEM;
                 goto done;
             }
-        } else if (pk_assigned && row[pk].view.type != VALUE_NULL) {
+        } else if (pk_assigned && !is_indexed && row[pk].view.type != VALUE_NULL) {
             /* 배열을 하나씩 늘린다. 새 크기를 먼저 reserve하고 복사 뒤 옛 크기를 돌려준다 */
             size_t grown_cap = other_count + 1;
             if (grown_cap > SIZE_MAX / sizeof(value_t) || !q_reserve(db, grown_cap * sizeof(value_t))) {
@@ -1580,7 +1704,10 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
         goto done;
     }
 
-    if (pk_assigned) {
+    if (pk_assigned && is_indexed) {
+        status = check_new_keys(db, heap, &view, assigns, update->assignment_count, &matches);
+        if (status != DATABASE_EXEC_OK) goto done;
+    } else if (pk_assigned) {
         /* 갱신 뒤 기본 키가 유일한지: 일치하지 않은 행의 키 + 새 키를 정렬해 이웃을 비교한다 */
         if (other_count + matches.count > SIZE_MAX / sizeof(*keys)) {
             status = DATABASE_EXEC_NOMEM;
@@ -1637,7 +1764,7 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
         status = DATABASE_EXEC_NOMEM;
         goto done;
     }
-    status = publish(db, &work, id, view.primary_root, batch, NULL, 0, success, out);
+    status = publish(db, &work, id, batch, NULL, 0, success, out);
     success = NULL;
     batch = NULL;
 done:
@@ -1690,12 +1817,17 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
         status = heap_failure(db, opened, "open");
         goto done;
     }
-    heap_status_t made = heap_cursor_open(heap, &cursor);
+    bool by_key = is_key_equality(&view, heap, &where);
+    heap_status_t made = by_key ? HEAP_OK : heap_cursor_open(heap, &cursor);
     if (made != HEAP_OK) {
         status = heap_failure(db, made, "cursor");
         goto done;
     }
-    for (;;) {
+    if (by_key) {
+        status = match_by_key(db, heap, &where, row, false, &matches);
+        if (status != DATABASE_EXEC_OK) goto done;
+    }
+    while (!by_key) {
         if (cancel_requested(db)) {
             status = cancelled_result(db);
             goto done;
@@ -1750,7 +1882,7 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
         status = DATABASE_EXEC_NOMEM;
         goto done;
     }
-    status = publish(db, &work, id, view.primary_root, batch, NULL, 0, success, out);
+    status = publish(db, &work, id, batch, NULL, 0, success, out);
     success = NULL;
     batch = NULL;
 done:

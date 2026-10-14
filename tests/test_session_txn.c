@@ -523,7 +523,64 @@ static void test_durable_restart(void)
     assert(open_env(&env, true, false, 64u << 20));
     assert(session_open(env.db, &s) == SESSION_OK);
     expect(s, "SELECT * FROM t", "[2] 1|'d2'/ 2|'after-kill'");
+    /* 복구 뒤의 기본 키 색인도 같은 상태를 가리킨다 */
+    expect(s, "SELECT * FROM t WHERE id = 2", "[1] 2|'after-kill'");
+    expect(s, "SELECT * FROM t WHERE id = 3", "[0]");
     session_close(s);
+    close_env(&env);
+}
+
+/* ── 6-1. 기본 키 색인과 트랜잭션(#158) ── */
+
+static void test_key_index_follows_transactions(void)
+{
+    printf("\n[기본 키 색인이 트랜잭션의 commit·rollback을 따른다]\n");
+    create_plain_file();
+    env_t env;
+    assert(open_env(&env, true, true, 64u << 20));
+    session_t *a = NULL, *b = NULL;
+    assert(session_open(env.db, &a) == SESSION_OK && session_open(env.db, &b) == SESSION_OK);
+    schema(a);
+    ok(a, "INSERT INTO t (v) VALUES ('base1')");
+    ok(a, "INSERT INTO t (v) VALUES ('base2')");
+
+    expect(a, "BEGIN", "CMD BEGIN 0");
+    ok(a, "INSERT INTO t VALUES (10, 'pending')");
+    ok(a, "UPDATE t SET id = 11 WHERE id = 10");
+    ok(a, "DELETE FROM t WHERE id = 1");
+    expect(a, "SELECT * FROM t WHERE id = 11", "[1] 11|'pending'");
+    expect(a, "SELECT * FROM t WHERE id = 10", "[0]");
+    expect(a, "SELECT * FROM t WHERE id = 1", "[0]");
+    char *dup = run(a, "INSERT INTO t VALUES (11, 'dup')");
+    CHECK(strncmp(dup, "ERR ", 4) == 0, "작업 안의 중복 삽입은 거절: %s", dup);
+    free(dup);
+    expect(a, "ROLLBACK", "CMD ROLLBACK 0");
+    expect(a, "SELECT * FROM t WHERE id = 1", "[1] 1|'base1'");
+    expect(a, "SELECT * FROM t WHERE id = 11", "[0]");
+    expect(b, "SELECT * FROM t WHERE id = 10", "[0]");
+    ok(a, "INSERT INTO t VALUES (10, 'reuse')");
+
+    expect(a, "BEGIN DURABLE", "CMD BEGIN 0");
+    ok(a, "UPDATE t SET id = 20 WHERE id = 2");
+    ok(a, "INSERT INTO t VALUES (21, 'second')");
+    ok(a, "DELETE FROM t WHERE id = 21");
+    ok(a, "INSERT INTO t VALUES (21, 'third')");
+    expect(a, "COMMIT", "CMD COMMIT 0");
+    expect(b, "SELECT * FROM t WHERE id = 20", "[1] 20|'base2'");
+    expect(b, "SELECT * FROM t WHERE id = 2", "[0]");
+    expect(b, "SELECT * FROM t WHERE id = 21", "[1] 21|'third'");
+    session_close(a);
+    session_close(b);
+    close_env(&env);
+
+    assert(open_env(&env, true, false, 64u << 20));
+    assert(session_open(env.db, &a) == SESSION_OK);
+    expect(a, "SELECT * FROM t WHERE id = 20", "[1] 20|'base2'");
+    expect(a, "SELECT * FROM t WHERE id = 21", "[1] 21|'third'");
+    expect(a, "SELECT * FROM t WHERE id = 10", "[1] 10|'reuse'");
+    expect(a, "SELECT * FROM t WHERE id = 11", "[0]");
+    expect(a, "SELECT * FROM t WHERE id = 2", "[0]");
+    session_close(a);
     close_env(&env);
 }
 
@@ -575,6 +632,7 @@ int main(void)
     test_waiting_begin();
     test_budget();
     test_durable_restart();
+    test_key_index_follows_transactions();
     test_rejections();
     fresh_dir();
     rmdir(DIR_NAME);

@@ -302,6 +302,15 @@ static char *snapshot(database_t *db)
         put(&out, "%s=%s;", tables[i], dump);
         free(dump);
     }
+    /* 기본 키 색인으로 읽은 행: 스캔 결과와 같은 상태를 가리켜야 한다(낡은 locator는 다른 값을 낸다) */
+    static const int probes[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 30, 40};
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        char sql[64];
+        snprintf(sql, sizeof(sql), "SELECT id, name, bio FROM users WHERE id = %d", probes[i]);
+        char *dump = select_dump(db, sql);
+        put(&out, "k%d=%s;", probes[i], dump);
+        free(dump);
+    }
     put(&out, "n=%zu", database_table_count(db));
     return out.text;
 }
@@ -348,6 +357,11 @@ static const statement_case_t CASES[] = {
     {"update shrink", "UPDATE users SET bio = 'x'", false},
     {"delete", "DELETE FROM users WHERE id = 2", false},
     {"drop", "DROP TABLE logs", false},
+    {"insert key", "INSERT INTO users (id, name) VALUES (30, 'thirty')", false},
+    {"update key", "UPDATE users SET id = 40 WHERE id = 2", false},
+    {"update by key big", "UPDATE users SET bio = ? WHERE id = 3", true},
+    {"delete last key", "DELETE FROM users WHERE id = 6", false},
+    {"drop indexed", "DROP TABLE users", false},
 };
 
 static database_exec_status_t run_case(database_t *db, const statement_case_t *c, result_t **result)
