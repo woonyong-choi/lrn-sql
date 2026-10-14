@@ -47,7 +47,52 @@
 #include <ctype.h>
 #include <unistd.h>
 /* readline 제거 — fgets 기반 입력 */
-#define MAX_INPUT_LEN 4096
+/* 한 줄 버퍼: 문장 한도 + CRLF 2바이트 + NUL. 넘는 줄은 통째로 버린다 */
+#define MAX_INPUT_LEN (PARSER_MAX_INPUT_LEN + 3)
+
+typedef enum {
+    LINE_OK,
+    LINE_EOF,
+    LINE_TOO_LONG,
+    LINE_HAS_NUL
+} line_status_t;
+
+/*
+ * read_line - stdin에서 개행까지 한 줄을 읽어 개행 없이 buf에 담는다.
+ *
+ * 개행 앞의 CR은 줄 끝으로 본다. 한도를 넘거나 NUL을 담은 줄은 개행까지 모두 읽어 버리고 상태로 알린다.
+ * 남은 꼬리가 다음 문장으로 읽히거나 NUL 뒤가 조용히 잘리는 일을 막는다.
+ */
+static line_status_t read_line(char *buf, size_t capacity)
+{
+    size_t len = 0;
+    int c;
+    int read_any = 0;
+    line_status_t status = LINE_OK;
+
+    while ((c = getc(stdin)) != EOF) {
+        read_any = 1;
+        if (c == '\n') {
+            break;
+        }
+        if (c == '\0') {
+            status = LINE_HAS_NUL;
+        }
+        if (len + 1 < capacity) {
+            buf[len++] = (char)c;
+        } else if (status == LINE_OK) {
+            status = LINE_TOO_LONG;
+        }
+    }
+    if (len > 0 && buf[len - 1] == '\r') {
+        len--;
+    }
+    buf[len] = '\0';
+    if (status == LINE_OK && len > PARSER_MAX_INPUT_LEN) {
+        status = LINE_TOO_LONG;
+    }
+    return read_any ? status : LINE_EOF;
+}
 
 /*
  * cmd_btree - B+ tree 구조를 출력한다.
@@ -262,8 +307,18 @@ int main(int argc, char **argv)
     while (1) {
         printf("minidb> ");
         fflush(stdout);
-        if (fgets(line, sizeof(line), stdin) == NULL) {
+        line_status_t read_status = read_line(line, sizeof(line));
+        if (read_status == LINE_EOF) {
             break; /* EOF (Ctrl+D) */
+        }
+        if (read_status == LINE_TOO_LONG) {
+            printf("오류: 입력이 너무 깁니다 (최대 %d바이트). 실행하지 않았습니다\n",
+                   PARSER_MAX_INPUT_LEN);
+            continue;
+        }
+        if (read_status == LINE_HAS_NUL) {
+            printf("오류: 입력에 NUL 바이트가 있어 실행하지 않았습니다\n");
+            continue;
         }
 
         /* 앞뒤 공백/줄바꿈 제거 */
