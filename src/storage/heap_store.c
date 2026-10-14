@@ -40,6 +40,7 @@ struct heap {
     uint32_t *dirs;         /* 디렉터리 페이지 ID, 체인 순서 */
     size_t dir_count;
     size_t dir_cap;
+    bool is_tree;           /* true면 dirs[0]은 LHD2 루트이고 dirs[1..]이 잎이다. false면 LHD1 체인 순서 */
     page_file_status_t last_status;
 };
 
@@ -406,6 +407,71 @@ static void heap_destroy(heap_t *heap)
     acct_release(&ledger, bytes);
 }
 
+/* 디렉터리 페이지 한 장의 종류와 table ID를 확인하고 본문을 읽는다. 다른 종류는 UNSUPPORTED_LOCATOR다. */
+static heap_status_t read_directory_page(heap_t *heap, uint32_t page, uint8_t *body)
+{
+    page_file_page_info_t info;
+    page_file_status_t status = page_file_page_info(heap->file, page, &info);
+    if (status != PAGE_FILE_OK) return map_pf(heap, status);
+    if (info.kind != PAGE_KIND_DIRECTORY) return HEAP_UNSUPPORTED_LOCATOR;
+    if (info.table_id != heap->table_id) return HEAP_CORRUPT;
+    status = page_file_read(heap->file, page, PAGE_KIND_DIRECTORY, heap->table_id, body);
+    return status == PAGE_FILE_OK ? HEAP_OK : map_pf(heap, status);
+}
+
+/* 항목 수가 한 페이지의 한도 안이고 항목 뒤가 모두 0인지 검사한다. */
+static heap_status_t check_directory_count(const uint8_t *body, uint32_t *count)
+{
+    *count = get_u32(body + 16);
+    if (*count > HEAP_DIRECTORY_ENTRIES) return HEAP_CORRUPT;
+    for (size_t i = HEAP_DIRECTORY_HEADER_BYTES + (size_t)*count * 4; i < PAGE_BODY_BYTES; i++) {
+        if (body[i] != 0) return HEAP_CORRUPT;
+    }
+    return HEAP_OK;
+}
+
+static heap_status_t read_tree_leaf(heap_t *heap, uint32_t page, bool is_last, u32_list_t *entries)
+{
+    uint8_t body[PAGE_BODY_BYTES];
+    heap_status_t result = read_directory_page(heap, page, body);
+    if (result == HEAP_UNSUPPORTED_LOCATOR) return HEAP_CORRUPT;
+    if (result != HEAP_OK) return result;
+    if (memcmp(body, HEAP_DIRECTORY_MAGIC, 4) != 0 || get_u16(body + 4) != HEAP_DIRECTORY_VERSION ||
+        get_u16(body + 6) != 0 || get_u32(body + 8) != heap->table_id || get_u32(body + 12) != PAGE_FILE_NO_PAGE) {
+        return HEAP_CORRUPT;
+    }
+    uint32_t count;
+    result = check_directory_count(body, &count);
+    if (result != HEAP_OK) return result;
+    if (count == 0 || (!is_last && count != HEAP_DIRECTORY_ENTRIES)) return HEAP_CORRUPT;
+    if (!list_reserve(entries, count, &heap->ledger)) return HEAP_NOMEM;
+    for (uint32_t i = 0; i < count; i++) {
+        entries->items[entries->len++] = get_u32(body + HEAP_DIRECTORY_HEADER_BYTES + (size_t)i * 4);
+    }
+    return HEAP_OK;
+}
+
+/* LHD2 루트 본문(body)을 해석해 잎을 모두 읽는다. 루트 머리글의 어긋남은 첫 페이지 규칙대로 UNSUPPORTED다. */
+static heap_status_t read_tree(heap_t *heap, uint32_t root, const uint8_t *body, u32_list_t *entries,
+                               u32_list_t *dirs)
+{
+    if (get_u16(body + 4) != HEAP_TREE_ROOT_VERSION || get_u16(body + 6) != 0 ||
+        get_u32(body + 8) != heap->table_id || get_u32(body + 12) != 0) {
+        return HEAP_UNSUPPORTED_LOCATOR;
+    }
+    uint32_t leaves;
+    heap_status_t result = check_directory_count(body, &leaves);
+    if (result != HEAP_OK) return result;
+    if (leaves == 0) return HEAP_CORRUPT;
+    if (!list_push(dirs, root, &heap->ledger) || !list_reserve(dirs, leaves, &heap->ledger)) return HEAP_NOMEM;
+    for (uint32_t i = 0; i < leaves && result == HEAP_OK; i++) {
+        uint32_t leaf = get_u32(body + HEAP_DIRECTORY_HEADER_BYTES + (size_t)i * 4);
+        dirs->items[dirs->len++] = leaf;
+        result = read_tree_leaf(heap, leaf, i + 1 == leaves, entries);
+    }
+    return result;
+}
+
 static heap_status_t read_directory(heap_t *heap, const page_file_control_t *control)
 {
     uint32_t page = heap->root;
@@ -413,6 +479,7 @@ static heap_status_t read_directory(heap_t *heap, const page_file_control_t *con
     u32_list_t entries = {NULL, 0, 0};
     u32_list_t dirs = {NULL, 0, 0};
     heap_status_t result = HEAP_OK;
+    bool is_tree = false;
     uint8_t body[PAGE_BODY_BYTES];
     /* 게시 전인 변경(한 commit으로 묶는 여러 문장)이 새로 할당한 페이지도 범위 안이다 */
     uint32_t allocated = page_file_allocated_pages(heap->file);
@@ -420,26 +487,21 @@ static heap_status_t read_directory(heap_t *heap, const page_file_control_t *con
 
     while (page != PAGE_FILE_NO_PAGE && result == HEAP_OK) {
         if (dirs.len >= allocated) { result = HEAP_CORRUPT; break; }  /* 순환 */
-        page_file_page_info_t info;
-        page_file_status_t status = page_file_page_info(heap->file, page, &info);
-        if (status != PAGE_FILE_OK) { result = map_pf(heap, status); break; }
-        if (info.kind != PAGE_KIND_DIRECTORY) {
-            result = dirs.len == 0 ? HEAP_UNSUPPORTED_LOCATOR : HEAP_CORRUPT;
+        result = read_directory_page(heap, page, body);
+        if (result == HEAP_UNSUPPORTED_LOCATOR && dirs.len > 0) result = HEAP_CORRUPT;
+        if (result != HEAP_OK) break;
+        if (dirs.len == 0 && memcmp(body, HEAP_TREE_ROOT_MAGIC, 4) == 0) {
+            is_tree = true;
+            result = read_tree(heap, page, body, &entries, &dirs);
             break;
         }
-        if (info.table_id != heap->table_id) { result = HEAP_CORRUPT; break; }
-        status = page_file_read(heap->file, page, PAGE_KIND_DIRECTORY, heap->table_id, body);
-        if (status != PAGE_FILE_OK) { result = map_pf(heap, status); break; }
         if (memcmp(body, HEAP_DIRECTORY_MAGIC, 4) != 0 || get_u16(body + 4) != HEAP_DIRECTORY_VERSION ||
             get_u16(body + 6) != 0 || get_u32(body + 8) != heap->table_id) {
             result = dirs.len == 0 ? HEAP_UNSUPPORTED_LOCATOR : HEAP_CORRUPT;
             break;
         }
-        uint32_t count = get_u32(body + 16);
-        if (count > HEAP_DIRECTORY_ENTRIES) { result = HEAP_CORRUPT; break; }
-        for (size_t i = HEAP_DIRECTORY_HEADER_BYTES + (size_t)count * 4; i < PAGE_BODY_BYTES; i++) {
-            if (body[i] != 0) { result = HEAP_CORRUPT; break; }
-        }
+        uint32_t count;
+        result = check_directory_count(body, &count);
         if (result != HEAP_OK) break;
         if (!list_push(&dirs, page, ledger) || !list_reserve(&entries, count, ledger)) { result = HEAP_NOMEM; break; }
         for (uint32_t i = 0; i < count; i++) {
@@ -483,6 +545,7 @@ static heap_status_t read_directory(heap_t *heap, const page_file_control_t *con
     heap->dirs = dirs.items;
     heap->dir_count = dirs.len;
     heap->dir_cap = dirs.cap;
+    heap->is_tree = is_tree;
     return HEAP_OK;
 }
 
@@ -1400,6 +1463,113 @@ heap_status_t heap_batch_delete(heap_batch_t *batch, heap_locator_t locator)
 
 /* ── 게시 준비·정리 ── */
 
+static heap_status_t write_directory_page(heap_t *heap, uint32_t page, const char *magic, uint16_t version,
+                                          const uint32_t *items, size_t count)
+{
+    uint8_t body[PAGE_BODY_BYTES];
+    memset(body, 0, sizeof(body));
+    memcpy(body, magic, 4);
+    body[4] = (uint8_t)version;
+    put_u32(body + 8, heap->table_id);
+    put_u32(body + 16, (uint32_t)count);
+    for (size_t k = 0; k < count; k++) put_u32(body + HEAP_DIRECTORY_HEADER_BYTES + k * 4, items[k]);
+    page_file_status_t written = page_file_write(heap->file, page, PAGE_KIND_DIRECTORY, heap->table_id, body);
+    return written == PAGE_FILE_OK ? HEAP_OK : map_pf(heap, written);
+}
+
+/* 옛 트리의 leaf번째 잎이 담던 항목이 이번 batch에서 하나도 바뀌지 않았으면 옛 잎을 그대로 쓸 수 있다. */
+static bool leaf_unchanged(const heap_batch_t *batch, size_t leaf)
+{
+    const heap_t *heap = batch->heap;
+    if (!heap->is_tree || leaf + 1 >= heap->dir_count) return false;
+    size_t first = leaf * HEAP_DIRECTORY_ENTRIES;
+    size_t end = first + HEAP_DIRECTORY_ENTRIES;
+    if (end > batch->entry_count) end = batch->entry_count;
+    for (size_t i = first; i < end; i++) {
+        if (batch->dirty[i]) return false;
+    }
+    return true;
+}
+
+/* 새 디렉터리의 i번째 페이지가 옛 트리의 바뀌지 않은 잎이면 true다. 새로 할당한 번호는 살아 있는 옛 페이지와 겹치지 않는다. */
+static bool is_reused_directory(const heap_t *heap, size_t pages, const uint32_t *ids, size_t i)
+{
+    return heap->is_tree && pages > 1 && 0 < i && i < pages && i < heap->dir_count && ids[i] == heap->dirs[i];
+}
+
+/*
+ * 새 디렉터리의 페이지 번호를 정한다. 잎이 둘 이상이면 ids[0]이 루트, ids[1..]이 잎이고 하나면 ids[0]이 그 한 장이다.
+ * 바뀌지 않은 잎은 옛 번호를 그대로 두고 나머지는 새로 할당한다.
+ */
+static heap_status_t assign_directory_pages(heap_batch_t *batch, size_t pages, uint32_t *ids)
+{
+    for (size_t i = 0; i < pages; i++) {
+        if (pages > 1 && i > 0 && leaf_unchanged(batch, i - 1)) {
+            ids[i] = batch->heap->dirs[i];
+            continue;
+        }
+        heap_status_t status = batch_alloc(batch, &ids[i]);
+        if (status != HEAP_OK) return status;
+    }
+    return HEAP_OK;
+}
+
+static heap_status_t write_new_directories(heap_batch_t *batch, size_t pages, const uint32_t *ids)
+{
+    heap_t *heap = batch->heap;
+    size_t lead = pages > 1 ? 1 : 0;
+    for (size_t i = lead; i < pages; i++) {
+        if (is_reused_directory(heap, pages, ids, i)) continue;
+        size_t first = (i - lead) * HEAP_DIRECTORY_ENTRIES;
+        size_t take = batch->entry_count - first;
+        if (take > HEAP_DIRECTORY_ENTRIES) take = HEAP_DIRECTORY_ENTRIES;
+        heap_status_t status = write_directory_page(heap, ids[i], HEAP_DIRECTORY_MAGIC, HEAP_DIRECTORY_VERSION,
+                                                    batch->entries + first, take);
+        if (status != HEAP_OK) return status;
+    }
+    if (lead == 0) return HEAP_OK;
+    return write_directory_page(heap, ids[0], HEAP_TREE_ROOT_MAGIC, HEAP_TREE_ROOT_VERSION, ids + 1, pages - 1);
+}
+
+static void retire_old_directories(heap_batch_t *batch, size_t pages, const uint32_t *ids)
+{
+    const heap_t *heap = batch->heap;
+    for (size_t i = 0; i < heap->dir_count; i++) {
+        if (is_reused_directory(heap, pages, ids, i)) continue;
+        batch->old_pages.items[batch->old_pages.len++] = heap->dirs[i];
+    }
+}
+
+/*
+ * 바뀐 record page를 가리키는 새 디렉터리를 쓰고 그 루트를 돌려준다. record page가 한 장의 한도 이하면 LHD1 한 장,
+ * 그보다 많으면 LHD2 루트와 잎이다. 트리 heap은 바뀐 잎과 루트만 새로 쓰고, 체인이나 한 장짜리에서 오면 모두 새로 쓴다.
+ */
+static heap_status_t publish_directories(heap_batch_t *batch, uint32_t *new_root)
+{
+    heap_t *heap = batch->heap;
+    size_t leaves = (batch->entry_count + HEAP_DIRECTORY_ENTRIES - 1) / HEAP_DIRECTORY_ENTRIES;
+    size_t pages = leaves > 1 ? leaves + 1 : leaves;
+    *new_root = PAGE_FILE_NO_PAGE;
+    if (leaves > HEAP_DIRECTORY_ENTRIES) return HEAP_LIMIT;
+    if (!list_reserve(&batch->old_pages, heap->dir_count, &batch->ledger)) return HEAP_NOMEM;
+    size_t ids_bytes = pages * sizeof(uint32_t);
+    bool ids_reserved = acct_reserve(&batch->ledger, ids_bytes);
+    uint32_t *ids = ids_reserved && pages > 0 ? malloc(ids_bytes) : NULL;
+    if (pages > 0 && ids == NULL) {
+        if (ids_reserved) acct_release(&batch->ledger, ids_bytes);
+        return HEAP_NOMEM;
+    }
+    heap_status_t status = pages > 0 ? assign_directory_pages(batch, pages, ids) : HEAP_OK;
+    if (status == HEAP_OK && pages > 0) status = write_new_directories(batch, pages, ids);
+    if (status == HEAP_OK) {
+        retire_old_directories(batch, pages, ids);
+        if (pages > 0) *new_root = ids[0];
+    }
+    free(ids);
+    if (ids_reserved) acct_release(&batch->ledger, ids_bytes);
+    return status;
+}
+
 heap_status_t heap_batch_finish(heap_batch_t *batch, heap_batch_result_t *result)
 {
     if (batch == NULL || result == NULL || batch->finished) return HEAP_INVALID;
@@ -1420,44 +1590,9 @@ heap_status_t heap_batch_finish(heap_batch_t *batch, heap_batch_result_t *result
                                                      heap->table_id, batch->bufs[i]);
         if (written != PAGE_FILE_OK) status = map_pf(heap, written);
     }
-
     uint32_t new_root = PAGE_FILE_NO_PAGE;
-    if (status == HEAP_OK && batch->entry_count > 0) {
-        size_t pages = (batch->entry_count + HEAP_DIRECTORY_ENTRIES - 1) / HEAP_DIRECTORY_ENTRIES;
-        size_t ids_bytes = pages * sizeof(uint32_t);
-        bool ids_reserved = acct_reserve(&batch->ledger, ids_bytes);
-        uint32_t *ids = ids_reserved ? malloc(ids_bytes) : NULL;
-        if (ids == NULL) {
-            if (ids_reserved) acct_release(&batch->ledger, ids_bytes);
-            status = HEAP_NOMEM;
-        } else {
-            for (size_t i = 0; i < pages && status == HEAP_OK; i++) status = batch_alloc(batch, &ids[i]);
-            for (size_t i = 0; i < pages && status == HEAP_OK; i++) {
-                uint8_t body[PAGE_BODY_BYTES];
-                memset(body, 0, sizeof(body));
-                size_t first = i * HEAP_DIRECTORY_ENTRIES;
-                size_t take = batch->entry_count - first;
-                if (take > HEAP_DIRECTORY_ENTRIES) take = HEAP_DIRECTORY_ENTRIES;
-                memcpy(body, HEAP_DIRECTORY_MAGIC, 4);
-                body[4] = (uint8_t)HEAP_DIRECTORY_VERSION;
-                put_u32(body + 8, heap->table_id);
-                put_u32(body + 12, i + 1 < pages ? ids[i + 1] : 0);
-                put_u32(body + 16, (uint32_t)take);
-                for (size_t k = 0; k < take; k++) {
-                    put_u32(body + HEAP_DIRECTORY_HEADER_BYTES + k * 4, batch->entries[first + k]);
-                }
-                page_file_status_t written = page_file_write(heap->file, ids[i], PAGE_KIND_DIRECTORY,
-                                                             heap->table_id, body);
-                if (written != PAGE_FILE_OK) status = map_pf(heap, written);
-            }
-            if (status == HEAP_OK) new_root = ids[0];
-            free(ids);
-            acct_release(&batch->ledger, ids_bytes);
-        }
-    }
-    if (status == HEAP_OK && !list_reserve(&batch->old_pages, heap->dir_count, &batch->ledger)) status = HEAP_NOMEM;
+    if (status == HEAP_OK) status = publish_directories(batch, &new_root);
     if (status != HEAP_OK) return fail(batch, status);
-    for (size_t i = 0; i < heap->dir_count; i++) batch->old_pages.items[batch->old_pages.len++] = heap->dirs[i];
 
     batch->new_root = new_root;
     batch->finished = true;
