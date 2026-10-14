@@ -177,6 +177,105 @@ static void epoch_open_failures(void)
     CHECK(live_blocks == 0);
 }
 
+static txn_status_t open_floor(uint32_t floor, txn_manager_t **manager)
+{
+    txn_manager_spec_t spec = {.ops = &OPS,
+                               .max_guarantee = TXN_GUARANTEE_SYNCED,
+                               .epoch_mode = TXN_EPOCH_ABOVE_FLOOR,
+                               .epoch_floor = floor};
+
+    return txn_manager_open(&spec, manager);
+}
+
+/*
+ * 재시작 모형: 프로세스 상한을 0으로 되돌리고, 저장소가 가진 floor만으로 이전 세대와 겹치지 않는 번호를 받는다.
+ * 저장 실패를 모형화해 floor를 올리지 않은 채 다시 열어도 이미 발급한 번호가 다시 나오지 않는지 본다.
+ */
+static void epoch_restart_model(void)
+{
+    txn_manager_t *manager = (txn_manager_t *)1;
+    uint32_t persisted_floor = 0;   /* 저장소에 영속화된 가장 큰 세대 */
+    uint32_t first;
+    uint32_t unsaved;
+    uint32_t second;
+
+    epoch_high_water = 0;
+    CHECK(open_floor(persisted_floor, &manager) == TXN_OK);
+    first = txn_manager_epoch(manager);
+    CHECK(first == 1);
+    persisted_floor = first;   /* 노출 전에 영속화 */
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+
+    /* 같은 프로세스에서 영속화에 실패한 open: floor는 그대로이고 번호는 소모된다 */
+    CHECK(open_floor(persisted_floor, &manager) == TXN_OK);
+    unsaved = txn_manager_epoch(manager);
+    CHECK(unsaved == first + 1);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+    CHECK(open_floor(persisted_floor, &manager) == TXN_OK);
+    CHECK(txn_manager_epoch(manager) == unsaved + 1);   /* 실패한 번호를 다시 쓰지 않는다 */
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+
+    /* 재시작: 상한이 사라져도 저장된 floor 뒤의 번호를 받는다 */
+    epoch_high_water = 0;
+    CHECK(open_floor(persisted_floor, &manager) == TXN_OK);
+    second = txn_manager_epoch(manager);
+    CHECK(second == persisted_floor + 1 && second > first);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+
+    /* 재시작 직후 서로 다른 floor의 저장소 둘이 겹치지 않는다 */
+    epoch_high_water = 0;
+    CHECK(open_floor(50, &manager) == TXN_OK && txn_manager_epoch(manager) == 51);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+    CHECK(open_floor(10, &manager) == TXN_OK && txn_manager_epoch(manager) == 52);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+}
+
+/* floor가 최댓값이면 LIMIT이고 상한을 바꾸지 않는다. 최댓값 직전까지는 마지막 번호를 받는다. */
+static void epoch_floor_overflow(void)
+{
+    txn_manager_t *manager = (txn_manager_t *)1;
+    uint64_t high_before;
+
+    epoch_high_water = 0;
+    manager = (txn_manager_t *)1;
+    CHECK(open_floor(UINT32_MAX, &manager) == TXN_LIMIT && manager == NULL);
+    CHECK(epoch_high_water == 0);
+    CHECK(open_floor(UINT32_MAX - 1, &manager) == TXN_OK && txn_manager_epoch(manager) == UINT32_MAX);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+    high_before = epoch_high_water;
+    CHECK(high_before == UINT32_MAX);
+    manager = (txn_manager_t *)1;
+    CHECK(open_floor(0, &manager) == TXN_LIMIT && manager == NULL);   /* 상한이 소진됐다 */
+    CHECK(open_floor(UINT32_MAX - 1, &manager) == TXN_LIMIT && manager == NULL);
+    CHECK(epoch_high_water == high_before);
+
+    /* 상한이 최댓값 직전이고 floor가 작아도 마지막 번호 하나만 남는다 */
+    epoch_high_water = UINT32_MAX - 1;
+    CHECK(open_floor(3, &manager) == TXN_OK && txn_manager_epoch(manager) == UINT32_MAX);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+}
+
+/* 할당 실패한 floor open은 번호를 소모하지 않는다. */
+static void epoch_floor_alloc_failure(void)
+{
+    txn_manager_t *manager = (txn_manager_t *)1;
+    uint64_t high_before;
+
+    epoch_high_water = 1000;
+    high_before = epoch_high_water;
+    for (long point = 1; point <= 2; point++) {
+        alloc_count = 0;
+        fail_at = point;
+        live_blocks = 0;
+        CHECK(open_floor(5000, &manager) == TXN_NOMEM && manager == NULL);
+        CHECK(live_blocks == 0 && epoch_high_water == high_before);
+        manager = (txn_manager_t *)1;
+    }
+    fail_at = 0;
+    CHECK(open_floor(5000, &manager) == TXN_OK && txn_manager_epoch(manager) == 5001);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+}
+
 int main(void)
 {
     long total;
@@ -197,6 +296,9 @@ int main(void)
     }
     epoch_open_failures();
     epoch_exhaustion();
+    epoch_restart_model();
+    epoch_floor_overflow();
+    epoch_floor_alloc_failure();
     if (failures != 0) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;
