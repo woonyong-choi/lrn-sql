@@ -46,9 +46,11 @@ static void test_optional_install(void)
     CHECK(database_table_count(db) == tables + 1, "설치가 테이블 하나를 만든다");
     ackq_close(&q);
     ackq_t *again = NULL;
-    CHECK(ackq_install(db, &o, &again) == ACKQ_OK && ackq_open(db, &o, &q) == ACKQ_OK, "install·open은 멱등이다");
+    ackq_t *reopened = NULL;
+    CHECK(ackq_install(db, &o, &again) == ACKQ_OK && ackq_open(db, &o, &reopened) == ACKQ_OK, "install·open은 멱등이다");
     CHECK(database_table_count(db) == tables + 1, "다시 설치해도 테이블은 하나");
     ackq_close(&again);
+    ackq_close(&reopened);
     ackq_close(&q);
     ackq_options_t bad = qopts("a-b", 0);
     CHECK(ackq_install(db, &bad, &q) == ACKQ_INVALID && q == NULL, "이름 문자 검증");
@@ -70,7 +72,7 @@ static void test_enqueue_claim(void)
     g_now = 1000;
     uint64_t ids[10];
     for (int i = 0; i < 10; i++) {
-        char payload[16];
+        char payload[32];
         snprintf(payload, sizeof(payload), "job-%d", i);
         CHECK(enq(q, NULL, payload, NULL, &ids[i], NULL) == ACKQ_OK, "enqueue %d", i);
         CHECK(i == 0 || ids[i] > ids[i - 1], "id는 증가한다");
@@ -548,7 +550,7 @@ static void test_restart_recovery(void)
     g_now = 1000;
     uint64_t ids[5];
     for (int i = 0; i < 5; i++) {
-        char payload[16];
+        char payload[32];
         snprintf(payload, sizeof(payload), "r%d", i);
         assert(enq(q, NULL, payload, i == 4 ? "key-4" : NULL, &ids[i], NULL) == ACKQ_OK);
     }

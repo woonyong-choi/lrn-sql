@@ -272,7 +272,11 @@ def run_worker(args: argparse.Namespace) -> dict[str, Any]:
         adapter.purge(args.n)
         result["purge_s"] = time.perf_counter() - start
         result["drained"] = done
+        if done != args.n:
+            raise RuntimeError(f"{args.system}: drained {done} of {args.n}")
         result["rss_delta_mb"] = (rss_peak_bytes() - base_rss) / 2**20
+        result["rss_base_mb"] = base_rss / 2**20
+        result["rss_peak_mb"] = rss_peak_bytes() / 2**20
         adapter.close()
     return result
 
@@ -288,7 +292,10 @@ def run_pending(args: argparse.Namespace) -> dict[str, Any]:
         api_s = time.perf_counter() - start
         api_rss = (rss_peak_bytes() - base_rss) / 2**20
         read_s, decode_s, count = adapter.pending_copy()
+        peak_mb = rss_peak_bytes() / 2**20
         adapter.close()
+    if copied != args.n or count != args.n:
+        raise RuntimeError(f"{args.system}: pending copied {copied}, counted {count}, expected {args.n}")
     return {
         "system": args.system,
         "n": args.n,
@@ -296,6 +303,7 @@ def run_pending(args: argparse.Namespace) -> dict[str, Any]:
         "scan_items": copied,
         "api_s": api_s,
         "api_rss_delta_mb": api_rss,
+        "rss_peak_mb": peak_mb,
         "db_read_s": read_s,
         "decode_copy_s": decode_s,
         "counted": count,
@@ -343,6 +351,10 @@ def run_compare(args: argparse.Namespace) -> None:
                         "sync": runs[0]["sync"],
                         "repeats": args.repeats,
                         **{key: round(median(runs, key), 4) for key in ("put_s", "drain_s", "purge_s", "rss_delta_mb")},
+                        "rss_base_mb": round(median(runs, "rss_base_mb"), 2),
+                        "rss_peak_mb": round(median(runs, "rss_peak_mb"), 2),
+                        "rss_peak_max_mb": round(max(r["rss_peak_mb"] for r in runs), 2),
+                        "drained_equals_n": all(r["drained"] == n for r in runs),
                         "drain_min_s": round(min(r["drain_s"] for r in runs), 4),
                         "drain_max_s": round(max(r["drain_s"] for r in runs), 4),
                     }
@@ -367,7 +379,10 @@ def run_pending_compare(args: argparse.Namespace) -> None:
             "system": system,
             "n": args.n,
             "payload_bytes": args.payload_bytes,
-            **{key: round(median(runs, key), 4) for key in ("api_s", "api_rss_delta_mb", "db_read_s", "decode_copy_s")},
+            **{
+                key: round(median(runs, key), 4)
+                for key in ("api_s", "api_rss_delta_mb", "rss_peak_mb", "db_read_s", "decode_copy_s")
+            },
         }
         print(json.dumps(row, ensure_ascii=False), flush=True)
 
