@@ -356,7 +356,17 @@ test-corrupt-open: $(BUILD_DIR)/test_corrupt_open $(BUILD_DIR)/minidb
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_corrupt_open.json -- ./$(BUILD_DIR)/test_corrupt_open $(BUILD_DIR)/corrupt-open
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_corrupt_open_cli.json -- $(PYTHON) tests/test_corrupt_open_cli.py --minidb ./$(BUILD_DIR)/minidb --workdir $(BUILD_DIR)/corrupt-open-cli
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open
+$(BUILD_DIR)/test_transaction: $(BUILD_DIR)/tests/test_transaction.o $(BUILD_DIR)/storage/transaction.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/test_transaction_fault: $(BUILD_DIR)/tests/test_transaction_fault.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-transaction: $(BUILD_DIR)/test_transaction $(BUILD_DIR)/test_transaction_fault
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_transaction.json -- ./$(BUILD_DIR)/test_transaction
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_transaction_fault.json -- ./$(BUILD_DIR)/test_transaction_fault
+
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open test-transaction
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
@@ -370,6 +380,8 @@ clean:
 -include $(BUILD_DIR)/sql/result.d $(BUILD_DIR)/sql/result_fault.d
 -include $(DATABASE_OBJS:.o=.d) $(BUILD_DIR)/sql/database_fault.d $(BUILD_DIR)/sql/sql_statement_fault.d $(BUILD_DIR)/storage/heap_store_test.d
 
-.PHONY: test-database test-corrupt-open
+-include $(BUILD_DIR)/storage/transaction.d
+
+.PHONY: test-database test-corrupt-open test-transaction
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
