@@ -127,10 +127,13 @@ typedef struct {
     txn_guarantee_t max_guarantee;   /* backend가 실제로 달성할 수 있는 최대 보증 */
     uint64_t initial_seq;            /* backend가 가진 마지막 commit 순번 */
     /*
-     * manager 세대. txn_id 상위 32비트에 들어가 재open 전의 id와 새 id가 겹치지 않게 한다. 0이면 시각·pid·
-     * 프로세스 카운터를 섞어 만든다(같은 프로세스의 재open은 항상 다르고, 프로세스가 바뀌면 거의 확실히 다르지만
-     * 보장은 아니다). 재시작을 넘어 조회를 UNSUPPORTED로 확실히 구분하려면 호출자가 backend에 저장한 증가하는
-     * 세대 번호를 넘긴다. 같은 세대를 다시 넘기면 이전 id를 구분할 수 없다. */
+     * manager 세대. txn_id 상위 32비트에 들어가 재open 전의 id와 새 id를 구분한다.
+     * 0이면 프로세스 안에서 단조 증가로 자동 발급한다(1부터). 이 프로세스에서 이미 쓴 번호는 자동·지정을 가리지 않고
+     * 다시 쓰이지 않는다. 지정한 번호가 이미 쓰였으면 TXN_INVALID, 자동 발급이 UINT32_MAX를 넘으면 TXN_LIMIT이다.
+     * 자동 발급은 프로세스 재시작을 넘는 유일성을 주지 않는다(재시작하면 1부터 다시 시작해 이전 프로세스의 id와
+     * 겹칠 수 있다). 재시작 경계에서 호출자는 backend에 저장한 증가하는 세대 번호를 넘겨야 하며, 이 모듈은 그 값을
+     * 저장하지도 검증하지도 않는다. 같은 세대 번호를 재시작 뒤에 다시 넘기면 이전 id와 구분되지 않으므로
+     * 안전하다고 가정하면 안 된다. */
     uint32_t epoch;
     size_t max_readers;
     size_t commit_ring;              /* 응답 손실 조회용으로 기억하는 commit 수 */
@@ -186,7 +189,8 @@ uint64_t txn_snapshot_seq(const txn_t *txn);
  * txn_id는 (세대 << 32 | 일련번호)인 불투명 값이며 한 세대는 2^32-1개를 발급하고 끝나면 begin이 LIMIT다.
  * 응답을 잃은 호출자가 txn_id의 commit 결과를 조회한다. 최근 commit_ring개의 writer 트랜잭션(rollback 포함)을
  * 기억한다. 진행 중이면 BUSY, 링에서 밀려났거나 읽기 전용이면 NOT_FOUND, 이 세대가 아직 발급하지 않은 번호는
- * NOT_FOUND, 다른 세대의 id(재open·재시작 이전)는 UNSUPPORTED다. 재시작 뒤 조회는 WAL이 필요하므로 capability에 없다.
+ * NOT_FOUND, 다른 세대의 id(같은 프로세스에서 이전에 발급)는 UNSUPPORTED다. 재시작 전 id를 구분하려면 호출자가 영속 세대 번호를
+ * 줘야 하고, 재시작 뒤 commit 결과 조회는 WAL이 필요하므로 capability에 없다.
  */
 txn_status_t txn_query_commit(txn_manager_t *manager, uint64_t txn_id, txn_commit_info_t *info);
 
