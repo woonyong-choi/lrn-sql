@@ -162,7 +162,7 @@ static char *dump(result_t *result, bool sorted)
                 lines[count++] = line.text;
             }
             assert(step == RESULT_NEXT_DONE);
-            if (sorted) qsort(lines, count, sizeof(*lines), compare_lines);
+            if (sorted && count > 1) qsort(lines, count, sizeof(*lines), compare_lines);
             put(&out, "[%zu]", count);
             for (size_t i = 0; i < count; i++) {
                 put(&out, "%s%s", i > 0 ? "/ " : " ", lines[i]);
