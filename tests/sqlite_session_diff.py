@@ -64,18 +64,10 @@ def validate_cases(cases: Sequence[dict[str, Any]]) -> None:
         known = set(case.get("connections", []))
         for index, step in enumerate(case.get("steps", [])):
             step.setdefault("id", f"s{index + 1:02d}")
-            if (
-                "restart" not in step
-                and "drop" not in step
-                and step.get("conn") not in known
-            ):
-                raise CaseFileError(
-                    f"{case_id} step {index} uses an undeclared connection"
-                )
+            if "restart" not in step and "drop" not in step and step.get("conn") not in known:
+                raise CaseFileError(f"{case_id} step {index} uses an undeclared connection")
             if _is_unguarded_select(step):
-                raise CaseFileError(
-                    f"{case_id} step {index} is a SELECT without expect.rows"
-                )
+                raise CaseFileError(f"{case_id} step {index} is a SELECT without expect.rows")
 
 
 def _is_unguarded_select(step: dict[str, Any]) -> bool:
@@ -128,9 +120,7 @@ class CaseRunner:
         except FaultReplyError as err:
             return StepVerdict(case["id"], "setup", FAIL, f"adapter fault: {err}")
         except EngineError as err:
-            return StepVerdict(
-                case["id"], "setup", MISSING, f"no response during setup: {err}"
-            )
+            return StepVerdict(case["id"], "setup", MISSING, f"no response during setup: {err}")
         return StepVerdict(case["id"], "setup", PASS)
 
     def _run_step(self, case: dict[str, Any], step: dict[str, Any]) -> StepVerdict:
@@ -148,22 +138,16 @@ class CaseRunner:
     def _restart(self, case: dict[str, Any], step: dict[str, Any]) -> StepVerdict:
         for engine in (self._reference, self._subject):
             engine.restart(case["connections"], crash=step["restart"] == "crash")
-        return StepVerdict(
-            case["id"], step["id"], PASS, "restart {}".format(step["restart"])
-        )
+        return StepVerdict(case["id"], step["id"], PASS, "restart {}".format(step["restart"]))
 
     def _drop(self, case: dict[str, Any], step: dict[str, Any]) -> StepVerdict:
         for engine in (self._reference, self._subject):
             engine.drop_session(step["drop"])
-        return StepVerdict(
-            case["id"], step["id"], PASS, "dropped session {}".format(step["drop"])
-        )
+        return StepVerdict(case["id"], step["id"], PASS, "dropped session {}".format(step["drop"]))
 
     def _execute(self, case: dict[str, Any], step: dict[str, Any]) -> StepVerdict:
         params = step.get("params", [])
-        reference = self._reference.execute(
-            step["conn"], sqlite_statement(step), params
-        )
+        reference = self._reference.execute(step["conn"], sqlite_statement(step), params)
         subject = self._subject.execute(step["conn"], step["sql"], params)
         verdict, detail = judge_step(step, reference, subject)
         return StepVerdict(
@@ -176,13 +160,9 @@ class CaseRunner:
         )
 
 
-def judge_step(
-    step: dict[str, Any], reference: Outcome, subject: Outcome
-) -> tuple[str, str]:
+def judge_step(step: dict[str, Any], reference: Outcome, subject: Outcome) -> tuple[str, str]:
     """한 단계의 두 결과를 판정한다. (판정, 설명)."""
-    differences = compare_outcomes(
-        reference, subject, step.get("compare"), ordered=step.get("ordered", False)
-    )
+    differences = compare_outcomes(reference, subject, step.get("compare"), ordered=step.get("ordered", False))
     if "difference" in step:
         return judge_difference(step["difference"], reference, subject, differences)
     problems = []
@@ -206,9 +186,7 @@ def not_run_case(case: dict[str, Any], reason: str) -> list[StepVerdict]:
     return [StepVerdict(case["id"], step_id, NOT_RUN, reason) for step_id in ids]
 
 
-def run_case(
-    case: dict[str, Any], probe: Path, workdir: Path, timeout_s: float
-) -> list[StepVerdict]:
+def run_case(case: dict[str, Any], probe: Path, workdir: Path, timeout_s: float) -> list[StepVerdict]:
     case_dir = workdir / case["id"]
     case_dir.mkdir()
     wal = bool(case.get("wal", True))
@@ -234,11 +212,7 @@ def run_case(
         verdicts = not_run_case(case, f"engine could not start: {err}")
     finally:
         problems = [reference.stop(), subject.stop()]
-    return verdicts + [
-        StepVerdict(case["id"], "shutdown", FAIL, problem)
-        for problem in problems
-        if problem
-    ]
+    return verdicts + [StepVerdict(case["id"], "shutdown", FAIL, problem) for problem in problems if problem]
 
 
 def sqlite_version(timeout_s: float) -> str | None:
@@ -272,9 +246,7 @@ def run_all(
             reason = f"sqlite {version} found, {expected_version} required"
             results[case["id"]] = not_run_case(case, reason)
         elif not probe.exists():
-            results[case["id"]] = not_run_case(
-                case, f"subject adapter missing: {probe}"
-            )
+            results[case["id"]] = not_run_case(case, f"subject adapter missing: {probe}")
         else:
             results[case["id"]] = run_case(case, probe, workdir, timeout_s)
     return results
@@ -294,34 +266,23 @@ def format_results(results: dict[str, list[StepVerdict]]) -> str:
         bad = [v for v in verdicts if v.verdict not in (PASS, DECLARED)]
         lines.append(f"case {case_id}: {len(verdicts)} steps, {len(bad)} not passed")
         lines += [f"  {v.verdict.upper()} {v.step_id}: {v.detail}" for v in bad]
-    declared = [
-        v for verdicts in results.values() for v in verdicts if v.verdict == DECLARED
-    ]
+    declared = [v for verdicts in results.values() for v in verdicts if v.verdict == DECLARED]
     lines += [f"declared difference {v.step_id}: {v.detail}" for v in declared]
     lines.append(tally_results(results).format())
     return "\n".join(lines)
 
 
-def write_report(
-    path: Path, results: dict[str, list[StepVerdict]], version: str
-) -> None:
+def write_report(path: Path, results: dict[str, list[StepVerdict]], version: str) -> None:
     document = {
         "expected_sqlite": version,
         "tally": tally_results(results).steps,
-        "cases": {
-            case_id: [verdict.__dict__ for verdict in verdicts]
-            for case_id, verdicts in results.items()
-        },
+        "cases": {case_id: [verdict.__dict__ for verdict in verdicts] for case_id, verdicts in results.items()},
     }
-    path.write_text(
-        json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--probe", required=True, type=Path)
     parser.add_argument("--workdir", required=True, type=Path)
     parser.add_argument("--cases", type=Path, default=CASES_PATH)
@@ -337,9 +298,7 @@ def parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def select_cases(
-    cases: list[dict[str, Any]], only: Sequence[str]
-) -> list[dict[str, Any]]:
+def select_cases(cases: list[dict[str, Any]], only: Sequence[str]) -> list[dict[str, Any]]:
     if not only:
         return cases
     unknown = set(only) - {case["id"] for case in cases}
@@ -384,9 +343,7 @@ def run_all_selected(
 ) -> dict[str, list[StepVerdict]]:
     """--only로 고르지 않은 케이스는 통과로 세지 않도록 not-run으로 남긴다."""
     chosen = {case["id"] for case in selected}
-    results = run_all(
-        selected, args.probe, args.workdir, args.timeout, args.expected_sqlite_version
-    )
+    results = run_all(selected, args.probe, args.workdir, args.timeout, args.expected_sqlite_version)
     for case in cases:
         if case["id"] not in chosen:
             results[case["id"]] = not_run_case(case, "not selected")

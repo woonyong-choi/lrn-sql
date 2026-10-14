@@ -85,9 +85,7 @@ class SqliteAdapter:
         name = args[0]
         if name in self._connections:
             return ["FAULT session_exists 0 0"]
-        connection = sqlite3.connect(
-            self._path, timeout=0, isolation_level=None, check_same_thread=False
-        )
+        connection = sqlite3.connect(self._path, timeout=0, isolation_level=None, check_same_thread=False)
         if self._use_wal:
             connection.execute("PRAGMA journal_mode=WAL")
         self._connections[name] = connection
@@ -148,10 +146,7 @@ def _frame_for_cursor(cursor: sqlite3.Cursor, sql: str) -> list[str]:
         names = [column[0] for column in cursor.description]
         frame = [f"ROWS {len(names)}"]
         frame += [f"COL {hex_encode(name.encode('utf-8'))} D" for name in names]
-        frame += [
-            "ROW " + " ".join(_from_python(value) for value in row)
-            for row in cursor.fetchall()
-        ]
+        frame += ["ROW " + " ".join(_from_python(value) for value in row) for row in cursor.fetchall()]
         return frame
     words = sql.strip().split()
     verb = words[0].upper() if words else ""
