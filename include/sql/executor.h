@@ -23,4 +23,15 @@ typedef struct {
 /* SQL 문을 실행하고 결과를 반환한다 */
 exec_result_t execute(pager_t *pager, statement_t *stmt);
 
+#ifdef MINIDB_TEST_HOOKS
+/*
+ * 출력 버퍼 할당 실패 주입 (시험 빌드 전용, 단일 스레드에서만 사용).
+ * malloc_at/realloc_at번째(1부터) 출력 버퍼 malloc/realloc을 실패시킨다. 0이면 끈다.
+ * 호출 시 malloc·realloc 호출 횟수를 0으로 되돌린다.
+ */
+void executor_test_fail_out_alloc(long malloc_at, long realloc_at);
+/* 출력 버퍼 malloc·realloc 호출 수, 아직 해제도 이전도 안 된 버퍼 수, 호출자에게 넘긴 버퍼 수 */
+void executor_test_out_stats(long *mallocs, long *reallocs, long *live, long *transferred);
+#endif
+
 #endif /* EXECUTOR_H */
