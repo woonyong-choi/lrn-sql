@@ -54,7 +54,8 @@ typedef enum {
     DATABASE_UNSUPPORTED,  /* 옛 MINIDB 파일, 알 수 없는 version */
     DATABASE_NOMEM,
     DATABASE_EXISTS,       /* create: 파일이 이미 있음 */
-    DATABASE_LOCKED        /* 다른 핸들이 잠금을 쥐고 있음 */
+    DATABASE_LOCKED,       /* 다른 핸들이 잠금을 쥐고 있음 */
+    DATABASE_BUSY          /* close: 해제하지 않은 트랜잭션이 남아 있다. 핸들은 그대로다 */
 } database_status_t;
 
 typedef enum {
