@@ -68,16 +68,11 @@ def _show_row(row: Sequence[Cell]) -> str:
     return "(" + ", ".join(_show_cell(cell) for cell in row) + ")"
 
 
-def _rows_difference(
-    reference: Outcome, subject: Outcome, *, ordered: bool
-) -> str | None:
+def _rows_difference(reference: Outcome, subject: Outcome, *, ordered: bool) -> str | None:
     if ordered:
         if reference.rows == subject.rows:
             return None
-        return (
-            "rows differ in order or value: "
-            f"reference {len(reference.rows)} rows, subject {len(subject.rows)} rows"
-        )
+        return f"rows differ in order or value: reference {len(reference.rows)} rows, subject {len(subject.rows)} rows"
     left, right = Counter(reference.rows), Counter(subject.rows)
     if left == right:
         return None
@@ -88,9 +83,7 @@ def _rows_difference(
     return f"rows differ: only in reference {shown_reference}; only in subject {shown_subject}"
 
 
-def _field_difference(
-    name: str, reference: Outcome, subject: Outcome, *, ordered: bool
-) -> str | None:
+def _field_difference(name: str, reference: Outcome, subject: Outcome, *, ordered: bool) -> str | None:
     if name == "rows":
         return _rows_difference(reference, subject, ordered=ordered)
     if name == "columns":
@@ -114,9 +107,7 @@ def compare_outcomes(
     if reference.kind != subject.kind:
         return [f"kind differs: reference {reference.kind}, subject {subject.kind}"]
     names = compare if compare is not None else DEFAULT_COMPARE[reference.kind]
-    differences = [
-        _field_difference(name, reference, subject, ordered=ordered) for name in names
-    ]
+    differences = [_field_difference(name, reference, subject, ordered=ordered) for name in names]
     return [text for text in differences if text is not None]
 
 
@@ -159,16 +150,12 @@ def judge_difference(
     sub_ok = sub_ok and _declared_rows_match(subject, difference, "subject_rows")
     if ref_ok and sub_ok:
         return DECLARED, "{}: {}".format(difference["id"], difference["reason"])
-    return FAIL, "difference {} does not match its declaration: {}".format(
-        difference["id"], "; ".join(differences)
-    )
+    return FAIL, "difference {} does not match its declaration: {}".format(difference["id"], "; ".join(differences))
 
 
 @dataclass
 class Tally:
-    steps: dict[str, int] = field(
-        default_factory=lambda: {verdict: 0 for verdict in VERDICTS}
-    )
+    steps: dict[str, int] = field(default_factory=lambda: {verdict: 0 for verdict in VERDICTS})
 
     def add(self, verdict: str) -> None:
         self.steps[verdict] += 1

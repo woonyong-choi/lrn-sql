@@ -39,9 +39,7 @@ from sqlite_session_protocol import (
 )
 
 
-def make_outcome(
-    kind: str = "rows", rows: list[list[Cell]] | None = None, **fields: Any
-) -> Outcome:
+def make_outcome(kind: str = "rows", rows: list[list[Cell]] | None = None, **fields: Any) -> Outcome:
     base: dict[str, Any] = {
         "kind": kind,
         "columns": ((b"v", "T"),),
@@ -102,9 +100,7 @@ def select_step(step_id: str, **extra: Any) -> dict[str, Any]:
     return step
 
 
-def run_fake(
-    case: dict[str, Any], reference: FakeEngine, subject: FakeEngine
-) -> list[StepVerdict]:
+def run_fake(case: dict[str, Any], reference: FakeEngine, subject: FakeEngine) -> list[StepVerdict]:
     return diff.CaseRunner(reference, subject).run(case)  # type: ignore[arg-type]
 
 
@@ -126,9 +122,7 @@ DECLARATION = {
 
 # #103 완료 조건 3: 같은 결과만 pass로 센다
 def test_run_equal_results_pass() -> None:
-    results = run_fake(
-        make_case([select_step("s1")]), FakeEngine([one_row()]), FakeEngine([one_row()])
-    )
+    results = run_fake(make_case([select_step("s1")]), FakeEngine([one_row()]), FakeEngine([one_row()]))
 
     assert verdicts_of(results) == [PASS, PASS]
 
@@ -149,9 +143,7 @@ def test_run_different_rows_fail() -> None:
 def test_run_both_engines_wrong_the_same_way_fails_expectation() -> None:
     empty = make_outcome(rows=[])
 
-    results = run_fake(
-        make_case([select_step("s1")]), FakeEngine([empty]), FakeEngine([empty])
-    )
+    results = run_fake(make_case([select_step("s1")]), FakeEngine([empty]), FakeEngine([empty]))
 
     assert results[1].verdict == FAIL
     assert "rows expected 1 but was 0" in results[1].detail
@@ -207,9 +199,7 @@ def test_run_declared_difference_is_counted_separately_from_pass() -> None:
     step = select_step("s1", difference=DECLARATION)
     step.pop("expect")
 
-    results = run_fake(
-        make_case([step]), FakeEngine([one_row()]), FakeEngine([make_outcome(rows=[])])
-    )
+    results = run_fake(make_case([step]), FakeEngine([one_row()]), FakeEngine([make_outcome(rows=[])]))
 
     assert verdicts_of(results) == [PASS, DECLARED]
 
@@ -219,9 +209,7 @@ def test_run_declared_difference_not_observed_fails() -> None:
     step = select_step("s1", difference=DECLARATION)
     step.pop("expect")
 
-    results = run_fake(
-        make_case([step]), FakeEngine([one_row()]), FakeEngine([one_row()])
-    )
+    results = run_fake(make_case([step]), FakeEngine([one_row()]), FakeEngine([one_row()]))
 
     assert results[1].verdict == FAIL
     assert "was not observed" in results[1].detail
@@ -233,9 +221,7 @@ def test_run_declared_difference_with_other_subject_behavior_fails() -> None:
     step.pop("expect")
     subject = make_outcome(rows=[[text("a")], [text("b")]])
 
-    results = run_fake(
-        make_case([step]), FakeEngine([one_row()]), FakeEngine([subject])
-    )
+    results = run_fake(make_case([step]), FakeEngine([one_row()]), FakeEngine([subject]))
 
     assert results[1].verdict == FAIL
     assert "does not match its declaration" in results[1].detail
@@ -251,12 +237,8 @@ def test_judge_difference_pins_exact_cells_of_both_engines() -> None:
     }
     subject = one_row("b")
 
-    as_declared = judge_difference(
-        difference, one_row("a"), subject, compare_outcomes(one_row("a"), subject)
-    )
-    other_reference = judge_difference(
-        difference, one_row("c"), subject, compare_outcomes(one_row("c"), subject)
-    )
+    as_declared = judge_difference(difference, one_row("a"), subject, compare_outcomes(one_row("a"), subject))
+    other_reference = judge_difference(difference, one_row("c"), subject, compare_outcomes(one_row("c"), subject))
 
     assert (as_declared[0], other_reference[0]) == (DECLARED, FAIL)
 
@@ -276,12 +258,7 @@ def test_compare_distinguishes_null_empty_text_and_empty_blob() -> None:
 
     outcomes = [make_outcome(rows=[[cell]]) for cell in (null, empty_text, empty_blob)]
 
-    assert all(
-        compare_outcomes(left, right) != []
-        for left in outcomes
-        for right in outcomes
-        if left is not right
-    )
+    assert all(compare_outcomes(left, right) != [] for left in outcomes for right in outcomes if left is not right)
 
 
 # #103 계약: 중복 행을 보존한다
@@ -370,10 +347,7 @@ def test_shipped_cases_are_valid_and_each_case_names_its_basis() -> None:
 def test_sqlite_statement_maps_transaction_start_but_keeps_other_sql() -> None:
     assert diff.sqlite_statement({"sql": "begin  durable"}) == "BEGIN IMMEDIATE"
     assert diff.sqlite_statement({"sql": "COMMIT"}) == "COMMIT"
-    assert (
-        diff.sqlite_statement({"sql": "BEGIN", "sql_sqlite": "BEGIN DEFERRED"})
-        == "BEGIN DEFERRED"
-    )
+    assert diff.sqlite_statement({"sql": "BEGIN", "sql_sqlite": "BEGIN DEFERRED"}) == "BEGIN DEFERRED"
 
 
 # #103 계약: NULL·NUL 바이트·빈 값·실수 비트를 프로토콜이 보존한다
@@ -393,12 +367,8 @@ def test_protocol_cell_round_trip_keeps_nul_empty_and_real_bits() -> None:
 def test_protocol_generated_values_are_deterministic_exact_size_utf8() -> None:
     assert generate_text(8160, 5) == generate_text(8160, 5)
     assert generate_text(8160, 5) != generate_text(8160, 6)
-    assert len(generate_text(8161, 7)) == 8161 and generate_text(8161, 7).decode(
-        "utf-8"
-    )
-    assert len(generate_blob(300000, 12)) == 300000 and b"\x00" in generate_blob(
-        300000, 12
-    )
+    assert len(generate_text(8161, 7)) == 8161 and generate_text(8161, 7).decode("utf-8")
+    assert len(generate_blob(300000, 12)) == 300000 and b"\x00" in generate_blob(300000, 12)
     assert build_param({"real": -0.0}).payload == 0x8000000000000000
 
 

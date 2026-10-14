@@ -56,9 +56,7 @@ class EngineSession:
         frame = self._process.request("HELLO")
         parts = frame[0].split(" ") if frame else []
         if len(parts) < 3 or parts[0] != "HELLO":
-            raise ProtocolViolationError(
-                f"{self.label}: unexpected HELLO reply {frame[:1]!r}"
-            )
+            raise ProtocolViolationError(f"{self.label}: unexpected HELLO reply {frame[:1]!r}")
         self.version = parts[2]
 
     def open_fresh(self, connections: Sequence[str]) -> None:
@@ -74,15 +72,11 @@ class EngineSession:
         self._open(connections, fresh=False)
 
     def drop_session(self, conn: str) -> None:
-        _expect_ok(
-            self._require_process().request(f"DROP {conn}"), f"{self.label} drop {conn}"
-        )
+        _expect_ok(self._require_process().request(f"DROP {conn}"), f"{self.label} drop {conn}")
 
     def execute(self, conn: str, sql: str, params: Sequence[Any]) -> Outcome:
         tokens = [encode_cell(build_param(spec)) for spec in params]
-        line = " ".join(
-            ["EXEC", conn, hex_encode(sql.encode("utf-8")), str(len(tokens))] + tokens
-        )
+        line = " ".join(["EXEC", conn, hex_encode(sql.encode("utf-8")), str(len(tokens))] + tokens)
         frame = self._require_process().request(line)
         if frame and frame[0].startswith("FAULT"):
             raise FaultReplyError(f"{self.label} exec: {frame[0]}")
@@ -102,14 +96,10 @@ class EngineSession:
     def _open(self, connections: Sequence[str], *, fresh: bool) -> None:
         process = self._require_process()
         path_hex = hex_encode(str(self._db_path).encode("utf-8"))
-        request = "OPEN {} {} {}".format(
-            path_hex, "wal" if self._wal else "nowal", "new" if fresh else "existing"
-        )
+        request = "OPEN {} {} {}".format(path_hex, "wal" if self._wal else "nowal", "new" if fresh else "existing")
         _expect_ok(process.request(request), f"{self.label} open")
         for name in connections:
-            _expect_ok(
-                process.request(f"SESSION {name}"), f"{self.label} session {name}"
-            )
+            _expect_ok(process.request(f"SESSION {name}"), f"{self.label} session {name}")
 
     def _require_process(self) -> EngineProcess:
         if self._process is None:
