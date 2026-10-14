@@ -45,11 +45,46 @@ def _arguments() -> argparse.Namespace:
 
 # cost: time O(1), heap O(1), stack O(1), io 1
 # basis: estimate
-def _kill_group(process: subprocess.Popen[bytes]) -> None:
+def _kill_group(process: subprocess.Popen[bytes]) -> dict[str, Any] | None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
-        return  # 자식과 그 프로세스 그룹이 이미 끝난 경우다.
+        return None  # 자식과 그 프로세스 그룹이 이미 끝난 경우다.
+    except OSError as error:
+        return {"operation": "kill_group", "code": error.errno, "message": str(error)}
+    return None
+
+
+# cost: time O(t), heap O(1), stack O(1), io O(1)
+# vars: t = 정리 제한시간; 그룹 종료가 거절되면 직접 자식만 별도로 종료 시도
+# basis: estimate
+def _cleanup(
+    process: subprocess.Popen[bytes], timeout_seconds: float
+) -> list[dict[str, Any]]:
+    errors = []
+    group_error = _kill_group(process)
+    if group_error is not None:
+        errors.append(group_error)
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError as error:
+                errors.append(
+                    {
+                        "operation": "kill_child",
+                        "code": error.errno,
+                        "message": str(error),
+                    }
+                )
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        errors.append(
+            {"operation": "wait", "code": None, "message": "child cleanup timed out"}
+        )
+    except OSError as error:
+        errors.append({"operation": "wait", "code": error.errno, "message": str(error)})
+    return errors
 
 
 def _classify(returncode: int) -> tuple[str, int | None]:
@@ -96,13 +131,22 @@ def _execute(
                 returncode = process.wait(timeout=args.timeout)
                 outcome, code = _classify(returncode)
             except subprocess.TimeoutExpired:
-                _kill_group(process)
-                returncode = process.wait()
+                returncode = None
                 outcome, code = "timeout", None
-            return {"outcome": outcome, "code": code, "returncode": returncode}
+            result = {"outcome": outcome, "code": code, "returncode": returncode}
         finally:
-            _kill_group(process)
-            process.wait()
+            cleanup_errors = _cleanup(process, args.timeout)
+        if cleanup_errors:
+            return {
+                "outcome": "cleanup_error",
+                "code": cleanup_errors[0]["code"],
+                "returncode": process.returncode,
+                "pid": process.pid,
+                "execution": result,
+                "cleanup_errors": cleanup_errors,
+            }
+        result["returncode"] = process.returncode
+        return result
 
 
 # cost: time O(t + n), heap O(n + e + c), stack O(1), io O(1)

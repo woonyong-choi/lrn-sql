@@ -12,8 +12,19 @@ import time
 import pytest
 
 RUNNER = Path(__file__).with_name("fault_runner.py")
+CLEANUP_CASES = [
+    ("print('completed')", [], "success"),
+    (
+        "import time; time.sleep(1)",
+        ["--timeout", "0.1", "--expect", "timeout"],
+        "timeout",
+    ),
+]
 
 
+# cost: time O(t + n), heap O(n), stack O(1), io O(1)
+# vars: t = 자식 제한시간, n = 명령·출력·결과 JSON 바이트
+# basis: estimate
 def _run(folder: Path, source: str, options: list[str]) -> tuple[int, dict]:
     report = folder / "result.json"
     completed = subprocess.run(
@@ -107,6 +118,9 @@ def test_seed_site_and_call_are_reproducible_inputs(tmp_path: Path) -> None:
     assert first["site"] == "pager.read" and first["call"] == 2
 
 
+# cost: time O(n), heap O(n), stack O(1), io O(1)
+# vars: n = 명령·결과 JSON 바이트
+# basis: estimate
 def test_launch_failure_is_never_an_expected_error(tmp_path: Path) -> None:
     report = tmp_path / "result.json"
     completed = subprocess.run(
@@ -131,6 +145,54 @@ def test_launch_failure_is_never_an_expected_error(tmp_path: Path) -> None:
     assert not result["matched"]
 
 
+# cost: time O(t + n), heap O(n), stack O(1), io O(1)
+# vars: t = 자식 제한시간, n = 실행 명령과 결과 JSON 바이트
+# basis: estimate
+@pytest.mark.parametrize(("source", "options", "execution"), CLEANUP_CASES)
+def test_cleanup_denial_preserves_evidence_and_never_passes(
+    tmp_path: Path, source: str, options: list[str], execution: str
+) -> None:
+    # #133: killpg 실패가 시험 결과 파일 누락으로 바뀌는 실제 오류 경로를 주입한다.
+    report = tmp_path / "cleanup.json"
+    injection = (
+        "import errno,os,runpy\n"
+        "def denied(*args):\n raise PermissionError(errno.EPERM, 'injected group denial')\n"
+        "os.killpg=denied\n"
+        f"runpy.run_path({str(RUNNER)!r},run_name='__main__')"
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            injection,
+            "--report",
+            str(report),
+            *options,
+            "--",
+            sys.executable,
+            "-c",
+            source,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert report.exists(), completed.stderr
+    result = json.loads(report.read_text())
+    assert completed.returncode == 1
+    assert result["outcome"] == "cleanup_error"
+    assert result["execution"]["outcome"] == execution
+    assert result["cleanup_errors"][0]["operation"] == "kill_group"
+    assert result["cleanup_errors"][0]["code"] == 1
+    assert result["returncode"] is not None
+    assert not result["matched"]
+    assert Path(result["stdout"]).exists()
+    assert Path(result["stderr"]).exists()
+
+
+# cost: time O(n), heap O(n), stack O(1), io O(1)
+# vars: n = 명령·출력 바이트
+# basis: estimate
 @pytest.mark.parametrize("value", ["nan", "inf", "0", "-1"])
 def test_invalid_timeout_is_rejected_without_launch(tmp_path: Path, value: str) -> None:
     report = tmp_path / "result.json"
