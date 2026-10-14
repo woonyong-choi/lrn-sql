@@ -439,6 +439,18 @@ test-transaction: $(BUILD_DIR)/test_transaction $(BUILD_DIR)/test_transaction_fa
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_database_txn.json -- ./$(BUILD_DIR)/test_database_txn
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_session_txn.json -- ./$(BUILD_DIR)/test_session_txn
 
+$(BUILD_DIR)/session_probe: $(BUILD_DIR)/tests/session_probe.o $(BUILD_DIR)/sql/session.o $(DATABASE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+# SQLite 3.51.0과 같은 입력으로 두 연결을 비교한다. 다른 SQLite 버전은 not-run이라 test-all에 넣지 않는다
+SQLITE_DIFF_DIR ?= $(BUILD_DIR)/sqlite-session-diff
+
+test-sqlite-session-diff-harness:
+	$(PYTEST) -q tests/test_sqlite_session_diff.py --basetemp=$(BUILD_DIR)/sqlite-session-diff-harness -p no:cacheprovider
+
+test-sqlite-session-diff: $(BUILD_DIR)/session_probe test-sqlite-session-diff-harness
+	$(PYTHON) tests/sqlite_session_diff.py --probe ./$(BUILD_DIR)/session_probe --workdir $(SQLITE_DIFF_DIR)
+
 $(BUILD_DIR)/test_wal: $(BUILD_DIR)/tests/test_wal.o $(BUILD_DIR)/storage/wal.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -458,7 +470,7 @@ test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
 
-.PHONY: test-runner test-fault test-concurrency test-result test-result-allocation test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli
+.PHONY: test-runner test-fault test-concurrency test-result test-result-allocation test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli test-sqlite-session-diff test-sqlite-session-diff-harness
 
 -include $(OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BUILD_DIR)/main.d
 -include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d $(BUILD_DIR)/sql/lexer*.d)
