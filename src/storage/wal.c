@@ -858,6 +858,7 @@ wal_lsn_t wal_flushed_lsn(const wal_t *wal) { return wal->flushed_lsn; }
 wal_lsn_t wal_end_lsn(const wal_t *wal) { return wal->end; }
 wal_xid_t wal_max_xid(const wal_t *wal) { return wal->max_xid; }
 bool wal_is_poisoned(const wal_t *wal) { return wal->poisoned; }
+uint64_t wal_file_id(const wal_t *wal) { return wal == NULL ? 0 : wal->file_id; }
 uint64_t wal_memory_used(const wal_t *wal) { return wal->mem_used; }
 uint64_t wal_memory_peak(const wal_t *wal) { return wal->mem_peak; }
 
