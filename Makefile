@@ -259,6 +259,9 @@ test-fault: $(BUILD_DIR)/test_fault_runtime $(BUILD_DIR)/fault_fixture
 
 HOOK_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/hooks/%.o,$(SRCS))
 CONCURRENCY_RUNS ?= 3
+ifeq ($(SANITIZE),thread)
+DETECTOR_EXPECT = --expect error --expect-code 66
+endif
 
 $(BUILD_DIR)/hooks/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -280,6 +283,10 @@ test-concurrency: $(BUILD_DIR)/test_concurrency_barrier $(BUILD_DIR)/test_concur
 		$(TEST_RUNNER) --report "$(BUILD_DIR)/fault/test_concurrency_insert-$$iteration.json" -- ./$(BUILD_DIR)/test_concurrency_insert; \
 		iteration=$$((iteration + 1)); \
 	done
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_order_detector.json $(DETECTOR_EXPECT) -- ./$(BUILD_DIR)/test_concurrency_barrier --check-order-detector
+ifeq ($(SANITIZE),thread)
+	$(PYTHON) -c 'from pathlib import Path; import sys; text = Path(sys.argv[1]).read_text(); sys.exit(0 if "WARNING: ThreadSanitizer: lock-order-inversion" in text else 1)' $(BUILD_DIR)/fault/test_order_detector.json.stderr
+endif
 
 test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
