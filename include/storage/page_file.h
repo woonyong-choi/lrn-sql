@@ -188,6 +188,16 @@ page_file_commit_outcome_t page_file_last_commit_outcome(const page_file_t *file
 bool page_file_is_poisoned(const page_file_t *file);
 
 /*
+ * 메모리 회계용 읽기 전용 접근자(요청 바이트 기준, allocator 오버헤드 제외).
+ * page_file_handle_bytes: 핸들이 쥔 고정 할당(구조체와 경로 사본). 해제 목록은 포함하지 않는다.
+ * page_file_list_peak_bytes: 해제 목록 셋(pending·aging·reusable)이 page_count쪽 이하의 페이지를 담을 때
+ *   요청 바이트의 순간 최대치 상한. 각 목록은 8에서 시작해 두 배씩 늘며 길이가 page_count를 넘지 않고,
+ *   늘 때 옛 배열과 새 배열이 함께 있다.
+ */
+size_t page_file_handle_bytes(const page_file_t *file);
+size_t page_file_list_peak_bytes(uint32_t page_count);
+
+/*
  * overflow 어댑터. 본문 8160바이트를 한 overflow 페이지로 쓴다. ctx 저장소는 호출자가 소유하며
  * 반환된 io가 쓰이는 동안 살아 있어야 한다. 해제는 page_file_release의 보류 규칙을 따른다.
  */
