@@ -414,9 +414,12 @@ static heap_status_t read_directory(heap_t *heap, const page_file_control_t *con
     u32_list_t dirs = {NULL, 0, 0};
     heap_status_t result = HEAP_OK;
     uint8_t body[PAGE_BODY_BYTES];
+    /* 게시 전인 변경(한 commit으로 묶는 여러 문장)이 새로 할당한 페이지도 범위 안이다 */
+    uint32_t allocated = page_file_allocated_pages(heap->file);
+    (void)control;
 
     while (page != PAGE_FILE_NO_PAGE && result == HEAP_OK) {
-        if (dirs.len >= control->page_count) { result = HEAP_CORRUPT; break; }  /* 순환 */
+        if (dirs.len >= allocated) { result = HEAP_CORRUPT; break; }  /* 순환 */
         page_file_page_info_t info;
         page_file_status_t status = page_file_page_info(heap->file, page, &info);
         if (status != PAGE_FILE_OK) { result = map_pf(heap, status); break; }
@@ -459,7 +462,7 @@ static heap_status_t read_directory(heap_t *heap, const page_file_control_t *con
             memcpy(all + entries.len, dirs.items, dirs.len * sizeof(*all));
             qsort(all, total, sizeof(*all), compare_u32);
             for (size_t i = 0; i < total; i++) {
-                if (all[i] < PAGE_FILE_CONTROL_PAGES || all[i] >= control->page_count ||
+                if (all[i] < PAGE_FILE_CONTROL_PAGES || all[i] >= allocated ||
                     (i > 0 && all[i] == all[i - 1])) {
                     result = HEAP_CORRUPT;
                     break;

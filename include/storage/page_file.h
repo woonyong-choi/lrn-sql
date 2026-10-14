@@ -136,6 +136,12 @@ page_file_status_t page_file_open(const char *path, bool writable, page_file_t *
 page_file_status_t page_file_close(page_file_t *file);
 
 const page_file_control_t *page_file_control(const page_file_t *file);
+/*
+ * 지금 할당된 페이지의 높은 수위(제어 페이지 포함). 아직 commit하지 않은 페이지를 포함하므로 게시된 제어 페이지의
+ * page_count 이상이다. 한 번의 commit으로 묶는 여러 변경(트랜잭션)이 이전 변경이 새로 할당한 페이지를 읽을 때의 범위 검사에
+ * 쓴다. file이 NULL이면 0이다.
+ */
+uint32_t page_file_allocated_pages(const page_file_t *file);
 bool page_file_is_published(const page_file_t *file);
 /* 이 파일을 자기 호출자가 알 수 있게 partial 경로를 돌려준다. 게시 뒤에는 NULL. */
 const char *page_file_partial_path(const page_file_t *file);
