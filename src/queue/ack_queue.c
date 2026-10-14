@@ -430,6 +430,8 @@ ackq_status_t ackq_enqueue(ackq_t *queue, database_txn_t *txn, const uint8_t *pa
 {
     size_t key_length = 0;
     if (queue == NULL || id == NULL) return ACKQ_INVALID;
+    *id = 0;   /* 성공이 아니면 id를 주지 않는다 */
+    if (duplicate != NULL) *duplicate = false;
     ackq_status_t status = check_payload(payload, size);
     if (status != ACKQ_OK) return status;
     if (idem_key != NULL) {
