@@ -287,6 +287,8 @@ int lock_acquire(lock_table_t *lt, uint64_t row_id, lock_mode_t mode)
     /* 새 point lock 엔트리 추가 */
     lock_entry_t *ne = (lock_entry_t *)calloc(1, sizeof(lock_entry_t));
     if (ne == NULL) {
+        /* 대기 등록을 풀고 깨운다. 남기면 충돌 없는 reader가 timeout까지 기다린다. */
+        waiting_writer_unregister(lt, &waiting_writer);
         pthread_mutex_unlock(&lt->mutex);
         return -1;
     }
@@ -346,6 +348,7 @@ int lock_acquire_range(lock_table_t *lt, uint64_t low, uint64_t high,
     /* 새 range lock 엔트리 추가 */
     lock_entry_t *ne = (lock_entry_t *)calloc(1, sizeof(lock_entry_t));
     if (ne == NULL) {
+        waiting_writer_unregister(lt, &waiting_writer);
         pthread_mutex_unlock(&lt->mutex);
         return -1;
     }
