@@ -192,8 +192,12 @@ static void fake_reclaim(void *ctx, uint64_t horizon)
 static bool fake_is_poisoned(void *ctx)
 {
     fake_t *fake = ctx;
+    bool poisoned;
 
-    return fake->backend_poisoned != 0;
+    pthread_mutex_lock(&fake->lock);
+    poisoned = fake->backend_poisoned != 0;
+    pthread_mutex_unlock(&fake->lock);
+    return poisoned;
 }
 
 static void fake_close(void *ctx)
@@ -686,20 +690,31 @@ static void test_reentrancy(void)
     CHECK(txn_manager_close(&manager) == TXN_OK);
 }
 
-static void test_epoch_and_real_timeout(void)
+/* writer의 id 상위 32비트가 manager 세대다. */
+static uint32_t writer_epoch(txn_manager_t *manager)
+{
+    txn_t *txn = begin_rw(manager);
+    uint32_t epoch = (uint32_t)(txn_id(txn) >> 32);
+
+    txn_release(&txn);
+    return epoch;
+}
+
+#define EXPLICIT_EPOCH 0x70000000u
+
+static void test_epoch(void)
 {
     fake_t fake;
     txn_manager_t *first;
     txn_manager_t *second;
+    txn_manager_t *third = (txn_manager_t *)1;
     txn_manager_spec_t spec = {.ops = &FAKE_OPS, .ctx = &fake, .max_guarantee = TXN_GUARANTEE_SYNCED};
     txn_commit_info_t info;
     txn_t *txn;
-    txn_t *other = NULL;
     uint64_t old_id;
     uint64_t new_id;
-    struct timespec t0;
-    struct timespec t1;
-    long elapsed_ms;
+    uint32_t e1;
+    uint32_t e2;
 
     fake_init(&fake);
     first = open_manager(&fake, TXN_GUARANTEE_SYNCED, 0);
@@ -714,6 +729,7 @@ static void test_epoch_and_real_timeout(void)
     txn = begin_rw(second);
     new_id = txn_id(txn);
     CHECK((uint32_t)old_id == (uint32_t)new_id && old_id != new_id);
+    CHECK((new_id >> 32) > (old_id >> 32));   /* 자동 발급은 단조 증가 */
     CHECK(txn_query_commit(second, old_id, &info) == TXN_UNSUPPORTED);
     CHECK(txn_commit(txn, NULL) == TXN_OK);
     txn_release(&txn);
@@ -721,36 +737,105 @@ static void test_epoch_and_real_timeout(void)
     CHECK(txn_query_commit(second, new_id + 1, &info) == TXN_NOT_FOUND);
     CHECK(txn_manager_close(&second) == TXN_OK);
 
-    /* 호출자가 세대를 지정하면 그 값이 그대로 쓰인다 */
-    spec.epoch = 7;
+    /* 호출자가 지정한 세대는 그대로 쓰인다. 자동 발급이 닿지 않는 큰 값을 쓴다. */
+    spec.epoch = EXPLICIT_EPOCH;
     CHECK(txn_manager_open(&spec, &first) == TXN_OK);
-    spec.epoch = 8;
+    spec.epoch = EXPLICIT_EPOCH + 1;
     CHECK(txn_manager_open(&spec, &second) == TXN_OK);
-    CHECK(txn_begin(first, NULL, &txn) == TXN_OK && (txn_id(txn) >> 32) == 7);
+    CHECK(txn_begin(first, NULL, &txn) == TXN_OK && (txn_id(txn) >> 32) == EXPLICIT_EPOCH);
     CHECK(txn_query_commit(second, txn_id(txn), &info) == TXN_UNSUPPORTED);
     txn_release(&txn);
-    CHECK(txn_manager_close(&first) == TXN_OK && txn_manager_close(&second) == TXN_OK);
 
-    /* 실제 단조 대기: 60ms timeout이 대략 그 시간 안에 끝난다. 벽시계 역행은 시험할 수 없어 검증 범위 밖이다. */
-    fake_init(&fake);
+    /* 같은 프로세스에서 쓴 세대의 재사용은 열려 있든 닫혔든 거절한다 */
+    spec.epoch = EXPLICIT_EPOCH;
+    CHECK(txn_manager_open(&spec, &third) == TXN_INVALID && third == NULL);
+    CHECK(txn_manager_close(&first) == TXN_OK && txn_manager_close(&second) == TXN_OK);
+    third = (txn_manager_t *)1;
+    CHECK(txn_manager_open(&spec, &third) == TXN_INVALID && third == NULL);
+
+    /* 자동 발급은 이미 쓴 지정 세대를 건너뛰고 계속 증가한다 */
     first = open_manager(&fake, TXN_GUARANTEE_SYNCED, 0);
-    txn = begin_rw(first);
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    CHECK(txn_begin(first, &(txn_begin_options_t){.timeout_ms = 60}, &other) == TXN_TIMEOUT);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
-    CHECK(elapsed_ms >= 60 && elapsed_ms < 1000);
-    CHECK(txn_wait_is_monotonic());
-    txn_release(&txn);
+    e1 = writer_epoch(first);
     CHECK(txn_manager_close(&first) == TXN_OK);
+    spec.epoch = e1 + 1;
+    CHECK(txn_manager_open(&spec, &first) == TXN_OK);
+    second = open_manager(&fake, TXN_GUARANTEE_SYNCED, 0);
+    e2 = writer_epoch(second);
+    CHECK(e2 == e1 + 2);
+    CHECK(txn_manager_close(&first) == TXN_OK && txn_manager_close(&second) == TXN_OK);
+}
+
+/* 호출마다 20ms 흐르는 시계로 timeout·취소·writer 슬롯 보존을 실제 시간과 무관하게 확정한다. */
+static void test_timeout_deterministic(void)
+{
+    fake_t fake;
+    txn_manager_t *manager;
+    txn_manager_spec_t spec = {.ops = &FAKE_OPS, .max_guarantee = TXN_GUARANTEE_SYNCED};
+    uint64_t clock_now = 0;
+    txn_cancel_t cancel;
+    txn_begin_options_t options = {.timeout_ms = 50};
+    txn_t *holder;
+    txn_t *other = (txn_t *)1;
+    txn_t *next = NULL;
+
+    fake_init(&fake);
+    spec.ctx = &fake;
+    spec.now_ms = step_clock;
+    spec.clock_ctx = &clock_now;
+    CHECK(txn_manager_open(&spec, &manager) == TXN_OK);
+    fake.manager = manager;
+
+    holder = begin_rw(manager);
+    CHECK(txn_begin(manager, &options, &other) == TXN_TIMEOUT && other == NULL);
+    CHECK(clock_now >= 50);
+    CHECK(txn_state(holder) == TXN_STATE_ACTIVE);   /* timeout이 writer 슬롯을 빼앗지 않는다 */
+    CHECK(fake.begin_calls == 1 && fake.finish_calls == 0);
+
+    /* 이미 취소된 요청은 기다리지 않고 CANCELLED이며 슬롯도 그대로다 */
+    txn_cancel_init(&cancel);
+    txn_cancel_request(&cancel);
+    options = (txn_begin_options_t){.timeout_ms = TXN_WAIT_FOREVER, .cancel = &cancel};
+    other = (txn_t *)1;
+    CHECK(txn_begin(manager, &options, &other) == TXN_CANCELLED && other == NULL);
+    CHECK(txn_state(holder) == TXN_STATE_ACTIVE && fake.begin_calls == 1);
+
+    CHECK(txn_commit(holder, NULL) == TXN_OK);   /* 슬롯을 지킨 writer가 정상 commit */
+    txn_release(&holder);
+    CHECK(txn_begin(manager, &(txn_begin_options_t){.timeout_ms = 50}, &next) == TXN_OK);
+    CHECK(fake.begin_calls == 2);
+    txn_release(&next);
+    CHECK(fake.finish_calls == fake.begin_calls);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
+}
+
+/*
+ * 실제 단조 대기 경로가 timeout으로 끝나는지만 본다. 걸린 시간의 상한·하한은 CI 판정에 넣지 않는다(느린 실행기에서
+ * 거짓 실패가 난다). 응답하지 않는 hang은 외부 test runner의 watchdog이 잡는다. 시간 계측은
+ * tests/measure_transaction_timeout.c로 로컬에서 따로 본다.
+ */
+static void test_real_timeout_completes(void)
+{
+    fake_t fake;
+    txn_manager_t *manager;
+    txn_t *holder;
+    txn_t *other = NULL;
+
+    fake_init(&fake);
+    manager = open_manager(&fake, TXN_GUARANTEE_SYNCED, 0);
+    holder = begin_rw(manager);
+    CHECK(txn_begin(manager, &(txn_begin_options_t){.timeout_ms = 60}, &other) == TXN_TIMEOUT);
+    CHECK(other == NULL && txn_state(holder) == TXN_STATE_ACTIVE);
+    CHECK(txn_wait_is_monotonic());
+    txn_release(&holder);
+    CHECK(txn_manager_close(&manager) == TXN_OK);
 }
 
 #define STRESS_THREADS 4
 #define STRESS_ROUNDS 200
 
+/* 스레드마다 자기 구조체만 쓴다. 합계는 join 뒤 main이 낸다. */
 typedef struct {
     txn_manager_t *manager;
-    fake_t *fake;
     int committed;
     int busy;
     int bad_snapshots;
@@ -786,7 +871,7 @@ static void *stress_reader(void *arg)
         if (txn_begin(stress->manager, &(txn_begin_options_t){.access = TXN_ACCESS_READ_ONLY}, &txn) ==
             TXN_OK) {
             if (txn_snapshot_seq(txn) > txn_manager_last_committed(stress->manager)) {
-                __atomic_add_fetch(&stress->bad_snapshots, 1, __ATOMIC_RELAXED);
+                stress->bad_snapshots++;
             }
             txn_commit(txn, NULL);
             txn_release(&txn);
@@ -799,27 +884,35 @@ static void test_threads(void)
 {
     fake_t fake;
     txn_manager_t *manager;
-    stress_t stress = {0};
+    stress_t writer_stress[STRESS_THREADS] = {0};
+    stress_t reader_stress[STRESS_THREADS] = {0};
     pthread_t writers[STRESS_THREADS];
     pthread_t readers[STRESS_THREADS];
+    int busy = 0;
+    int committed = 0;
+    int bad_snapshots = 0;
 
     fake_init(&fake);
     manager = open_manager(&fake, TXN_GUARANTEE_SYNCED, 0);
-    stress.manager = manager;
-    stress.fake = &fake;
     for (int i = 0; i < STRESS_THREADS; i++) {
-        pthread_create(&writers[i], NULL, stress_writer, &stress);
-        pthread_create(&readers[i], NULL, stress_reader, &stress);
+        writer_stress[i].manager = manager;
+        reader_stress[i].manager = manager;
+        pthread_create(&writers[i], NULL, stress_writer, &writer_stress[i]);
+        pthread_create(&readers[i], NULL, stress_reader, &reader_stress[i]);
     }
     for (int i = 0; i < STRESS_THREADS; i++) {
         pthread_join(writers[i], NULL);
         pthread_join(readers[i], NULL);
+        busy += writer_stress[i].busy;
+        committed += writer_stress[i].committed;
+        bad_snapshots += reader_stress[i].bad_snapshots;
     }
-    CHECK(stress.bad_snapshots == 0);
+    CHECK(bad_snapshots == 0);
+    CHECK(committed == fake.finish_applied);
     CHECK(fake.max_writers_inside == 1);   /* backend 안에 writer가 둘 들어간 적 없다 */
     CHECK(fake.begin_calls == fake.finish_calls);
     CHECK(txn_manager_last_committed(manager) == (uint64_t)fake.finish_applied);
-    CHECK(fake.finish_applied == STRESS_THREADS * STRESS_ROUNDS - stress.busy);
+    CHECK(fake.finish_applied == STRESS_THREADS * STRESS_ROUNDS - busy);
     CHECK(txn_manager_oldest_snapshot(manager) == txn_manager_last_committed(manager));
     CHECK(txn_manager_close(&manager) == TXN_OK);
 }
@@ -835,7 +928,9 @@ int main(void)
     test_lifetime();
     test_readers_and_horizon();
     test_reentrancy();
-    test_epoch_and_real_timeout();
+    test_epoch();
+    test_timeout_deterministic();
+    test_real_timeout_completes();
     test_threads();
     if (failures != 0) {
         fprintf(stderr, "%d check(s) failed\n", failures);
