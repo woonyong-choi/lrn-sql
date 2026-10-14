@@ -36,6 +36,17 @@
  * 동시성: 풀의 회계는 mutex로 보호되어 여러 스레드가 각자 세션으로 reserve·release해도 된다. 같은
  * 데이터베이스에 대한 문장 실행은 직렬화된다(동시 writer의 정책은 이 모듈의 범위 밖이다). 한 세션은 한 번에
  * 한 스레드만 쓴다.
+ * 수명의 시작과 끝은 호출자가 직렬화한다. 같은 풀 또는 같은 데이터베이스에 대해 session_pool_open_database·
+ * session_pool_create_database·session_open 같은 새 핸들을 만드는 호출과 session_close·
+ * session_pool_close_database·session_pool_close를 서로 동시에 부르지 않는다(호출 하나가 돌아온 뒤 다음을 부른다).
+ * 닫는 호출이 BUSY를 돌려주는 것은 이미 만들어져 쓰이는 대상이 남아 있어서이며, 다른 스레드가 새로 여는 호출과
+ * 경합하는 것을 막아 주지 않는다. 안전한 예외는 하나다: 호출자가 이미 쥔 결과의 result_release는 다른 스레드의
+ * session_pool_close와 동시에 불러도 된다. 풀은 열린 세션·데이터베이스가 없고 마지막 결과의 반환이 끝나
+ * 계상 객체가 사라진 뒤에야 닫히며 그 전에는 SESSION_BUSY다. session_pool_close가 성공해도 release를 부른
+ * 스레드가 결과 포인터를 지우는 마지막 쓰기까지 끝났다는 뜻은 아니므로 그 스레드를 join한 뒤에 포인터를 읽는다.
+ * 통계 조회(session_pool_stats·session_stats_get)와 session_cancel은 대상 풀·세션이 살아 있도록 호출자가
+ * 수명을 보장해야 하며 최종 close와 직렬화한다. 열린 자원이 없을 때 통계 조회와 동시에 session_pool_close가
+ * 성공하면 풀이 해제될 수 있다.
  */
 
 typedef struct session_pool session_pool_t;

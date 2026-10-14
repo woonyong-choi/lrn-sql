@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -732,6 +733,59 @@ static void test_mock_consumer(void)
     clean_dir();
 }
 
+/* ── 실행 중인 결과 release와 pool_close ── */
+typedef struct {
+    result_t *held;
+    int *go;
+} releaser_t;
+
+static void *releaser_main(void *arg)
+{
+    releaser_t *r = arg;
+    while (!__atomic_load_n(r->go, __ATOMIC_ACQUIRE)) sched_yield();
+    result_release(&r->held);
+    return NULL;
+}
+
+static void test_release_races_pool_close(void)
+{
+    printf("결과 release와 pool_close 경합\n");
+    enum { N = 6, ROUNDS = 40 };
+    for (int round = 0; round < ROUNDS; round++) {
+        fresh_dir();
+        session_limits_t limits = big_limits();
+        fixture_t f = open_fixture(&limits);
+        setup_data(f.session);
+        releaser_t jobs[N];
+        int go = 0;
+        for (int i = 0; i < N; i++) {
+            jobs[i].held = NULL;
+            jobs[i].go = &go;
+            assert(run(f.session, "SELECT * FROM t", &jobs[i].held).rows == 20);
+        }
+        /* 세션·DB는 먼저 닫고 결과만 남긴다(수명 호출은 이 스레드가 직렬로 끝낸다) */
+        assert(session_close(f.session) == SESSION_OK);
+        database_status_t ds;
+        assert(session_pool_close_database(f.db, &ds) == SESSION_OK);
+        pthread_t threads[N];
+        for (int i = 0; i < N; i++) assert(pthread_create(&threads[i], NULL, releaser_main, &jobs[i]) == 0);
+        __atomic_store_n(&go, 1, __ATOMIC_RELEASE);
+        /* release가 도는 동안 pool_close를 되풀이한다. 성공하는 순간은 마지막 반환이 끝난 뒤여야 한다 */
+        long busy = 0;
+        session_status_t st;
+        while ((st = session_pool_close(f.pool)) == SESSION_BUSY) {
+            busy++;
+            sched_yield();
+        }
+        CHECK(st == SESSION_OK, "round %d: 풀 닫기 (%d)", round, (int)st);
+        /* pool_close 성공은 release 스레드의 마지막 쓰기(*result = NULL)까지 보장하지 않는다. join한 뒤에 읽는다 */
+        for (int i = 0; i < N; i++) pthread_join(threads[i], NULL);
+        for (int i = 0; i < N; i++) CHECK(jobs[i].held == NULL, "round %d: 결과 %d release됨", round, i);
+        (void)busy;
+    }
+    clean_dir();
+}
+
 int main(void)
 {
     test_lifecycle();
@@ -744,6 +798,7 @@ int main(void)
     test_alloc_failure_sweep();
     test_threads();
     test_mock_consumer();
+    test_release_races_pool_close();
     printf("\n%d checks, %d failures\n", g_run, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
