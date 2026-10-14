@@ -306,11 +306,66 @@ static void sweep(model_mode_t mode, const char *name)
     clean_files();
 }
 
-static void kill_test(model_mode_t mode, const char *name, int rounds)
+/*
+ * kill 검사의 종료 시점은 FAULT_SEED(10진 uint64)로 정한다. 환경변수가 없으면 고정 기본값이다.
+ * 같은 seed는 같은 지연 시퀀스와 같은 홀수 라운드 대기 선택을 만든다. 실제 OS 스케줄과 그때
+ * 승인된 commit 개수까지 같다고 보장하지는 않는다. 재현 대상은 선택한 시퀀스이며, 실패하면
+ * 출력한 seed와 round로 같은 선택을 다시 돌린다.
+ */
+#define DEFAULT_FAULT_SEED 1ull
+
+/* 숫자만으로 된 uint64. 빈 문자열, 부호, 공백, 접미 문자, 넘침은 거절한다. */
+static bool parse_seed(const char *s, uint64_t *out)
+{
+    if (s == NULL || *s == '\0') return false;
+    uint64_t v = 0;
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9') return false;
+        uint64_t d = (uint64_t)(*p - '0');
+        if (v > (UINT64_MAX - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    *out = v;
+    return true;
+}
+
+/* 상태를 한 칸 옮기고 이번 라운드의 지연(마이크로초)을 돌려준다 */
+static unsigned seed_delay_us(uint64_t *state)
+{
+    *state = *state * 6364136223846793005ull + 1442695040888963407ull;
+    return (unsigned)(300 + (*state >> 33) % 9000);
+}
+
+static void delay_sequence(uint64_t seed, int n, unsigned *out)
+{
+    uint64_t st = seed;
+    for (int i = 0; i < n; i++) out[i] = seed_delay_us(&st);
+}
+
+static void seed_self_test(uint64_t seed)
+{
+    printf("\n[FAULT_SEED 선택 시퀀스]\n");
+    unsigned a[32], b[32], c[32];
+    delay_sequence(seed, 32, a);
+    delay_sequence(seed, 32, b);
+    delay_sequence(seed + 1, 32, c);
+    CHECK(memcmp(a, b, sizeof(a)) == 0, "같은 seed는 같은 지연 시퀀스");
+    CHECK(memcmp(a, c, sizeof(a)) != 0, "다른 seed는 다른 지연 시퀀스");
+    uint64_t v = 0;
+    CHECK(parse_seed("0", &v) && v == 0, "0 허용");
+    CHECK(parse_seed("18446744073709551615", &v) && v == UINT64_MAX, "uint64 최댓값 허용");
+    CHECK(!parse_seed("18446744073709551616", &v), "uint64 넘침 거절");
+    CHECK(!parse_seed("", &v) && !parse_seed("-1", &v) && !parse_seed("+1", &v) && !parse_seed(" 1", &v) &&
+              !parse_seed("1 ", &v) && !parse_seed("1x", &v) && !parse_seed("0x10", &v) && !parse_seed("abc", &v),
+          "빈 값, 부호, 공백, 접미 문자, 16진수 거절");
+}
+
+static void kill_test(model_mode_t mode, const char *name, int rounds, uint64_t seed)
 {
     printf("\n[kill -9 %s]\n", name);
     model_shared_t *sh = shared_new();
-    unsigned long seed = (unsigned long)time(NULL) ^ 0x9E3779B9ul;
+    uint64_t state = seed;
+    printf("  seed=%llu rounds=%d\n", (unsigned long long)seed, rounds);
     int bad = 0, killed = 0, with_acks = 0;
     for (int r = 0; r < rounds; r++) {
         clean_files();
@@ -326,13 +381,15 @@ static void kill_test(model_mode_t mode, const char *name, int rounds)
         if (r % 2 == 1) {
             for (int spin = 0; spin < 5000 && ((volatile model_shared_t *)sh)->acked_n == 0; spin++) usleep(1000);
         }
-        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
-        usleep((useconds_t)(300 + (seed >> 33) % 9000));
+        unsigned delay = seed_delay_us(&state);
+        usleep((useconds_t)delay);
         kill(pid, SIGKILL);
         int status;
         waitpid(pid, &status, 0);
         killed += WIFSIGNALED(status);
         with_acks += sh->acked_n > 0;
+        printf("  seed=%llu round=%d delay_us=%u wait_ack=%d killed=%d acked=%llu\n", (unsigned long long)seed, r, delay,
+               r % 2 == 1, WIFSIGNALED(status) ? 1 : 0, (unsigned long long)sh->acked_n);
         char label[96];
         snprintf(label, sizeof(label), "%s kill#%d acked=%llu", name, r, (unsigned long long)sh->acked_n);
         if (!verify(mode, sh, label)) bad++;
@@ -347,11 +404,20 @@ static void kill_test(model_mode_t mode, const char *name, int rounds)
 int main(int argc, char **argv)
 {
     int rounds = argc > 1 ? atoi(argv[1]) : 30;
+    uint64_t seed = DEFAULT_FAULT_SEED;
+    const char *env = getenv("FAULT_SEED");
+    if (env != NULL && !parse_seed(env, &seed)) {
+        printf("FAULT_SEED는 0 이상 uint64 10진수여야 한다: \"%s\"\n", env);
+        return 2;
+    }
+    printf("FAULT_SEED=%llu (%s)\n", (unsigned long long)seed, env != NULL ? "환경변수" : "기본값");
+    printf("같은 seed는 같은 선택 시퀀스를 만들 뿐, OS 스케줄과 승인 commit 개수의 동일성은 보장하지 않는다.\n");
+    seed_self_test(seed);
     clean_files();
     sweep(MODEL_COW, "COW·COMMITTED_ONLY");
     sweep(MODEL_MVCC, "MVCC·ALL");
-    kill_test(MODEL_COW, "COW·COMMITTED_ONLY", rounds);
-    kill_test(MODEL_MVCC, "MVCC·ALL", rounds);
+    kill_test(MODEL_COW, "COW·COMMITTED_ONLY", rounds, seed);
+    kill_test(MODEL_MVCC, "MVCC·ALL", rounds, seed);
     clean_files();
     printf("\n%d checks, %d failed\n", g_run, g_fail);
     return g_fail == 0 ? 0 : 1;
