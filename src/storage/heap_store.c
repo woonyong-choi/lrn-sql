@@ -137,9 +137,10 @@ static bool list_push(u32_list_t *list, uint32_t value, const mem_ledger_t *ledg
 
 static void list_free(u32_list_t *list, const mem_ledger_t *ledger)
 {
-    acct_release(ledger, list->cap * sizeof(uint32_t));
+    size_t bytes = list->cap * sizeof(uint32_t);
     free(list->items);
     *list = (u32_list_t){NULL, 0, 0};
+    acct_release(ledger, bytes);  /* 해제한 뒤에 몫을 돌려준다 */
 }
 
 static bool list_remove(u32_list_t *list, uint32_t value)
@@ -598,8 +599,8 @@ void heap_release_row(const heap_t *heap, value_t *row)
 
 void heap_free_pages(const heap_t *heap, uint32_t *pages, size_t count)
 {
-    if (heap != NULL) acct_release(&heap->ledger, count * sizeof(uint32_t));
     free(pages);
+    if (heap != NULL) acct_release(&heap->ledger, count * sizeof(uint32_t));
 }
 
 heap_status_t heap_get(heap_t *heap, heap_locator_t locator, value_t *row)
@@ -860,18 +861,20 @@ void heap_batch_free(heap_batch_t *batch)
     if (batch == NULL) return;
     mem_ledger_t ledger = batch->ledger;
     size_t pages = 0;
+    size_t structure = sizeof(heap_batch_t) + batch->entry_cap * BATCH_ENTRY_BYTES;
     for (size_t i = 0; i < batch->entry_count; i++) {
         if (batch->bufs[i] != NULL) pages++;
         free(batch->bufs[i]);
     }
-    acct_release(&ledger, pages * RECORD_PAGE_BYTES);
-    acct_release(&ledger, sizeof(heap_batch_t) + batch->entry_cap * BATCH_ENTRY_BYTES);
     free(batch->entries);
     free(batch->bufs);
     free(batch->dirty);
     list_free(&batch->old_pages, &ledger);
     list_free(&batch->fresh, &ledger);
     free(batch);
+    /* 모든 메모리를 해제한 뒤에 몫을 돌려준다 */
+    acct_release(&ledger, pages * RECORD_PAGE_BYTES);
+    acct_release(&ledger, structure);
 }
 
 /* 새 페이지 번호를 받아 fresh에 기록한다. 기록할 자리를 먼저 잡아 두어 할당 뒤 실패로 새지 않는다. */
