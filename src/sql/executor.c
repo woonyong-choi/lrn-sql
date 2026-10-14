@@ -249,7 +249,7 @@ static exec_result_t exec_create_table(pager_t *pager, statement_t *stmt)
      * 예: [8, 32, 4] → offsets=[0, 8, 40], row_size=44
      */
     schema_compute_layout(hdr);
-    pager->header_dirty = true;
+    pager_note_header_change(pager);
 
     snprintf(res.message, sizeof(res.message),
              "'%s' 테이블 생성 완료 (row_size=%u, columns=%u)",
@@ -351,10 +351,10 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
     }
 
     /* 값 검증이 끝난 뒤에만 id를 소비하고 쓰기 잠금을 잡는다. */
-    pthread_mutex_lock(&pager->header_lock);
+    pager_header_lock(pager);
     uint64_t my_id = hdr->next_id++;
-    pager->header_dirty = true;
-    pthread_mutex_unlock(&pager->header_lock);
+    pager_note_header_change(pager);
+    pager_header_unlock(pager);
 
     lock_table_t *lt = db_get_lock_table();
     if (lock_acquire(lt, my_id, LOCK_X) != 0) {
@@ -386,10 +386,10 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
         return res;
     }
 
-    pthread_mutex_lock(&pager->header_lock);
+    pager_header_lock(pager);
     hdr->row_count++;
-    pager->header_dirty = true;
-    pthread_mutex_unlock(&pager->header_lock);
+    pager_note_header_change(pager);
+    pager_header_unlock(pager);
 
     snprintf(res.message, sizeof(res.message),
              "1행 삽입 완료 (id=%" PRIu64 ")", my_id);
@@ -1104,9 +1104,9 @@ static exec_result_t exec_table_scan(pager_t *pager, statement_t *stmt)
 
         uint64_t count = 0;
         if (stmt->predicate_kind == PREDICATE_NONE) {
-            pthread_mutex_lock(&pager->header_lock);
+            pager_header_lock(pager);
             count = hdr->row_count;
-            pthread_mutex_unlock(&pager->header_lock);
+            pager_header_unlock(pager);
         } else {
             count_ctx_t cc = { .pager = pager, .stmt = stmt, .count = 0 };
             heap_scan(pager, hdr->row_size, count_scan_cb, &cc);
@@ -1304,10 +1304,10 @@ static exec_result_t exec_index_delete(pager_t *pager, statement_t *stmt)
         return io_failure(pager, "DELETE");
     }
 
-    pthread_mutex_lock(&pager->header_lock);
+    pager_header_lock(pager);
     pager->header.row_count--;
-    pager->header_dirty = true;
-    pthread_mutex_unlock(&pager->header_lock);
+    pager_note_header_change(pager);
+    pager_header_unlock(pager);
 
     snprintf(res.message, sizeof(res.message),
              "1행 삭제 완료 (id=%" PRIu64 ")", stmt->pred_id);
@@ -1375,10 +1375,10 @@ static exec_result_t exec_delete_scan(pager_t *pager, statement_t *stmt)
         }
 
         if (heap_delete(pager, ref) == 0 && bptree_delete(pager, dc.ids_to_delete[i]) == 0) {
-            pthread_mutex_lock(&pager->header_lock);
+            pager_header_lock(pager);
             pager->header.row_count--;
-            pager->header_dirty = true;
-            pthread_mutex_unlock(&pager->header_lock);
+            pager_note_header_change(pager);
+            pager_header_unlock(pager);
             dc.count++;
         }
     }
@@ -1571,7 +1571,7 @@ static exec_result_t exec_update_scan(pager_t *pager, statement_t *stmt)
         uc.count++;
     }
     free(uc.ids);
-    pager->header_dirty = true;
+    pager_note_header_change(pager);
 
     snprintf(res.message, sizeof(res.message), "%u행 수정 완료 (TABLE_SCAN)", uc.count);
     return res;
@@ -1646,18 +1646,23 @@ static exec_result_t exec_drop_table(pager_t *pager, statement_t *stmt)
         pager_unpin(pager, new_root);
     }
 
-    /* 스키마 초기화 */
+    /* 스키마 초기화. header 이미지는 header_lock 아래에서 바꿔 flush 스냅샷과 겹치지 않게 한다 */
+    pager_header_lock(pager);
     hdr->column_count = 0;
     memset(hdr->table_name, 0, sizeof(hdr->table_name));
     hdr->row_size = 0;
     hdr->row_count = 0;
     hdr->next_id = 1;
     hdr->first_heap_page_id = new_heap;
-    hdr->root_index_page_id = new_root;
     memset(hdr->columns, 0, sizeof(hdr->columns));
-    pager->last_heap_page_id = new_heap;
-    pager->heap_may_have_free_slots = false; /* 새 빈 힙 체인으로 교체됨 */
-    pager->header_dirty = true;
+    pager_header_unlock(pager);
+    pager_publish_root(pager, new_root);
+    pager_tail_lock(pager);
+    atomic_store_explicit(&pager->last_heap_page_id, new_heap, memory_order_release);
+    pager_tail_unlock(pager);
+    atomic_store_explicit(&pager->heap_may_have_free_slots, false,
+                          memory_order_relaxed); /* 새 빈 힙 체인으로 교체됨 */
+    pager_note_header_change(pager);
 
     snprintf(res.message, sizeof(res.message),
              "'%s' 테이블 삭제 완료", stmt->table_name);
