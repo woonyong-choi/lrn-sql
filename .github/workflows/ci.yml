@@ -34,7 +34,7 @@ jobs:
           if [ "$SANITIZER" = thread ]; then
             make SANITIZE=thread test-step2 test-concurrency
           else
-            make SANITIZE="$SANITIZER" test-all test-runner test-fault test-concurrency
+            make SANITIZE="$SANITIZER" test-all test-runner test-fault test-concurrency test-result test-result-allocation
           fi
       - name: Preserve test outcomes, seeds and raw output
         if: always()
