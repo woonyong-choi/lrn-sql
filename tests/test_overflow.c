@@ -7,7 +7,7 @@
 #include "storage/record_page.h"
 
 #define PAGE_BYTES 128u
-#define PAYLOAD_BYTES (PAGE_BYTES - 24u)
+#define PAYLOAD_BYTES (PAGE_BYTES - 28u)
 #define MAX_PAGES 512u
 
 typedef struct {
@@ -102,10 +102,10 @@ static void reseal(uint8_t *page)
 {
     uint32_t hash = 2166136261u;
     for (size_t i = 0; i < PAGE_BYTES; i++) {
-        if (i >= 20 && i < 24) continue;
+        if (i >= 24 && i < 28) continue;
         hash = (hash ^ page[i]) * 16777619u;
     }
-    store_u32(page + 20, hash);
+    store_u32(page + 24, hash);
 }
 
 static overflow_ref_t write_value(store_t *store, size_t size, unsigned seed)
@@ -242,6 +242,69 @@ static void damaged_chains_are_detected(void)
     free(store);
 }
 
+/* 같은 길이의 다른 체인으로 next를 이으면 head 식별자가 달라 거절한다. */
+static void cross_chain_splice_is_rejected(void)
+{
+    store_t *store = calloc(1, sizeof(*store));
+    overflow_io_t io = io_for(store);
+    size_t size = 3 * PAYLOAD_BYTES;
+    overflow_ref_t first = write_value(store, size, 1);
+    overflow_ref_t second = write_value(store, size, 2);
+    uint32_t first_ids[3], second_ids[3];
+    first_ids[0] = first.head;
+    second_ids[0] = second.head;
+    for (size_t i = 1; i < 3; i++) {
+        first_ids[i] = load_u32(store->data[first_ids[i - 1]] + 8);
+        second_ids[i] = load_u32(store->data[second_ids[i - 1]] + 8);
+    }
+    uint8_t saved[PAGE_BYTES];
+    for (size_t at = 0; at < 2; at++) {
+        for (size_t into = at + 1; into < 3; into++) {
+            memcpy(saved, store->data[first_ids[at]], PAGE_BYTES);
+            store_u32(store->data[first_ids[at]] + 8, second_ids[into]);
+            reseal(store->data[first_ids[at]]);
+            size_t live = store->live_count;
+            uint8_t marker, *out = &marker;
+            assert(overflow_read(&io, first, &out) == OVERFLOW_CORRUPT && out == &marker);
+            assert(overflow_free(&io, first) == OVERFLOW_CORRUPT);
+            assert(store->live_count == live);
+            memcpy(store->data[first_ids[at]], saved, PAGE_BYTES);
+        }
+    }
+    assert_value(store, first, 1);
+    assert_value(store, second, 2);
+    assert(overflow_free(&io, first) == OVERFLOW_OK);
+    assert_value(store, second, 2);
+    assert(overflow_free(&io, second) == OVERFLOW_OK && store->live_count == 0);
+    free(store);
+}
+
+static bool allocate_duplicate(void *context, uint32_t *id)
+{
+    static uint32_t first_id;
+    if (first_id != OVERFLOW_NO_PAGE) {
+        *id = first_id;
+        return true;
+    }
+    bool ok = store_allocate(context, id);
+    first_id = *id;
+    return ok;
+}
+
+/* 이미 받은 번호를 다시 주는 어댑터는 INVALID로 막고 번호마다 한 번만 반납한다. */
+static void duplicate_allocation_is_rejected(void)
+{
+    store_t *store = calloc(1, sizeof(*store));
+    overflow_io_t io = io_for(store);
+    uint8_t bytes[3 * PAYLOAD_BYTES] = {0};
+    overflow_ref_t ref = {5, 6};
+    io.allocate = allocate_duplicate;
+    assert(overflow_write(&io, bytes, sizeof(bytes), &ref) == OVERFLOW_INVALID);
+    assert(ref.head == 5 && ref.size_bytes == 6 && store->live_count == 0);
+    assert(store->releases == 1);
+    free(store);
+}
+
 /* 할당·쓰기 중간 실패는 이번 호출이 잡은 페이지를 모두 돌려놓는다. */
 static void write_failure_reclaims_allocations(void)
 {
@@ -368,7 +431,7 @@ static void update_and_delete_keep_lifetime(void)
     assert(store->live_count == new_pages + 1);
     assert_value(store, new_ref, 2);
 
-    /* 회수된 옛 참조는 더 이상 읽히지 않는다(0으로 지운 페이지). */
+    /* 재사용되지 않은 회수 페이지는 거절한다. 재사용 뒤의 오래된 참조는 보장하지 않는다. */
     uint8_t marker, *out = &marker;
     assert(overflow_read(&io, old_ref, &out) != OVERFLOW_OK && out == &marker);
 
@@ -390,10 +453,12 @@ int main(void)
     boundaries_roundtrip_and_free();
     invalid_arguments_are_rejected();
     damaged_chains_are_detected();
+    cross_chain_splice_is_rejected();
+    duplicate_allocation_is_rejected();
     write_failure_reclaims_allocations();
     allocator_returning_null_page_is_rejected();
     read_and_release_failures_are_reported();
     update_and_delete_keep_lifetime();
-    puts("overflow: boundaries, corruption, partial failures, reclaim and update/delete lifetime");
+    puts("overflow: boundaries, corruption, cross-chain splice, partial failures, reclaim and update/delete lifetime");
     return 0;
 }
