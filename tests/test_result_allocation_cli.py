@@ -47,6 +47,10 @@ EXIT_USAGE = 2
 failures = 0
 
 
+# cost: time O(1), heap O(1), stack O(1), io 1 (ok가 거짓일 때만)
+# mem: heap ≈ len(msg)  (실패 한 줄의 f-string 한 개)
+# vars: msg = 실패 설명 문자열
+# basis: estimate
 def check(msg: str, *, ok: bool) -> None:
     global failures
     if not ok:
@@ -58,6 +62,14 @@ def row_name(i: int) -> str:
     return f"row-{i:04d}-" + "x" * 48
 
 
+# cost: time O(n) 호출 쪽, heap O(n·(l + r)), stack O(1), alloc O(n), io 1
+# mem: heap ≈ n·l (입력 SQL 문자열) + n·r (캡처한 자식 출력)
+# vars: n = ROWS + 2 (CREATE·INSERT·.exit 줄 수), l = 줄당 SQL 바이트(약 90),
+# vars: r = 문장당 응답 바이트
+# basis: estimate. 자식 minidb 한 개가 n개 문장을 한 세션으로 실행. 새 DB 파일을 만들어
+# basis: estimate. 쓰고, 문장마다 B+ tree에 넣으므로 자식 쪽 시간은 O(n log n)
+# alt: 시드 DB 한 번 만들고 shutil.copy로 재사용. io 1 복사, time O(파일 크기).
+# alt: 잃는 것: 복사본이 시드와 같다는 가정, 쓰기 검사마다 복사 필요
 def seed(binary: str, db: Path) -> None:
     text = (
         "CREATE TABLE t (name VARCHAR(64), age INT)\n"
@@ -100,6 +112,12 @@ def sanitizer_clean(text: str) -> bool:
     return "runtime error" not in text and "Sanitizer" not in text
 
 
+# cost: time O(s + o) 호출 쪽, heap O(o + e), stack O(1), alloc O(1), io 1
+# mem: heap ≈ o (캡처한 stdout) + e (환경 변수 사본)
+# vars: s = SESSION 바이트(고정 약 90), o = 자식 출력 바이트(스캔 한 줄 약 70 × ROWS),
+# vars: e = 현재 환경 변수 총 바이트
+# basis: estimate. 자식 minidb 한 개가 기존 DB 파일을 열어 SELECT 세 문장을 실행하고
+# basis: estimate. 종료 때 pager_close로 flush. 제한 시간 120초
 def run_repl(
     binary: str,
     db: Path,
@@ -189,6 +207,11 @@ def post(port: int, sql: str) -> tuple[int, str]:
     return resp.status, body
 
 
+# cost: time O(k) 평균, O(100·(1 + 0.1)초) 최악, heap O(1), stack O(1), io k + 2
+# mem: heap ≈ O(1) (파이프 버퍼는 운영체제 쪽, stop()이 비울 때까지 쌓임)
+# vars: k = 서버가 포트를 열 때까지의 연결 시도 횟수(최대 100)
+# basis: estimate. free_port의 bind 한 번과 서버 프로세스 시작 한 번이 고정 비용이고
+# basis: estimate. 시도마다 connect 한 번(제한 1초)과 실패 때 0.1초 대기
 def serve(
     binary: str,
     db: Path,
@@ -213,6 +236,10 @@ def serve(
     raise AssertionError("서버가 열리지 않음")
 
 
+# cost: time O(f + S) 호출 쪽, heap O(S), stack O(1), io 3 (신호 1, 대기·읽기 2)
+# mem: heap ≈ S (서버가 쓴 stdout·stderr 전체)
+# vars: f = 서버 종료 때 flush할 dirty 페이지 수, S = 서버 출력 총 바이트
+# basis: estimate. SIGINT 뒤 최대 60초 대기. 시간 초과면 kill과 재수집으로 io 2 추가
 def stop(proc: subprocess.Popen[str]) -> tuple[str, str]:
     proc.send_signal(signal.SIGINT)
     try:
@@ -266,6 +293,12 @@ def test_http(binary: str, work: Path) -> None:
         seed(binary, db)
 
 
+# cost: time O(1) 호출 쪽(프로세스 15개), heap O(1), stack O(1), io 15 + 15 + k + 5
+# mem: heap ≈ O(1) (DB 파일 두 개 repl.db·http.db는 디스크, 끝에 rmtree)
+# vars: k = 서버 3개의 연결 시도 합(serve 참고)
+# basis: measured test_result_allocation_cli.py 전체 실행(약 0.6초, macOS arm64
+# basis: measured UBSan 빌드, 2026-10-15 한 번). 프로세스는 REPL 8개와 HTTP 7개(시드 4,
+# basis: measured 서버 3), HTTP 요청은 서버당 5개, 나머지 io는 mkdir·rmtree·SIGINT 3
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
