@@ -32,6 +32,7 @@ SOURCES = [
     "src/storage/catalog.c",
     "src/storage/catalog_store.c",
     "src/storage/heap_store.c",
+    "src/storage/pk_tree.c",
     "src/storage/page_file.c",
     "src/storage/record.c",
     "src/storage/record_page.c",
