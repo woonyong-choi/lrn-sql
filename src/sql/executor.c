@@ -193,6 +193,27 @@ static int parse_integer_value(const char *input, int64_t min, int64_t max,
  *  id는 시스템 컬럼으로 자동 추가된다 (사용자가 명시해도 건너뜀).
  *  현재 단일 테이블만 지원하며, 이미 테이블이 있으면 오류를 반환한다.
  * ══════════════════════════════════════════════════════════════════════ */
+/*
+ * VARCHAR(n)은 n바이트 고정 폭 슬롯이다. 읽을 때 붙이는 종료 NUL이 row_value_t의 str_val[256]에 들어가야
+ * 하므로 n은 1~255다. 이 범위 밖의 폭은 슬롯 계산과 메모리 복사를 깨뜨리므로 만들지 않는다.
+ */
+#define VARCHAR_MIN_WIDTH 1u
+#define VARCHAR_MAX_WIDTH 255u
+
+/* 값이 컬럼 폭(바이트)에 그대로 들어가는지. 들어가지 않는 값은 절단하지 않고 거절한다. */
+static bool varchar_fits(const column_meta_t *col, const char *text)
+{
+    return strlen(text) <= col->size;
+}
+
+static void varchar_too_long(exec_result_t *res, const column_meta_t *col)
+{
+    res->status = -1;
+    snprintf(res->message, sizeof(res->message),
+             "오류: 컬럼 '%s'의 값이 VARCHAR(%u) 폭(%u바이트)을 넘습니다", col->name,
+             (unsigned)col->size, (unsigned)col->size);
+}
+
 static exec_result_t exec_create_table(pager_t *pager, statement_t *stmt)
 {
     exec_result_t res = {0, "", NULL, 0};
@@ -203,6 +224,19 @@ static exec_result_t exec_create_table(pager_t *pager, statement_t *stmt)
         snprintf(res.message, sizeof(res.message),
                  "오류: '%s' 테이블이 이미 존재합니다", stmt->table_name);
         return res;
+    }
+
+    /* 헤더를 고치기 전에 폭을 검사한다. 거절하면 테이블을 만들지 않는다. */
+    for (uint16_t i = 0; i < stmt->col_count; i++) {
+        const column_def_t *cd = &stmt->col_defs[i];
+        if (cd->type == COL_TYPE_VARCHAR
+            && (cd->size < VARCHAR_MIN_WIDTH || cd->size > VARCHAR_MAX_WIDTH)) {
+            res.status = -1;
+            snprintf(res.message, sizeof(res.message),
+                     "오류: 컬럼 '%s'의 VARCHAR 폭은 %u~%u여야 합니다", cd->name,
+                     VARCHAR_MIN_WIDTH, VARCHAR_MAX_WIDTH);
+            return res;
+        }
     }
 
     strncpy(hdr->table_name, stmt->table_name, sizeof(hdr->table_name) - 1);
@@ -335,7 +369,11 @@ static exec_result_t exec_insert(pager_t *pager, statement_t *stmt)
                 else values[i].bigint_val = number;
                 break;
             case COL_TYPE_VARCHAR:
-                strncpy(values[i].str_val, input, 255);
+                if (!varchar_fits(col, input)) {
+                    varchar_too_long(&res, col);
+                    return res;
+                }
+                memcpy(values[i].str_val, input, strlen(input));
                 break;
         }
     }
@@ -1062,6 +1100,11 @@ static int validate_update_target(const db_header_t *hdr, const statement_t *stm
                  "오류: 시스템 컬럼 '%s'은(는) 수정할 수 없습니다", stmt->update_field);
         return -1;
     }
+    const column_meta_t *col = &hdr->columns[col_idx];
+    if (col->type == COL_TYPE_VARCHAR && !varchar_fits(col, stmt->update_value)) {
+        varchar_too_long(res, col);
+        return -1;
+    }
     return col_idx;
 }
 
@@ -1376,8 +1419,9 @@ static void apply_update_to_row(const db_header_t *hdr, row_value_t *values,
             values[col_idx].bigint_val = atoll(stmt->update_value);
             break;
         case COL_TYPE_VARCHAR:
+            /* validate_update_target이 폭을 이미 확인했다. 절단 없이 그대로 복사한다. */
             memset(values[col_idx].str_val, 0, 256);
-            strncpy(values[col_idx].str_val, stmt->update_value, 255);
+            memcpy(values[col_idx].str_val, stmt->update_value, strlen(stmt->update_value));
             break;
     }
 }
