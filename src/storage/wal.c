@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
@@ -197,10 +198,10 @@ static int sync_fd(const wal_io_t *io, int fd)
 
 static int sync_parent_dir(const wal_io_t *io, const char *path)
 {
+    char dir[PATH_MAX + 2];
     size_t n = strlen(path);
-    char *dir = malloc(n + 2);
-    if (dir == NULL) {
-        errno = ENOMEM;
+    if (n >= PATH_MAX) {
+        errno = ENAMETOOLONG;
         return -1;
     }
     memcpy(dir, path, n + 1);
@@ -213,7 +214,6 @@ static int sync_parent_dir(const wal_io_t *io, const char *path)
         *slash = '\0';
     }
     int fd = open(dir, O_RDONLY);
-    free(dir);
     if (fd < 0) return -1;
     int rc = sync_fd(io, fd);
     int saved = errno;
@@ -425,13 +425,28 @@ static void wal_free(wal_t *w)
     free(w);
 }
 
-static wal_t *wal_alloc(int fd, bool writable, const wal_limits_t *limits)
+static uint64_t budget_of(const wal_limits_t *limits)
+{
+    return limits != NULL && limits->max_memory_bytes != 0 ? limits->max_memory_bytes
+                                                           : WAL_DEFAULT_MEMORY_BYTES;
+}
+
+/* 핸들 자체도 예산에 올린다. 예산이 핸들보다 작으면 할당하지 않고 WAL_LIMIT이다. */
+static wal_t *wal_alloc(int fd, bool writable, const wal_limits_t *limits, wal_status_t *st)
 {
     crc_init();
+    uint64_t budget = budget_of(limits);
+    if (budget < sizeof(wal_t)) {
+        *st = WAL_LIMIT;
+        return NULL;
+    }
     wal_t *w = calloc(1, sizeof(*w));
-    if (w == NULL) return NULL;
-    w->budget = limits != NULL && limits->max_memory_bytes != 0 ? limits->max_memory_bytes
-                                                                : WAL_DEFAULT_MEMORY_BYTES;
+    if (w == NULL) {
+        *st = WAL_NOMEM;
+        return NULL;
+    }
+    w->budget = budget;
+    w->mem_used = w->mem_peak = sizeof(*w);
     w->fd = fd;
     w->writable = writable;
     w->io = g_default_io;
@@ -483,15 +498,18 @@ wal_status_t wal_create(const char *path, wal_t **out)
 
 wal_status_t wal_create_with(const char *path, const wal_limits_t *limits, wal_t **out)
 {
+    if (out == NULL) return WAL_INVALID;
     *out = NULL;
     if (path == NULL) return WAL_INVALID;
+    if (budget_of(limits) < sizeof(wal_t)) return WAL_LIMIT; /* 파일을 만들기 전에 거절한다 */
     int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (fd < 0) return errno == EEXIST ? WAL_EXISTS : WAL_IO;
-    wal_t *w = wal_alloc(fd, true, limits);
+    wal_status_t ast = WAL_OK;
+    wal_t *w = wal_alloc(fd, true, limits, &ast);
     if (w == NULL) {
         close(fd);
         unlink(path);
-        return WAL_NOMEM;
+        return ast;
     }
     wal_status_t st = WAL_OK;
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
@@ -620,14 +638,17 @@ wal_status_t wal_open_with(const char *path, bool writable, const wal_limits_t *
     if (info == NULL) info = &local;
     memset(info, 0, sizeof(*info));
     info->redo_lsn = WAL_FIRST_LSN;
+    if (out == NULL) return WAL_INVALID;
     *out = NULL;
     if (path == NULL) return WAL_INVALID;
+    if (budget_of(limits) < sizeof(wal_t)) return WAL_LIMIT; /* 파일을 열기 전에 거절한다 */
     int fd = open(path, writable ? O_RDWR : O_RDONLY);
     if (fd < 0) return WAL_IO;
-    wal_t *w = wal_alloc(fd, writable, limits);
+    wal_status_t ast = WAL_OK;
+    wal_t *w = wal_alloc(fd, writable, limits, &ast);
     if (w == NULL) {
         close(fd);
-        return WAL_NOMEM;
+        return ast;
     }
     wal_status_t st = WAL_OK;
     struct stat sb;
@@ -853,6 +874,41 @@ wal_xid_state_t wal_xid_state(const wal_t *wal, wal_xid_t xid)
 
 /* ---- 복구 ---- */
 
+/* qsort는 구현이 임시 힙을 쓸 수 있어 예산 밖이 된다. 추가 공간 없는 제자리 heapsort를 쓴다. */
+typedef int (*elem_cmp_t)(const void *, const void *);
+
+static void elem_swap(unsigned char *a, unsigned char *b, size_t size)
+{
+    while (size-- > 0) {
+        unsigned char t = *a;
+        *a++ = *b;
+        *b++ = t;
+    }
+}
+
+static void sift_down(unsigned char *base, size_t size, size_t root, size_t n, elem_cmp_t cmp)
+{
+    for (;;) {
+        size_t child = 2 * root + 1;
+        if (child >= n) return;
+        if (child + 1 < n && cmp(base + child * size, base + (child + 1) * size) < 0) child++;
+        if (cmp(base + root * size, base + child * size) >= 0) return;
+        elem_swap(base + root * size, base + child * size, size);
+        root = child;
+    }
+}
+
+static void inplace_sort(void *base, size_t n, size_t size, elem_cmp_t cmp)
+{
+    unsigned char *b = base;
+    if (n < 2) return;
+    for (size_t i = n / 2; i-- > 0;) sift_down(b, size, i, n, cmp);
+    for (size_t end = n - 1; end > 0; end--) {
+        elem_swap(b, b + end * size, size);
+        sift_down(b, size, 0, end, cmp);
+    }
+}
+
 static int xid_cmp(const void *a, const void *b)
 {
     wal_xid_t x = *(const wal_xid_t *)a, y = *(const wal_xid_t *)b;
@@ -873,7 +929,7 @@ static wal_status_t finish_xid_states(wal_t *wal, const wal_replay_ops_t *ops, v
     for (size_t i = 0; i < wal->xid_cap; i++) {
         if (wal->xids[i].used) ids[n++] = wal->xids[i].xid;
     }
-    qsort(ids, n, sizeof(*ids), xid_cmp);
+    inplace_sort(ids, n, sizeof(*ids), xid_cmp);
     for (size_t i = 0; i < n; i++) {
         wal_xid_state_t s = wal_xid_state(wal, ids[i]);
         ops->xid_state(ctx, ids[i], s == WAL_XID_IN_PROGRESS ? WAL_XID_CRASHED : s);
@@ -955,7 +1011,7 @@ static wal_status_t replay_committed(wal_t *wal, const wal_replay_ops_t *ops, vo
             off += r.span;
         }
     }
-    qsort(cand, n, sizeof(*cand), commit_cmp);
+    inplace_sort(cand, n, sizeof(*cand), commit_cmp);
     for (size_t i = 0; i < n; i++) {
         xid_entry_t *e = cand[i];
         for (size_t k = 0; k < e->lsn_len; k++) {
