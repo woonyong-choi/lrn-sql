@@ -39,6 +39,8 @@ struct page_file {
     uint64_t staged_generation;
     uint32_t *pending;
     size_t pending_len, pending_cap;
+    uint32_t *aging;      /* 직전 commit이 더는 가리키지 않게 된 페이지. 한 번 더 commit해야 재사용된다 */
+    size_t aging_len, aging_cap;
     uint32_t *reusable;
     size_t reusable_len, reusable_cap;
 };
@@ -290,6 +292,7 @@ static void free_handle(page_file_t *file)
     free(file->path);
     free(file->partial_path);
     free(file->pending);
+    free(file->aging);
     free(file->reusable);
     free(file);
 }
@@ -671,6 +674,7 @@ page_file_status_t page_file_release(page_file_t *file, uint32_t page_id)
         return PAGE_FILE_INVALID;
     }
     if (contains(file->pending, file->pending_len, page_id) ||
+        contains(file->aging, file->aging_len, page_id) ||
         contains(file->reusable, file->reusable_len, page_id)) {
         return PAGE_FILE_INVALID; /* 이중 해제 */
     }
@@ -682,6 +686,11 @@ page_file_status_t page_file_release(page_file_t *file, uint32_t page_id)
 size_t page_file_pending_release_count(const page_file_t *file)
 {
     return file != NULL ? file->pending_len : 0;
+}
+
+size_t page_file_aging_release_count(const page_file_t *file)
+{
+    return file != NULL ? file->aging_len : 0;
 }
 
 size_t page_file_reusable_count(const page_file_t *file)
@@ -714,7 +723,8 @@ page_file_status_t page_file_commit(page_file_t *file)
     file->commit_outcome = PAGE_FILE_COMMIT_NOT_APPLIED;
     if (file->committed.generation >= UINT64_MAX - 1) return PAGE_FILE_LIMIT;
     /* 성공한 commit 뒤에 실패할 수 있는 할당은 미리 해 둔다. */
-    if (!grow(&file->reusable, &file->reusable_cap, file->reusable_len + file->pending_len)) {
+    if (!grow(&file->reusable, &file->reusable_cap, file->reusable_len + file->aging_len) ||
+        !grow(&file->aging, &file->aging_cap, file->pending_len)) {
         return PAGE_FILE_NOMEM;
     }
 
@@ -751,7 +761,14 @@ page_file_status_t page_file_commit(page_file_t *file)
 
     file->commit_outcome = PAGE_FILE_COMMIT_APPLIED;
     file->committed = next;
-    for (size_t i = 0; i < file->pending_len; i++) file->reusable[file->reusable_len++] = file->pending[i];
+    /*
+     * 이전 commit이 놓은 페이지는 방금 commit으로 두 제어 슬롯(현재와 fallback) 모두 더는 가리키지
+     * 않으므로 이제 재사용할 수 있다. 이번에 놓은 페이지는 fallback 세대가 아직 가리킬 수 있어 한 번 더
+     * commit한 뒤에야 재사용한다.
+     */
+    for (size_t i = 0; i < file->aging_len; i++) file->reusable[file->reusable_len++] = file->aging[i];
+    memcpy(file->aging, file->pending, file->pending_len * sizeof(*file->pending));
+    file->aging_len = file->pending_len;
     file->pending_len = 0;
     return PAGE_FILE_OK;
 }

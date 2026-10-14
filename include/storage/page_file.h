@@ -145,18 +145,21 @@ page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
                                        page_file_page_info_t *info);
 
 /*
- * 새 페이지 번호를 받는다. 마지막 commit이 이미 놓아 준 페이지를 먼저 재사용하고 없으면 높은
- * 수위를 올린다. 이 시점에는 파일에 아무것도 쓰지 않으며 commit된 제어 페이지가 가리키는
- * 페이지는 절대 돌려주지 않는다. 실패하면 상태를 바꾸지 않는다.
+ * 새 페이지 번호를 받는다. 재사용 가능한 페이지를 먼저 돌려주고 없으면 높은 수위를 올린다.
+ * 이 시점에는 파일에 아무것도 쓰지 않으며 현재 제어 페이지와 fallback 제어 페이지 어느 쪽이
+ * 가리켰을 수 있는 페이지도 돌려주지 않는다. 실패하면 상태를 바꾸지 않는다.
  */
 page_file_status_t page_file_alloc(page_file_t *file, uint32_t *page_id);
 /*
- * 페이지를 놓는다. 곧바로 재사용하지 않고, 이 페이지를 더는 가리키지 않는 제어 페이지가 commit된
- * 뒤에야 alloc이 돌려줄 수 있다. 호출자는 가리키던 참조를 바꾼 다음에 release한다.
- * commit이 실패하면 놓은 페이지는 계속 보류 상태이며 이전 제어 페이지는 그대로 유효하다.
+ * 페이지를 놓는다. 곧바로 재사용하지 않는다. 가리키던 참조를 바꾼 제어 페이지가 commit되어도
+ * 그 직전 세대(fallback)가 아직 이 페이지를 가리킬 수 있으므로, 그 commit 다음의 commit까지
+ * 두 번 성공한 뒤에야 alloc이 돌려줄 수 있다. 그래서 최신 제어 쓰기가 사라져 한 세대 전으로
+ * 열려도 그 세대가 가리키는 페이지는 덮어쓰이지 않았다. 호출자는 가리키던 참조를 바꾼 다음에
+ * release한다. commit이 실패하면 놓은 페이지는 계속 보류 상태이다.
  */
 page_file_status_t page_file_release(page_file_t *file, uint32_t page_id);
 size_t page_file_pending_release_count(const page_file_t *file);
+size_t page_file_aging_release_count(const page_file_t *file);
 size_t page_file_reusable_count(const page_file_t *file);
 
 /* 다음 commit이 제어 페이지에 쓸 카탈로그 참조를 정한다. commit 전까지 디스크에 닿지 않는다. */
