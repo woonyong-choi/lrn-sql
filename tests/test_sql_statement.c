@@ -397,6 +397,10 @@ static void select_forms(void)
     assert(statement->select.limit == 2);
     free_clean(statement);
 
+    statement = parse_ok("SELECT DISTINCT a, b FROM t");
+    assert(statement->select.distinct && statement->select.column_count == 2);
+    free_clean(statement);
+
     struct {
         const char *sql;
         sqlstmt_op_t op;
@@ -581,7 +585,7 @@ static void select_and_where_errors(void)
     expect_unsupported("SELECT * FROM t JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t UNION SELECT * FROM u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t ORDER BY a OFFSET 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 27);
-    expect_unsupported("SELECT DISTINCT a FROM t", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 7);
+    expect_syntax("SELECT DISTINCT FROM t", SQLSTMT_REASON_EXPECTED_IDENTIFIER, 16);
     expect_unsupported("SELECT a AS b FROM t", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 9);
     expect_unsupported("SELECT * FROM t AS u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t WHERE a = 1 AND b = 2", SQLSTMT_REASON_UNSUPPORTED_CONDITION, 28);
@@ -727,6 +731,7 @@ static void allocation_failures(void)
         "SELECT a, b, c, d, e FROM t WHERE a >= 'x'",
         "SELECT * FROM t WHERE a IS NOT NULL",
         "SELECT a FROM t WHERE b = 1 ORDER BY c DESC LIMIT 2",
+        "SELECT DISTINCT a, b FROM t WHERE c IS NULL",
         "UPDATE t SET a = 1, b = ?1, c = X'01', d = -1.5 WHERE e <> ?2",
         "DELETE FROM t WHERE \"column name\" = 'v'",
         "DROP TABLE t",

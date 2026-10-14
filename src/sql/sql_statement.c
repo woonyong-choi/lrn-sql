@@ -22,7 +22,7 @@ typedef struct {
 static const char *const RESERVED[] = {
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "UPDATE",
     "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
-    "ORDER", "BY", "ASC", "DESC", "LIMIT", NULL};
+    "ORDER", "BY", "ASC", "DESC", "LIMIT", "DISTINCT", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
@@ -444,6 +444,7 @@ static bool parse_select(parser_t *p, sqlstmt_t *statement)
     sqlstmt_select_t *query = &statement->select;
     statement->kind = SQLSTMT_SELECT;
     size_t capacity = 0;
+    query->distinct = take_word(p, "DISTINCT");
     if (take_punct(p, "*")) {
         query->select_all = true;
     } else {

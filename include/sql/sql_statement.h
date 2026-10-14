@@ -21,7 +21,7 @@
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
  *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT]
  *   INSERT INTO name [( column_name {, column_name} )] VALUES ( value {, value} )
- *   SELECT ( * | column_name {, column_name} ) FROM name [where]
+ *   SELECT [DISTINCT] ( * | column_name {, column_name} ) FROM name [where]
  *     [ORDER BY column_name [ASC | DESC]] [LIMIT nonnegative_integer]
  *   UPDATE name SET column_name = value {, column_name = value} [where]
  *   DELETE FROM name [where]
@@ -45,7 +45,7 @@
  *   - NULL은 값이며 NULL과의 = 비교도 그대로 구조에 담는다. 3치 논리는 실행기 몫이다.
  *   - X'hex'는 X와 따옴표 문자열이 붙어 있어야 하며 짝수 개의 16진 숫자여야 한다. 빈 X''는 빈 BLOB이다.
  *
- * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): GROUP BY·HAVING·OFFSET·DISTINCT·
+ * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): GROUP BY·HAVING·OFFSET·
  * JOIN·UNION 같은 절, AND·OR로 이은 둘 이상의 조건, 별칭(AS), 함수 호출, 테이블.컬럼 형태의 이름,
  * IF [NOT] EXISTS, 여러 행 INSERT, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중
  * PRIMARY KEY 외의 것, 복합 기본 키, 위에 없는 타입 이름, CREATE TABLE이 아닌 CREATE.
@@ -167,6 +167,7 @@ typedef struct {
 
 typedef struct {
     sqlstmt_name_t table;
+    bool distinct;
     bool select_all;
     sqlstmt_name_t *columns;     /* select_all이 아닐 때 column_count개 */
     size_t column_count;

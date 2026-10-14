@@ -700,6 +700,29 @@ static int select_sort_compare(const void *left_ptr, const void *right_ptr)
     return (left->ordinal > right->ordinal) - (left->ordinal < right->ordinal);
 }
 
+// cost: time O(r·s·k), heap O(1), stack O(1)
+// vars: r = 보존한 고유 행 수, s = 선택 컬럼 수, k = 값 비교 바이트
+// basis: estimate
+static bool select_sort_contains(const select_sort_t *sort, const value_t *row,
+                                 const size_t *picks, size_t selected)
+{
+    for (size_t i = 0; i < sort->count; i++) {
+        bool same = true;
+        for (size_t j = 0; j < selected; j++) {
+            int order = 0;
+            value_status_t status = value_compare(&sort->rows[i].values[j].view,
+                                                  &row[picks[j]].view, &order);
+            assert(status == VALUE_OK);
+            if (order != 0) {
+                same = false;
+                break;
+            }
+        }
+        if (same) return true;
+    }
+    return false;
+}
+
 // cost: time O(s + b), heap O(s + b), stack O(1), alloc O(s + 1)
 // vars: s = 선택 컬럼 수, b = 복사하는 값 바이트 수
 // basis: estimate
@@ -751,7 +774,7 @@ static result_status_t select_sort_add(select_sort_t *sort, const value_t *row,
     return RESULT_OK;
 }
 
-// cost: time O(r²·k + b) worst, heap O(r·s + b), stack O(1), io O(p)
+// cost: time O(r²·s·k + b) worst, heap O(r·s + b), stack O(1), io O(p)
 // vars: r = 조건에 맞는 행 수, k = 정렬 키 비교 바이트, b = 선택 값 복사 바이트, s = 선택 컬럼 수, p = 힙 페이지 수
 // basis: estimate
 static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
@@ -814,7 +837,8 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     size_t max_row = SELECT_SORT_MAX_BYTES < RESULT_DEFAULT_MAX_ROW_BYTES
                          ? SELECT_SORT_MAX_BYTES : RESULT_DEFAULT_MAX_ROW_BYTES;
     result_limits_t limits = {max_row, SELECT_SORT_MAX_BYTES};
-    result_builder_spec_t spec = {columns, selected, select->has_order ? &limits : NULL};
+    result_builder_spec_t spec = {columns, selected,
+                                  select->has_order || select->distinct ? &limits : NULL};
     result_status_t created = result_builder_create(&spec, &builder);
     if (created == RESULT_NOMEM) {
         status = DATABASE_EXEC_NOMEM;
@@ -834,16 +858,17 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
             goto done;
         }
         if (where_matches(&where, row)) {
-            result_status_t added;
-            if (select->has_order) {
-                added = select_sort_add(&sorted, row, picks, selected, order_column,
-                                        select->order_desc);
-            } else if (!select->has_limit || delivered < select->limit) {
+            bool duplicate = select->distinct && select_sort_contains(&sorted, row, picks, selected);
+            result_status_t added = RESULT_OK;
+            if (!duplicate && (select->has_order || select->distinct)) {
+                size_t key = select->has_order ? order_column : picks[0];
+                added = select_sort_add(&sorted, row, picks, selected, key, select->order_desc);
+            }
+            if (!duplicate && added == RESULT_OK && !select->has_order &&
+                (!select->has_limit || delivered < select->limit)) {
                 for (size_t i = 0; i < selected; i++) cells[i] = row[picks[i]].view;
                 added = result_builder_add_row(builder, cells, selected);
                 if (added == RESULT_OK) delivered++;
-            } else {
-                added = RESULT_OK;
             }
             if (added == RESULT_NOMEM) {
                 status = DATABASE_EXEC_NOMEM;

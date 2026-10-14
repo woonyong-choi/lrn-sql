@@ -598,6 +598,8 @@ static void test_select_sort_budget_returns_error(void)
 
     expect_class(db, "SELECT id, note FROM t ORDER BY id", RESULT_E_LIMIT);
     expect_text(db, "SELECT id FROM t ORDER BY id LIMIT 1", "[1] 1");
+    expect_class(db, "SELECT DISTINCT id, note FROM t", RESULT_E_LIMIT);
+    expect_text(db, "SELECT DISTINCT id FROM t LIMIT 1", "[1] 1");
     assert(database_close(db) == DATABASE_OK);
     clean_dir();
 }

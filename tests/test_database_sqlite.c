@@ -37,6 +37,15 @@ static char g_bigger_literal[30000];
 static const step_t STEPS[] = {
     {STEP_OK, "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(5) NOT NULL, score REAL, bio TEXT, avatar BLOB)"},
     {STEP_OK, "CREATE TABLE logs (ts INTEGER, msg TEXT NOT NULL)"},
+    {STEP_OK, "CREATE TABLE items (id INTEGER PRIMARY KEY, bucket INTEGER)"},
+    {STEP_SELECT, "SELECT DISTINCT bucket FROM items"},
+    {STEP_OK, "INSERT INTO items VALUES (1, 3)"},
+    {STEP_OK, "INSERT INTO items VALUES (2, 3)"},
+    {STEP_OK, "INSERT INTO items VALUES (3, NULL)"},
+    {STEP_OK, "INSERT INTO items VALUES (4, 1)"},
+    {STEP_SELECT, "SELECT DISTINCT bucket FROM items"},
+    {STEP_ORDERED, "SELECT DISTINCT bucket FROM items ORDER BY bucket DESC LIMIT 2"},
+    {STEP_SELECT, "SELECT DISTINCT ts FROM logs"},
     {STEP_ERROR, "CREATE TABLE logs (x INTEGER)"},
     {STEP_OK, "INSERT INTO users (name, score) VALUES ('alice', 1.5)"},
     {STEP_OK, "INSERT INTO users (name, score, bio) VALUES ('bobbybobbybobby', 2, 'hello')"},
@@ -46,6 +55,11 @@ static const step_t STEPS[] = {
     {STEP_OK, "INSERT INTO logs VALUES (1, 'boot')"},
     {STEP_OK, "INSERT INTO logs VALUES (NULL, 'no timestamp')"},
     {STEP_OK, "INSERT INTO logs (msg) VALUES ('only msg')"},
+    {STEP_OK, "INSERT INTO logs VALUES (NULL, 'no timestamp')"},
+    /* #161: NULL과 복합 투영의 중복 제거를 SQLite와 비교한다. */
+    {STEP_SELECT, "SELECT DISTINCT ts FROM logs"},
+    {STEP_SELECT, "SELECT DISTINCT ts, msg FROM logs"},
+    {STEP_SELECT, "SELECT DISTINCT msg FROM logs"},
     /* #160: ORDER BY/LIMIT의 행 순서와 정렬 키 비투영을 SQLite 결과와 대조한다. */
     {STEP_ORDERED, "SELECT name FROM users ORDER BY score DESC LIMIT 2"},
     {STEP_ORDERED, "SELECT name FROM users ORDER BY name ASC LIMIT 3"},
