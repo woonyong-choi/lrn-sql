@@ -48,5 +48,13 @@ typedef enum {
 catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *catalog);
 /* 현재 제어 페이지가 가리키는 카탈로그를 읽는다. 성공한 *out은 호출자가 catalog_close한다. */
 catalog_store_status_t catalog_store_load(page_file_t *file, catalog_t **out);
+/*
+ * 상한을 지키며 읽는 경로용. admit는 제어 페이지가 약속한 카탈로그 크기를 안 뒤 읽기 buffer를 할당하기 전에
+ * 불린다. 크기가 CATALOG_MAX_ENCODED_BYTES를 넘으면 할당 없이 CATALOG_STORE_LIMIT이고, admit가 false면
+ * 할당 없이 CATALOG_STORE_NOMEM이다. NULL이면 catalog_store_load와 같다.
+ */
+typedef bool (*catalog_store_admit_fn)(void *ctx, size_t catalog_bytes);
+catalog_store_status_t catalog_store_load_admitted(page_file_t *file, catalog_store_admit_fn admit,
+                                                   void *ctx, catalog_t **out);
 
 #endif
