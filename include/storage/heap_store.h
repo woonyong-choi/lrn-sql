@@ -15,7 +15,7 @@
  * catalog의 heap_root는 이 디렉터리의 첫 페이지를 가리킨다(0이면 빈 heap).
  *
  * 위치 locator 구별: heap_root가 가리키는 페이지의 종류를 page_file_page_info로 검증한다.
- *   PAGE_KIND_DIRECTORY + table ID 일치 + magic "LHD1" + version 1  -> 이 모듈의 디렉터리
+ *   PAGE_KIND_DIRECTORY + table ID 일치 + magic "LHD1" + version 1 또는 "LHD2" + version 2 -> 이 모듈의 디렉터리
  *   PAGE_KIND_RECORD (#77 legacy_migrate가 만든 단일 record root 포함) 그 밖의 종류
  *                                                                    -> HEAP_UNSUPPORTED_LOCATOR
  * 어떤 경우에도 옛 record root를 디렉터리로 재해석하거나 변환하지 않으며, 변환 함수도 없다.
@@ -31,6 +31,17 @@
  * 항목의 순서가 heap의 행 순서(scan 순서)이며 같은 page ID가 두 번 나오거나 디렉터리 페이지와
  * 겹치면 CORRUPT다. 체인이 순환하거나 page_count를 넘어 길면 CORRUPT다.
  *
+ * 디렉터리 루트 형식 둘(읽기는 둘 다, 쓰기는 항목 수로 고른다):
+ *   LHD1 체인  record page가 HEAP_DIRECTORY_ENTRIES개 이하면 위 페이지 한 장. 이 크기까지는 이 형식으로만 쓴다.
+ *              옛 코드가 쓴 여러 장짜리 체인도 읽는다. 다음 변경에서 아래 트리로 바뀐다(되돌리지 않는다).
+ *   LHD2 트리  record page가 그보다 많으면 루트 한 장 아래 잎 페이지 여러 장. 한 행을 바꾸면 바뀐 record page가
+ *              속한 잎과 루트만 새로 쓰고 나머지 잎은 그대로 가리킨다.
+ *     루트 본문: 0..3 magic "LHD2", 4..5 version u16 = 2, 6..7 flags u16 = 0, 8..11 table ID u32,
+ *                12..15 예약 u32 = 0, 16..19 잎 수 u32(1..HEAP_DIRECTORY_ENTRIES), 20.. 잎 페이지 ID u32 배열, 뒤는 0.
+ *     잎 본문: LHD1 본문과 같되 다음 페이지가 0이다. 마지막 잎을 뺀 모든 잎은 항목이 가득 차 있고
+ *              i번째 잎이 i * HEAP_DIRECTORY_ENTRIES번째 항목부터 담는다.
+ *   LHD2를 모르는 옛 코드는 트리 heap의 루트를 UNSUPPORTED_LOCATOR로 거절한다(변환하지 않는 계약과 같다).
+ *
  * 행 형식(record 하나, version 1): 필드 1 + 2n개.
  *   필드 0: INTEGER 1 (행 형식 version)
  *   컬럼마다 (kind, payload): kind는 INTEGER
@@ -45,7 +56,8 @@
  * 컬럼 타입은 catalog의 컬럼 타입이며 NOT NULL·VARCHAR 같은 제약은 이 모듈이 다루지 않는다.
  *
  * COW와 게시: 이미 commit된 상태에서 도달할 수 있는 페이지는 제자리에서 덮어쓰지 않는다.
- * 변경은 heap_batch_t에 모으고 바뀐 record page와 디렉터리 체인은 새로 할당한 페이지에 쓴다.
+ * 변경은 heap_batch_t에 모으고 바뀐 record page와 바뀐 디렉터리 페이지(LHD1은 한 장, LHD2는 루트와 바뀐 잎)를
+ * 새로 할당한 페이지에 쓴다. 바뀌지 않은 잎은 옛 페이지를 그대로 쓰므로 해제 목록에 넣지 않는다.
  * 호출자(database)의 순서:
  *   1. heap_batch_begin -> insert/update/delete -> heap_batch_finish (new_root와 해제 목록)
  *   2. catalog_set_locators(new_root) 후 catalog_store_save로 게시
@@ -72,6 +84,8 @@
 #define HEAP_MAX_ROW_BYTES 8000u
 #define HEAP_DIRECTORY_MAGIC "LHD1"
 #define HEAP_DIRECTORY_VERSION 1u
+#define HEAP_TREE_ROOT_MAGIC "LHD2"
+#define HEAP_TREE_ROOT_VERSION 2u
 #define HEAP_DIRECTORY_HEADER_BYTES 20u
 #define HEAP_DIRECTORY_ENTRIES ((PAGE_BODY_BYTES - HEAP_DIRECTORY_HEADER_BYTES) / 4u)
 
@@ -104,7 +118,7 @@ typedef struct heap_batch heap_batch_t;
 typedef struct heap_cursor heap_cursor_t;
 
 /*
- * 커밋된 상태를 연다. 디렉터리 체인을 모두 읽어 검증한다(record page 자체는 읽을 때 종류와
+ * 커밋된 상태를 연다. 디렉터리 페이지를 모두 읽어 검증한다(record page 자체는 읽을 때 종류와
  * table ID를 검증한다). 실패하면 *out은 NULL이고 파일은 바뀌지 않는다. 호출자는 file을
  * heap_close보다 오래 살려 둔다.
  */
@@ -163,7 +177,7 @@ heap_status_t heap_batch_update(heap_batch_t *batch, heap_locator_t locator,
 heap_status_t heap_batch_delete(heap_batch_t *batch, heap_locator_t locator);
 
 typedef struct {
-    uint32_t new_root;           /* 새 디렉터리 첫 페이지. record page가 하나도 없으면 0 */
+    uint32_t new_root;           /* 새 디렉터리 루트. record page가 하나도 없으면 0 */
     const uint32_t *old_pages;   /* 게시 성공 뒤 release할 페이지 */
     size_t old_count;
     const uint32_t *new_pages;   /* 이번 batch가 할당해 살아 있는 페이지 */
@@ -171,7 +185,7 @@ typedef struct {
 } heap_batch_result_t;
 
 /*
- * 바뀐 record page와 새 디렉터리 체인을 쓴다. 성공하면 result를 채운다(batch가 소유, free 전까지
+ * 바뀐 record page와 바뀐 디렉터리 페이지를 쓴다. 성공하면 result를 채운다(batch가 소유, free 전까지
  * 유효). 바뀐 것이 없어도 새 디렉터리를 쓰지 않고 현재 root를 돌려준다. 실패하면 batch는 FAILED다.
  */
 heap_status_t heap_batch_finish(heap_batch_t *batch, heap_batch_result_t *result);
