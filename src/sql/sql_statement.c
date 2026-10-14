@@ -209,6 +209,10 @@ void sqlstmt_free(sqlstmt_t *statement)
         case SQLSTMT_DROP_TABLE:
             name_clear(&statement->drop.table);
             break;
+        case SQLSTMT_BEGIN:
+        case SQLSTMT_COMMIT:
+        case SQLSTMT_ROLLBACK:
+            break;
     }
     free(statement);
 }
@@ -418,6 +422,29 @@ static bool reject_if_exists(parser_t *p)
         return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, token->offset);
     }
     return true;
+}
+
+/* BEGIN [TRANSACTION] [DURABLE | VOLATILE], START TRANSACTION [...] */
+static bool parse_begin(parser_t *p, sqlstmt_t *statement, bool start)
+{
+    statement->kind = SQLSTMT_BEGIN;
+    statement->txn.mode = SQLSTMT_TXN_DEFAULT;
+    if (start) {
+        if (!expect_word(p, "TRANSACTION")) return false;
+    } else {
+        take_word(p, "TRANSACTION");
+    }
+    if (take_word(p, "DURABLE")) statement->txn.mode = SQLSTMT_TXN_DURABLE;
+    else if (take_word(p, "VOLATILE")) statement->txn.mode = SQLSTMT_TXN_VOLATILE;
+    return parse_end(p);
+}
+
+/* COMMIT [TRANSACTION], ROLLBACK [TRANSACTION] */
+static bool parse_finish(parser_t *p, sqlstmt_t *statement, sqlstmt_kind_t kind)
+{
+    statement->kind = kind;
+    take_word(p, "TRANSACTION");
+    return parse_end(p);
 }
 
 static bool parse_drop(parser_t *p, sqlstmt_t *statement)
@@ -807,6 +834,16 @@ sqlstmt_status_t sqlstmt_parse(const lexer_statement_t *statement, const lexer_b
     } else if (word_is(first, "DROP")) {
         parser.pos++;
         ok = parse_drop(&parser, built);
+    } else if (word_is(first, "BEGIN") || word_is(first, "START")) {
+        bool start = word_is(first, "START");
+        parser.pos++;
+        ok = parse_begin(&parser, built, start);
+    } else if (word_is(first, "COMMIT")) {
+        parser.pos++;
+        ok = parse_finish(&parser, built, SQLSTMT_COMMIT);
+    } else if (word_is(first, "ROLLBACK")) {
+        parser.pos++;
+        ok = parse_finish(&parser, built, SQLSTMT_ROLLBACK);
     } else {
         ok = fail(&parser, SQLSTMT_SYNTAX, SQLSTMT_REASON_UNKNOWN_STATEMENT, first->offset);
     }
