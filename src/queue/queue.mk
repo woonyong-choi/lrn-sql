@@ -1,4 +1,4 @@
-# 선택형 ACK 큐(#140) 빌드 규칙. Makefile이 -include로 읽는다. 이 파일을 지워도 DB 빌드와 test-all은 바뀌지 않는다.
+# 선택형 ACK 큐(#140) 빌드 규칙. Makefile이 -include로 읽는다. DB 코어 빌드에는 큐가 포함되지 않는다.
 # DB 코어(DATABASE_OBJS)는 큐 객체를 링크하지 않는다. 큐를 쓰는 바이너리만 QUEUE_OBJS를 더한다.
 
 QUEUE_OBJS = $(BUILD_DIR)/queue/ack_queue.o $(BUILD_DIR)/queue/ack_queue_sql.o
