@@ -623,6 +623,87 @@ static void test_durability_modes(void)
     database_close(db);
 }
 
+/* ── 11. 다른 database의 트랜잭션과 읽기 전용 database ── */
+
+static void test_wrong_database_and_read_only(void)
+{
+    printf("\n[다른 database의 트랜잭션 거절과 읽기 전용 database]\n");
+    make_db();
+    database_t *a = open_db(true);
+    ackq_options_t o = qopts("jobs", 0);
+    ackq_t *qa;
+    assert(ackq_install(a, &o, &qa) == ACKQ_OK);
+    g_now = 10;
+    uint64_t id;
+    assert(enq(qa, NULL, "a-job", NULL, &id, NULL) == ACKQ_OK);
+    assert(claim_n(qa, 1, 1000) == 1);
+    uint64_t fence = g_items[0].fence;
+    ackq_claims_release(g_items, 1);
+
+    /* 두 번째 database: 같은 이름의 큐 테이블은 없고 업무 테이블만 있다 */
+    char path_b[192], wal_b[192];
+    snprintf(path_b, sizeof(path_b), "%s/other.lrdb", g_dir);
+    snprintf(wal_b, sizeof(wal_b), "%s/other.wal", g_dir);
+    database_t *b = NULL;
+    assert(database_create(path_b, &b) == DATABASE_OK && database_close(b) == DATABASE_OK);
+    database_txn_options_t bo = {0};
+    bo.wal_path = wal_b;
+    bo.convert = true;
+    database_txn_info_t info;
+    assert(database_open_transactional(path_b, &bo, &b, &info) == DATABASE_OK);
+    assert(exec_ok(b, "CREATE TABLE ackq_jobs (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)"));
+    assert(exec_ok(b, "INSERT INTO ackq_jobs VALUES (1, 'other-db')"));
+
+    txn_begin_options_t topts = {TXN_ACCESS_READ_WRITE, TXN_ISOLATION_SNAPSHOT, TXN_GUARANTEE_DURABLE, 0, NULL};
+    database_txn_t *foreign = NULL;
+    assert(database_txn_begin(b, &topts, &foreign) == TXN_OK);
+    CHECK(!database_txn_belongs_to(foreign, a) && database_txn_belongs_to(foreign, b), "소속 확인");
+    ackq_claim_t item[1];
+    size_t count = 5;
+    uint64_t other_id = 9;
+    ackq_stats_t stats;
+    ackq_item_t listed[1];
+    CHECK(enq(qa, foreign, "x", NULL, &other_id, NULL) == ACKQ_INVALID && other_id == 0, "enqueue 거절");
+    CHECK(ackq_claim(qa, foreign, 1, 100, item, &count) == ACKQ_INVALID && count == 0, "claim 거절");
+    CHECK(ackq_ack(qa, foreign, id, fence) == ACKQ_INVALID, "ack 거절");
+    CHECK(ackq_nack(qa, foreign, id, fence, 0, NULL, NULL) == ACKQ_INVALID, "nack 거절");
+    CHECK(ackq_fail(qa, foreign, id, fence, NULL) == ACKQ_INVALID, "fail 거절");
+    CHECK(ackq_update(qa, foreign, id, fence, (const uint8_t *)"x", 1) == ACKQ_INVALID, "update 거절");
+    CHECK(ackq_recover(qa, foreign, 1, NULL) == ACKQ_INVALID && ackq_release_leases(qa, foreign, 1, NULL) == ACKQ_INVALID,
+          "recover·release 거절");
+    CHECK(ackq_purge(qa, foreign, true, 1, NULL) == ACKQ_INVALID, "purge 거절");
+    CHECK(ackq_stats(qa, foreign, &stats) == ACKQ_INVALID, "stats 거절");
+    CHECK(ackq_list(qa, foreign, 0, 1, false, listed, &count) == ACKQ_INVALID, "list 거절");
+    CHECK(!database_txn_failed(foreign), "거절은 남의 트랜잭션을 실패시키지 않는다");
+    CHECK(database_txn_commit(foreign, NULL) == TXN_OK, "남의 트랜잭션은 영향 없이 commit된다");
+    database_txn_release(&foreign);
+    CHECK(scalar_int(b, "SELECT id FROM ackq_jobs WHERE marker = 'other-db'") == 1 && scalar_int(b, "SELECT id FROM ackq_jobs") == 1,
+          "다른 database의 같은 이름 테이블이 바뀌지 않았다");
+    CHECK(ackq_stats(qa, NULL, &stats) == ACKQ_OK && stats.leased == 1 && stats.acked == 0 && stats.ready == 0,
+          "이 큐도 바뀌지 않았다");
+    CHECK(ackq_ack(qa, NULL, id, fence) == ACKQ_OK, "올바른 호출은 그대로 된다");
+    ackq_close(&qa);
+    database_close(a);
+    database_close(b);
+
+    /* 읽기 전용으로 열면 읽기는 되고 쓰기는 숨기지 않고 거절한다 */
+    database_t *ro = NULL;
+    assert(database_open(g_db_path, false, &ro) == DATABASE_OK);
+    ackq_t *qr = NULL;
+    CHECK(ackq_open(ro, &o, &qr) == ACKQ_OK, "읽기 전용 열기");
+    CHECK(ackq_stats(qr, NULL, &stats) == ACKQ_OK && stats.acked == 1, "읽기 전용 stats");
+    ackq_item_t page[2];
+    CHECK(ackq_list(qr, NULL, 0, 2, true, page, &count) == ACKQ_OK && count == 1 && page[0].payload_size == 5,
+          "읽기 전용 list");
+    ackq_list_release(page, count);
+    CHECK(enq(qr, NULL, "w", NULL, &id, NULL) == ACKQ_UNSUPPORTED && id == 0, "읽기 전용 enqueue는 UNSUPPORTED");
+    count = 3;
+    CHECK(ackq_claim(qr, NULL, 1, 100, item, &count) == ACKQ_UNSUPPORTED && count == 0, "읽기 전용 claim은 UNSUPPORTED");
+    CHECK(ackq_ack(qr, NULL, 1, 1) == ACKQ_UNSUPPORTED, "읽기 전용 ack는 UNSUPPORTED");
+    ackq_close(&qr);
+    database_close(ro);
+}
+
 int main(void)
 {
     set_dir(DIR);
@@ -636,6 +717,7 @@ int main(void)
     test_same_transaction();
     test_restart_recovery();
     test_durability_modes();
+    test_wrong_database_and_read_only();
     printf("\ntest_ack_queue: %d checks, %d failed\n", g_run, g_fail);
     if (g_fail == 0) remove_dir();
     return g_fail == 0 ? 0 : 1;
