@@ -159,6 +159,8 @@ page_file_status_t page_file_commit(page_file_t *file);
 typedef struct {
     page_file_t *file;
     uint32_t table_id;
+    /* 마지막으로 실패한 page_file 호출의 상태. overflow는 실패를 IO 하나로만 알리므로 원인을 남긴다. */
+    page_file_status_t last_status;
 } page_file_overflow_ctx_t;
 
 overflow_io_t page_file_overflow_io(page_file_overflow_ctx_t *ctx, page_file_t *file,
