@@ -13,18 +13,22 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* 행을 힙에 삽입하고, 저장된 위치(row_ref_t)를 반환한다 */
+/*
+ * 행을 힙에 삽입하고, 저장된 위치(row_ref_t)를 반환한다.
+ * 실패하면 page_id가 0인 ref를 반환한다 (page 0은 헤더라 행 위치가 될 수 없다).
+ */
 row_ref_t heap_insert(pager_t *pager, const uint8_t *row_data, uint16_t row_size);
 
 /*
  * row_ref_t로 행을 조회한다.
  * 반환된 포인터는 캐시 페이지 내부를 가리키며 읽기 래치가 걸린 상태다.
+ * NULL은 삭제된 행이거나 페이지 읽기 실패다. 구분하려면 호출 전후의 pager_io_error_seq()를 비교한다.
  * 사용 후 반드시 pager_unlatch_r(pager, ref.page_id)을 호출해야 한다
  * (pager_unpin 만 부르면 래치가 풀리지 않아 이후 쓰기가 영구히 막힌다).
  */
 const uint8_t *heap_fetch(pager_t *pager, row_ref_t ref, uint16_t row_size);
 
-/* 슬롯을 FREE로 표시하여 행을 삭제한다 (톰스톤 방식) */
+/* 슬롯을 FREE로 표시하여 행을 삭제한다 (톰스톤 방식). -1 = 이미 삭제됨 또는 페이지 읽기 실패 */
 int heap_delete(pager_t *pager, row_ref_t ref);
 
 /*
@@ -33,7 +37,10 @@ int heap_delete(pager_t *pager, row_ref_t ref);
  */
 typedef bool (*scan_cb)(const uint8_t *row_data, row_ref_t ref, void *ctx);
 
-/* 모든 힙 페이지를 순회하며 살아 있는 행에 대해 콜백을 호출한다 */
-void heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx);
+/*
+ * 모든 힙 페이지를 순회하며 살아 있는 행에 대해 콜백을 호출한다.
+ * 0 = 완료 또는 콜백이 중단, -1 = 페이지 읽기 실패로 순회가 잘림 (결과가 불완전하다)
+ */
+int heap_scan(pager_t *pager, uint16_t row_size, scan_cb cb, void *ctx);
 
 #endif /* TABLE_H */
