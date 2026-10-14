@@ -128,16 +128,17 @@ static void handle_stats(pager_t *pager, int client_fd, int keep_alive)
  *   0  = close → 이 소켓 종료
  *   -1 = 읽기 실패 (클라이언트가 끊음)
  */
-static int handle_one_request(pager_t *pager, int client_fd)
+static int handle_one_request(pager_t *pager, http_conn_t *conn)
 {
+    int client_fd = conn->fd;
     http_request_t req;
-    if (http_read_request(client_fd, &req) != 0) {
-        return -1;  /* 연결 끊김 */
+    if (http_conn_read_request(conn, &req) != 0) {
+        return -1;  /* 연결 끊김 또는 미완성 요청 */
     }
 
     if (!req.valid) {
         const char *msg = "오류: 잘못된 요청입니다";
-        http_send_error(client_fd, msg, strlen(msg));
+        http_send_status(client_fd, req.error_status, req.allow, msg, strlen(msg));
         return 0;
     }
 
@@ -197,8 +198,10 @@ static int handle_one_request(pager_t *pager, int client_fd)
  */
 static void handle_client(pager_t *pager, int client_fd)
 {
+    http_conn_t conn;
+    http_conn_init(&conn, client_fd);
     while (1) {
-        int rc = handle_one_request(pager, client_fd);
+        int rc = handle_one_request(pager, &conn);
         if (rc <= 0) break;  /* close 또는 연결 끊김 */
         /* rc == 1: keep-alive -> 루프 계속 */
     }
