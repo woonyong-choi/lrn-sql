@@ -241,14 +241,24 @@ test-io-cli: $(BUILD_DIR)/minidb
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_io_cli.json -- $(PYTHON) tests/test_io_cli.py --minidb ./$(BUILD_DIR)/minidb
 
 test-runner:
-	$(PYTEST) -q tests/test_fault_runner.py --basetemp=$(BUILD_DIR)/runner-tests -p no:cacheprovider
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_runner.json -- $(PYTEST) -q tests/test_fault_runner.py tests/test_fault_oracle.py --basetemp=$(BUILD_DIR)/runner-tests -p no:cacheprovider
+
+$(BUILD_DIR)/test_fault_runtime: $(BUILD_DIR)/tests/test_fault_runtime.o $(BUILD_DIR)/tests/fault_runtime.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/fault_fixture: $(BUILD_DIR)/tests/fault_fixture.o $(BUILD_DIR)/tests/fault_runtime.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-fault: $(BUILD_DIR)/test_fault_runtime $(BUILD_DIR)/fault_fixture
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_fault_runtime.json -- ./$(BUILD_DIR)/test_fault_runtime $(BUILD_DIR)/fault/runtime.trace
+	FAULT_FIXTURE=$(abspath $(BUILD_DIR)/fault_fixture) $(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_fault_fixture.json -- $(PYTEST) -q tests/test_fault_fixture.py --basetemp=$(BUILD_DIR)/fault/fixture-tests -p no:cacheprovider
 
 test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
 
-.PHONY: test-runner test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
+.PHONY: test-runner test-fault test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
 -include $(OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BUILD_DIR)/main.d
 -include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d $(BUILD_DIR)/sql/lexer*.d)
