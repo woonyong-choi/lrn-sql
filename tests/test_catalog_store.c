@@ -44,6 +44,8 @@ static page_file_t *g_watched;
 static int g_pending_at_control_write = -1;
 static int g_fail_pwrite_at;
 static int g_pwrite_calls;
+static int g_fail_fsync_at;
+static int g_fsync_calls;
 
 static ssize_t hook_pread(int fd, void *buf, size_t size, off_t offset)
 {
@@ -62,7 +64,16 @@ static ssize_t hook_pwrite(int fd, const void *buf, size_t size, off_t offset)
     return pwrite(fd, buf, size, offset);
 }
 
-static const page_file_io_t HOOKED = {hook_pread, hook_pwrite, fsync, link, unlink};
+static int hook_fsync(int fd)
+{
+    if (g_fail_fsync_at != 0 && ++g_fsync_calls == g_fail_fsync_at) {
+        errno = EIO;
+        return -1;
+    }
+    return fsync(fd);
+}
+
+static const page_file_io_t HOOKED = {hook_pread, hook_pwrite, hook_fsync, link, unlink};
 
 /* ── 보조 함수 ── */
 static void clean_dir(void)
@@ -338,7 +349,7 @@ static void test_save_orders_commit_before_release_and_failure_keeps_old(void)
     size_t new_count = chain_pages(file, page_file_control(file)->catalog_head, 0, new_pages, 8);
     CHECK(!intersects(old_pages, old_count, new_pages, new_count), "새 체인은 옛 체인과 겹치지 않음");
 
-    /* 제어 쓰기 실패: 이전 세대(두 번째 저장)와 그 체인이 그대로 읽힌다 */
+    /* 제어 쓰기 실패: 결과는 불확정이다. 이 호출에서는 쓰기가 일어나지 않아 다시 열면 이전 세대가 보인다 */
     add_table(catalog, "t3", false);
     catalog_t *before_fail;
     assert(catalog_store_load(file, &before_fail) == CATALOG_STORE_OK);
@@ -349,14 +360,19 @@ static void test_save_orders_commit_before_release_and_failure_keeps_old(void)
     /* 새 체인 쓰기 1페이지 + 제어 쓰기 1회: 두 번째 pwrite가 제어 페이지다 */
     g_fail_pwrite_at = 2;
     errno = 0;
-    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO && errno == ENOSPC,
-          "제어 쓰기 실패는 IO와 errno");
+    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_OUTCOME_UNKNOWN && errno == ENOSPC,
+          "제어 쓰기 실패는 미반영이 아니라 불확정 결과와 errno");
     g_fail_pwrite_at = 0;
-    CHECK(page_file_control(file)->generation == generation_before, "세대 그대로");
+    CHECK(page_file_is_poisoned(file), "불확정 결과 뒤 핸들은 poison");
+    CHECK(page_file_control(file)->generation == generation_before, "이 핸들이 아는 세대 그대로");
     catalog_t *after_fail = NULL;
     CHECK(catalog_store_load(file, &after_fail) == CATALOG_STORE_OK && same_catalog(before_fail, after_fail),
           "실패한 저장 뒤에도 이전 카탈로그가 같은 핸들에서 읽힘");
-    CHECK(page_file_pending_release_count(file) >= pending_before, "새 체인만 보류로 추가됨 (옛 체인은 놓지 않음)");
+    CHECK(page_file_pending_release_count(file) == pending_before,
+          "불확정 결과에서는 새 체인도 옛 체인도 놓지 않음");
+    g_pwrite_calls = 0;
+    g_fail_pwrite_at = 0;
+    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO, "poison된 핸들은 저장을 거절");
     catalog_close(after_fail);
 
     page_file_close(file);
@@ -375,6 +391,84 @@ static void test_save_orders_commit_before_release_and_failure_keeps_old(void)
 
     catalog_close(first_copy);
     catalog_close(before_fail);
+    catalog_close(catalog);
+    clean_dir();
+}
+
+/* ══════════════════════════════════════════════════════════════ */
+static void test_save_failure_outcomes_are_distinguished(void)
+{
+    printf("\n[test_save_failure_outcomes_are_distinguished]\n");
+    fresh_dir();
+    page_file_t *file;
+    assert(page_file_create(DB_PATH, &file) == PAGE_FILE_OK);
+    catalog_t *catalog;
+    assert(catalog_open_empty(&catalog) == CATALOG_OK);
+    add_table(catalog, "t1", false);
+    assert(catalog_store_save(file, catalog) == CATALOG_STORE_OK);
+    assert(page_file_publish(file) == PAGE_FILE_OK);
+    catalog_t *old_copy;
+    assert(catalog_store_load(file, &old_copy) == CATALOG_STORE_OK);
+    page_file_close(file);
+
+    /* 1. 새 체인 쓰기 실패: 미반영이고 핸들은 계속 쓸 수 있다 */
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    add_table(catalog, "t2", false);
+    g_pwrite_calls = 0;
+    g_fail_pwrite_at = 1;
+    errno = 0;
+    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO && errno == ENOSPC,
+          "제어 쓰기 전의 실패는 IO");
+    g_fail_pwrite_at = 0;
+    CHECK(!page_file_is_poisoned(file) &&
+              page_file_last_commit_outcome(file) != PAGE_FILE_COMMIT_UNKNOWN,
+          "제어 쓰기 전의 실패는 핸들을 poison하지 않음");
+    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_OK, "같은 핸들로 재시도 성공");
+    catalog_t *t2_copy;
+    assert(catalog_store_load(file, &t2_copy) == CATALOG_STORE_OK);
+    page_file_close(file);
+
+    /* 2. 데이터 fsync 실패: 제어 쓰기 전이라 미반영, 핸들은 poison */
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    add_table(catalog, "t3", false);
+    g_fsync_calls = 0;
+    g_fail_fsync_at = 1;
+    errno = 0;
+    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO && errno == EIO,
+          "데이터 fsync 실패는 미반영 IO");
+    g_fail_fsync_at = 0;
+    CHECK(page_file_is_poisoned(file) &&
+              page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_NOT_APPLIED,
+          "미반영이지만 fsync 실패 핸들은 poison");
+    page_file_close(file);
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    catalog_t *loaded;
+    CHECK(catalog_store_load(file, &loaded) == CATALOG_STORE_OK && same_catalog(loaded, t2_copy),
+          "미반영: 다시 열면 직전 카탈로그");
+    catalog_close(loaded);
+    page_file_close(file);
+
+    /* 3. 제어 쓰기 성공 뒤 fsync 실패: 실패를 돌려주지만 다시 열면 새 카탈로그가 보인다 */
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    g_fsync_calls = 0;
+    g_fail_fsync_at = 2;
+    errno = 0;
+    size_t pending_before = page_file_pending_release_count(file);
+    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_OUTCOME_UNKNOWN && errno == EIO,
+          "제어 쓰기 뒤 fsync 실패는 불확정");
+    g_fail_fsync_at = 0;
+    CHECK(page_file_is_poisoned(file) && page_file_pending_release_count(file) == pending_before,
+          "poison이고 어느 체인도 놓지 않음");
+    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO, "poison된 핸들은 거절");
+    page_file_close(file);
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    CHECK(catalog_store_load(file, &loaded) == CATALOG_STORE_OK && same_catalog(loaded, catalog),
+          "실패를 돌려준 저장의 새 카탈로그가 다시 열면 보임");
+    catalog_close(loaded);
+    page_file_close(file);
+
+    catalog_close(old_copy);
+    catalog_close(t2_copy);
     catalog_close(catalog);
     clean_dir();
 }
@@ -534,6 +628,7 @@ int main(void)
     page_file_set_default_io(&HOOKED);
     test_two_tables_survive_reopen_with_large_values();
     test_save_orders_commit_before_release_and_failure_keeps_old();
+    test_save_failure_outcomes_are_distinguished();
     test_generations_reuse_pages_without_exposing_previous_chain();
     test_stale_and_inconsistent_catalogs_are_rejected();
     test_lost_latest_control_is_indistinguishable();
