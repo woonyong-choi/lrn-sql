@@ -71,11 +71,12 @@ $(BUILD_DIR)/tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o \
-               $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o
+               $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o \
+               $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/catalog_store.o $(BUILD_DIR)/storage/legacy_migrate.o
 BASIC_TESTS = test_all test_record test_record_fault test_overflow \
               test_overflow_fault test_value test_value_fault test_parser_boundary \
               test_http_input test_io test_io_lock test_catalog test_catalog_fault \
-              test_lexer test_lexer_fault
+              test_lexer test_lexer_fault test_page_file test_catalog_store test_legacy_migrate
 TEST_BINS = $(addprefix $(BUILD_DIR)/,$(BASIC_TESTS))
 
 $(BUILD_DIR)/test_all: $(BUILD_DIR)/tests/test_all.o $(OBJS)
@@ -96,6 +97,9 @@ $(BUILD_DIR)/test_catalog: $(BUILD_DIR)/tests/test_catalog.o $(BUILD_DIR)/storag
 $(BUILD_DIR)/test_catalog_fault: $(BUILD_DIR)/tests/test_catalog_fault.o $(BUILD_DIR)/storage/catalog_fault.o
 $(BUILD_DIR)/test_lexer: $(BUILD_DIR)/tests/test_lexer.o $(BUILD_DIR)/sql/lexer.o
 $(BUILD_DIR)/test_lexer_fault: $(BUILD_DIR)/tests/test_lexer_fault.o $(BUILD_DIR)/sql/lexer_fault.o
+$(BUILD_DIR)/test_page_file: $(BUILD_DIR)/tests/test_page_file.o $(STORAGE_OBJS)
+$(BUILD_DIR)/test_catalog_store: $(BUILD_DIR)/tests/test_catalog_store.o $(STORAGE_OBJS)
+$(BUILD_DIR)/test_legacy_migrate: $(BUILD_DIR)/tests/test_legacy_migrate.o $(STORAGE_OBJS)
 
 $(TEST_BINS) $(BUILD_DIR)/test_overflow_file $(BUILD_DIR)/test_value_sqlite:
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -253,14 +257,39 @@ test-fault: $(BUILD_DIR)/test_fault_runtime $(BUILD_DIR)/fault_fixture
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_fault_runtime.json -- ./$(BUILD_DIR)/test_fault_runtime $(BUILD_DIR)/fault/runtime.trace
 	FAULT_FIXTURE=$(abspath $(BUILD_DIR)/fault_fixture) $(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_fault_fixture.json -- $(PYTEST) -q tests/test_fault_fixture.py --basetemp=$(BUILD_DIR)/fault/fixture-tests -p no:cacheprovider
 
+HOOK_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/hooks/%.o,$(SRCS))
+CONCURRENCY_RUNS ?= 3
+
+$(BUILD_DIR)/hooks/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -DMINIDB_TEST_HOOKS -c -o $@ $<
+
+$(BUILD_DIR)/hooks/tests/%.o: tests/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -DMINIDB_TEST_HOOKS -c -o $@ $<
+
+$(BUILD_DIR)/test_concurrency_barrier: $(BUILD_DIR)/hooks/tests/test_concurrency_barrier.o $(HOOK_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/test_concurrency_insert: $(BUILD_DIR)/hooks/tests/test_concurrency_insert.o $(HOOK_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-concurrency: $(BUILD_DIR)/test_concurrency_barrier $(BUILD_DIR)/test_concurrency_insert
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_concurrency_barrier.json -- ./$(BUILD_DIR)/test_concurrency_barrier
+	@set -e; iteration=1; while [ $$iteration -le $(CONCURRENCY_RUNS) ]; do \
+		$(TEST_RUNNER) --report "$(BUILD_DIR)/fault/test_concurrency_insert-$$iteration.json" -- ./$(BUILD_DIR)/test_concurrency_insert; \
+		iteration=$$((iteration + 1)); \
+	done
+
 test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
 
-.PHONY: test-runner test-fault test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
+.PHONY: test-runner test-fault test-concurrency test-overflow-file test-value-sqlite test-repl-boundary test-io-cli
 
 -include $(OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BUILD_DIR)/main.d
 -include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d $(BUILD_DIR)/sql/lexer*.d)
+-include $(HOOK_OBJS:.o=.d) $(wildcard $(BUILD_DIR)/hooks/tests/*.d)
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
