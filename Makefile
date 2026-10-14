@@ -356,6 +356,28 @@ test-database: $(DATABASE_BINS)
 		$(TEST_RUNNER) --report "$(BUILD_DIR)/fault/$${binary##*/}.json" -- "$$binary"; \
 	done
 
+$(BUILD_DIR)/sql/session_test.o: src/sql/session.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dcalloc=st_calloc -Dfree=st_free -c -o $@ $<
+
+$(BUILD_DIR)/audit/sql/session_test.o: src/sql/session.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=audit_malloc -Dcalloc=audit_calloc -Drealloc=audit_realloc -Dfree=audit_free -DSESSION_TEST_HOOK -c -o $@ $<
+
+$(BUILD_DIR)/test_session: $(BUILD_DIR)/tests/test_session.o $(BUILD_DIR)/sql/session_test.o $(DATABASE_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/test_session_audit: $(BUILD_DIR)/tests/test_session_audit.o $(BUILD_DIR)/tests/alloc_audit.o $(BUILD_DIR)/audit/sql/session_test.o $(DATABASE_AUDIT_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD_DIR)/test_result_ledger: $(BUILD_DIR)/tests/test_result_ledger.o $(BUILD_DIR)/tests/alloc_audit.o $(BUILD_DIR)/audit/sql/result.o $(BUILD_DIR)/storage/value.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test-session: $(BUILD_DIR)/test_session $(BUILD_DIR)/test_session_audit $(BUILD_DIR)/test_result_ledger
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_session.json -- ./$(BUILD_DIR)/test_session
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_session_audit.json -- ./$(BUILD_DIR)/test_session_audit
+	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_result_ledger.json -- ./$(BUILD_DIR)/test_result_ledger
+
 $(BUILD_DIR)/test_corrupt_open: $(BUILD_DIR)/tests/test_corrupt_open.o $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -387,7 +409,7 @@ test-wal: $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_wal_crash $(BUILD_DIR)/test_wa
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED) --report fault/test_wal_alloc.json -- ./test_wal_alloc
 	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout 180 --seed $(FAULT_SEED) --report fault/test_wal_crash.json -- ./test_wal_crash
 
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open test-transaction test-wal
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-repl-boundary test-io-cli test-database test-corrupt-open test-transaction test-wal test-session
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
@@ -405,6 +427,6 @@ clean:
 -include $(BUILD_DIR)/storage/transaction.d
 -include $(BUILD_DIR)/storage/wal.d
 
-.PHONY: test-database test-corrupt-open test-transaction test-wal
+.PHONY: test-database test-corrupt-open test-transaction test-wal test-session
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
