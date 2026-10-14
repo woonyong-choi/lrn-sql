@@ -12,6 +12,7 @@ from pathlib import Path
 import platform
 import random
 import select
+import statistics
 import subprocess
 import sys
 import time
@@ -254,6 +255,10 @@ def _complex_queries(
         }
         if results["sqlite"]["error"]:
             raise RuntimeError(f"invalid SQLite reference query: {sql}")
+        if results["mini"]["error"] not in (0, 1, 2):
+            raise RuntimeError(
+                f"unexpected MiniDB failure: {sql}: {results['mini']['message']}"
+            )
         status = "unsupported" if results["mini"]["error"] else "supported"
         if status == "supported":
             _compare(results, sql)
@@ -465,6 +470,119 @@ def _self_check() -> None:
     raise RuntimeError("oracle failed to reject altered result")
 
 
+def _verify_run(run: dict[str, Any]) -> int:
+    count = run["load"]["completed_rows"]
+    buckets = sum((index * 17 + 137) % 97 == 3 for index in range(1, count + 1))
+    expected = {
+        "point": 1,
+        "missing": 0,
+        "range": min(count, 100),
+        "bucket": buckets,
+        "null": count // 11,
+        "full_scan": count,
+    }
+    for engine in ("mini", "sqlite"):
+        if len(run["load"]["latencies_ns"][engine]) != count:
+            raise RuntimeError("missing insert latency observations")
+    for query in run["queries"]:
+        for result in query["results"].values():
+            if result["row_count"] != expected[query["name"]]:
+                raise RuntimeError(f"independent row-count mismatch: {query['sql']}")
+    for query in run["queries"] + run["mutations"]:
+        mini, sqlite = query["results"]["mini"], query["results"]["sqlite"]
+        if mini["error"] or sqlite["error"]:
+            raise RuntimeError(f"unexpected persisted error: {query['sql']}")
+        for field in ("rows_sha256", "row_count", "affected", "columns"):
+            if mini[field] != sqlite[field]:
+                raise RuntimeError(f"persisted oracle mismatch: {query['sql']}")
+    for query in run["complex"]:
+        if (
+            query["results"]["mini"]["error"] not in (1, 2)
+            or query["results"]["sqlite"]["error"]
+        ):
+            raise RuntimeError(f"unexpected feature status: {query['sql']}")
+    return 2 * len(run["queries"])
+
+
+def _aggregate_size(runs: list[dict[str, Any]], engine: str) -> dict[str, Any]:
+    inserts = [sum(run["load"]["latencies_ns"][engine]) / 1e9 for run in runs]
+    metrics: dict[str, Any] = {
+        "insert_seconds": inserts,
+        "insert_seconds_median": statistics.median(inserts),
+        "insert_qps_median": statistics.median(
+            run["load"]["completed_rows"] / seconds
+            for run, seconds in zip(runs, inserts)
+        ),
+    }
+    for name in sorted({query["name"] for run in runs for query in run["queries"]}):
+        values = [
+            query["results"][engine]["ns"]
+            for run in runs
+            for query in run["queries"]
+            if query["name"] == name
+        ]
+        metrics[name] = {"samples": len(values), **_stats(values)}
+    observations = [
+        query["results"][engine]
+        for run in runs
+        for query in run["queries"] + run["mutations"]
+    ]
+    metrics["max_rss_bytes"] = max(result["rss_bytes"] for result in observations)
+    metrics["final_disk_bytes"] = runs[-1]["mutations"][-1]["results"][engine][
+        "disk_bytes"
+    ]
+    return metrics
+
+
+# cost: time O(b + n log n), heap O(b + n), stack O(1), io 1
+# vars: b = 기록 바이트, n = 원자료 시간 표본 수
+# basis: estimate
+def _analyze(record: Path) -> dict[str, Any]:
+    measurement = json.loads(record.read_text())["local_evidence"]["sqlite_measurement"]
+    runs = measurement["runs"]
+    config = measurement["config"]
+    expected = {
+        (size, repetition)
+        for size in config["sizes"]
+        for repetition in range(config["repetitions"])
+    }
+    actual = {(run["requested_rows"], run["repetition"]) for run in runs}
+    if actual != expected or len(runs) != len(expected):
+        raise RuntimeError("missing or duplicate workload runs")
+    if "failure" in measurement:
+        raise RuntimeError("measurement contains a failed run")
+    analysis: dict[str, Any] = {
+        "source_head": measurement["environment"]["head"],
+        "runs": len(runs),
+        "independent_row_count_checks": sum(_verify_run(run) for run in runs),
+        "paired_inserts": sum(run["load"]["completed_rows"] for run in runs),
+        "verified_selects": sum(len(run["queries"]) for run in runs),
+        "unsupported_features": sorted(config["complex_queries"]),
+        "capacity_attempts": [
+            {
+                "requested": run["requested_rows"],
+                "completed": run["load"]["completed_rows"],
+                "elapsed_seconds": run["load"]["elapsed_seconds"],
+            }
+            for run in runs
+            if run["load"]["status"] != "complete"
+        ],
+        "sizes": {},
+    }
+    for size in config["sizes"]:
+        complete = [
+            run
+            for run in runs
+            if run["requested_rows"] == size and run["load"]["status"] == "complete"
+        ]
+        if len(complete) != config["repetitions"]:
+            continue
+        analysis["sizes"][str(size)] = {
+            engine: _aggregate_size(complete, engine) for engine in ("mini", "sqlite")
+        }
+    return analysis
+
+
 # cost: time O(n * q + b), heap O(n + b), stack O(1), io O(n * p + b)
 # vars: n = 측정 문장 수, q = 실행 비용, b = 원결과 바이트, p = 문장당 페이지와 프로토콜 비용
 # basis: estimate
@@ -473,7 +591,15 @@ def main() -> int:
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--build-only", action="store_true")
+    parser.add_argument("--analyze", action="store_true")
     args = parser.parse_args()
+    if args.analyze:
+        print(
+            json.dumps(
+                _analyze(args.record), ensure_ascii=False, sort_keys=True, indent=2
+            )
+        )
+        return 0
     config = json.loads(CONFIG.read_text())
     config["run_id"] = time.time_ns()
     _self_check()
