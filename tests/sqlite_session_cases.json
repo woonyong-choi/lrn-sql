@@ -1,0 +1,390 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "multitable-crud-null",
+      "basis": "#103 완료 조건 1: 다중 테이블 CRUD와 NULL·빈 값·UTF-8·정수 경계를 같은 입력으로 비교",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, score REAL, note TEXT, avatar BLOB)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "CREATE TABLE logs (ts INTEGER, msg TEXT NOT NULL)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO users (name, score, note, avatar) VALUES (?, ?, ?, ?)", "params": [{"text": "alice"}, {"real": 1.5}, null, {"blob_hex": "00ff10"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO users (name, note) VALUES (?, ?)", "params": [{"text": ""}, {"text": "한글 € 😀 'quoted'"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO users (name, score, avatar) VALUES (?, ?, ?)", "params": [{"text": "carol"}, {"real": 0.0}, {"blob_hex": ""}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO logs VALUES (?, ?)", "params": [1, {"text": "boot"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO logs VALUES (?, ?)", "params": [null, {"text": "no timestamp"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO logs VALUES (?, ?)", "params": [9223372036854775807, {"text": "int64 max"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO logs VALUES (?, ?)", "params": [-9223372036854775808, {"text": "int64 min"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM users", "expect": {"kind": "rows", "rows": 3}},
+        {"conn": "A", "sql": "SELECT * FROM logs", "expect": {"kind": "rows", "rows": 4}},
+        {"conn": "A", "sql": "SELECT name, note FROM users WHERE note IS NULL", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "A", "sql": "SELECT msg FROM logs WHERE ts < ?", "params": [100], "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "A", "sql": "UPDATE users SET score = ?, note = ? WHERE name = ?", "params": [{"real": 9.25}, {"text": "updated"}, {"text": "alice"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "UPDATE users SET note = NULL WHERE id = ?", "params": [2], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "DELETE FROM logs WHERE ts IS NULL", "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "DELETE FROM logs WHERE ts = ?", "params": [12345], "expect": {"kind": "command", "affected": 0}},
+        {"conn": "A", "sql": "SELECT * FROM users", "expect": {"kind": "rows", "rows": 3}},
+        {"conn": "A", "sql": "SELECT * FROM logs", "expect": {"kind": "rows", "rows": 3}},
+        {"conn": "A", "sql": "DROP TABLE logs", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "SELECT * FROM logs", "expect": {"kind": "error", "error_class": "semantic"}},
+        {"conn": "A", "sql": "CREATE TABLE logs (q REAL, r TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO logs VALUES (?, ?)", "params": [{"real": 0.5}, {"text": "new schema"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM users", "expect": {"kind": "rows", "rows": 3}},
+        {"restart": "clean"},
+        {"conn": "A", "sql": "SELECT * FROM users", "expect": {"kind": "rows", "rows": 3}},
+        {"conn": "A", "sql": "SELECT * FROM logs", "expect": {"kind": "rows", "rows": 1}}
+      ]
+    },
+    {
+      "id": "large-values-restart",
+      "basis": "#103 완료 조건 1: 페이지 경계 전후와 큰 TEXT·BLOB의 bytes 보존과 재시작",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE blobs (id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT, b BLOB)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO blobs (t, b) VALUES (?, ?)", "params": [{"text_gen": {"size": 1, "seed": 1}}, {"blob_gen": {"size": 1, "seed": 2}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO blobs (t, b) VALUES (?, ?)", "params": [{"text_gen": {"size": 8159, "seed": 3}}, {"blob_gen": {"size": 8159, "seed": 4}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO blobs (t, b) VALUES (?, ?)", "params": [{"text_gen": {"size": 8160, "seed": 5}}, {"blob_gen": {"size": 8160, "seed": 6}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO blobs (t, b) VALUES (?, ?)", "params": [{"text_gen": {"size": 8161, "seed": 7}}, {"blob_gen": {"size": 8161, "seed": 8}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO blobs (t, b) VALUES (?, ?)", "params": [{"text_gen": {"size": 20000, "seed": 9}}, {"blob_gen": {"size": 20000, "seed": 10}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO blobs (t, b) VALUES (?, ?)", "params": [{"text_gen": {"size": 300000, "seed": 11}}, {"blob_gen": {"size": 300000, "seed": 12}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO blobs (t, b) VALUES (?, ?)", "params": [{"text": ""}, {"blob_hex": ""}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM blobs", "expect": {"kind": "rows", "rows": 7}},
+        {"conn": "A", "sql": "SELECT id, t FROM blobs WHERE id = ?", "params": [6], "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "UPDATE blobs SET b = ? WHERE id = ?", "params": [{"blob_gen": {"size": 5, "seed": 13}}, 6], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "UPDATE blobs SET t = ? WHERE id = ?", "params": [{"text_gen": {"size": 40000, "seed": 14}}, 2], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "DELETE FROM blobs WHERE id = ?", "params": [5], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM blobs", "expect": {"kind": "rows", "rows": 6}},
+        {"restart": "clean"},
+        {"conn": "A", "sql": "SELECT * FROM blobs", "expect": {"kind": "rows", "rows": 6}}
+      ]
+    },
+    {
+      "id": "restart-crash-recovery",
+      "basis": "#103 완료 조건 1·2: 재시작과 강제 종료 뒤 commit된 변경만 남는다",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "CREATE TABLE u (k INTEGER, tag TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [1, {"text": "autocommit"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [2, {"text": "explicit commit"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO u VALUES (?, ?)", "params": [1, {"text": "explicit commit"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [3, {"text": "never committed"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "UPDATE t SET v = ? WHERE id = ?", "params": [{"text": "never committed update"}, 2], "expect": {"kind": "command", "affected": 1}},
+        {"restart": "crash"},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "A", "sql": "SELECT * FROM u", "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [4, {"text": "after recovery"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"restart": "clean"},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 3}}
+      ]
+    },
+    {
+      "id": "two-session-commit-visibility",
+      "basis": "#103 완료 조건 2: 두 세션에서 commit 전 미확정 변경이 보이지 않고 commit 뒤 보인다",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO t (v) VALUES (?)", "params": [{"text": "base"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t (v) VALUES (?)", "params": [{"text": "pending"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2, "txn_active": true}},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 1, "txn_active": false}},
+        {"conn": "A", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "B", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "B", "sql": "UPDATE t SET v = ? WHERE v = ?", "params": [{"text": "edited"}, {"text": "pending"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT v FROM t WHERE v = ?", "params": [{"text": "pending"}], "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "B", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "A", "sql": "SELECT v FROM t WHERE v = ?", "params": [{"text": "edited"}], "expect": {"kind": "rows", "rows": 1}}
+      ]
+    },
+    {
+      "id": "two-session-rollback",
+      "basis": "#103 완료 조건 2: rollback이 INSERT·UPDATE·DELETE를 모두 되돌리고 다른 세션은 계속 원래 상태를 본다",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT, n INTEGER)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?, ?)", "params": [1, {"text": "one"}, 10], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?, ?)", "params": [2, {"text": "two"}, null], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?, ?)", "params": [3, {"text": "three"}, 30], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "UPDATE t SET v = ?, n = ? WHERE id = ?", "params": [{"text": "changed"}, 99, 1], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "DELETE FROM t WHERE id = ?", "params": [2], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "A", "sql": "ROLLBACK", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "B", "sql": "SELECT v FROM t WHERE n IS NULL", "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "ROLLBACK", "expect": {"kind": "error"}}
+      ]
+    },
+    {
+      "id": "two-session-writer-contention",
+      "basis": "#103 완료 조건 2: 한 세션이 쓰는 동안 다른 세션의 BEGIN과 자동 commit 쓰기는 busy이고 commit 뒤 진행한다",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [1, {"text": "a"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "B", "sql": "BEGIN", "expect": {"kind": "error", "error_class": "busy", "txn_active": false}},
+        {"conn": "B", "sql": "INSERT INTO t VALUES (?, ?)", "params": [2, {"text": "b"}], "expect": {"kind": "error", "error_class": "busy", "txn_active": false}},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 0}},
+        {"conn": "A", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "B", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [3, {"text": "a2"}], "expect": {"kind": "error", "error_class": "busy", "txn_active": false}},
+        {"conn": "B", "sql": "INSERT INTO t VALUES (?, ?)", "params": [2, {"text": "b"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "B", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2}}
+      ]
+    },
+    {
+      "id": "error-paths-autocommit",
+      "basis": "#103 완료 조건 2: 실패 경로의 오류 분류와 기존 데이터 보존",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL, n INTEGER)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?, ?)", "params": [1, {"text": "x"}, 5], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?, ?)", "params": [1, {"text": "dup"}, 6], "expect": {"kind": "error", "error_class": "constraint"}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?, ?)", "params": [2, null, 6], "expect": {"kind": "error", "error_class": "constraint"}},
+        {"conn": "A", "sql": "UPDATE t SET name = ? WHERE id = ?", "params": [null, 1], "expect": {"kind": "error", "error_class": "constraint"}},
+        {"conn": "A", "sql": "SELECT * FROM missing", "expect": {"kind": "error", "error_class": "semantic"}},
+        {"conn": "A", "sql": "SELECT nope FROM t", "expect": {"kind": "error", "error_class": "semantic"}},
+        {"conn": "A", "sql": "INSERT INTO t (nope) VALUES (1)", "expect": {"kind": "error", "error_class": "semantic"}},
+        {"conn": "A", "sql": "SELEC * FROM t", "expect": {"kind": "error", "error_class": "syntax"}},
+        {"conn": "A", "sql": "SELECT * FROM t; SELECT * FROM t", "expect": {"kind": "error", "error_class": "syntax"}},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "CREATE TABLE t (x INTEGER)", "expect": {"kind": "error", "error_class": "semantic"}},
+        {"conn": "A", "sql": "COMMIT", "expect": {"kind": "error"}},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 1}}
+      ]
+    },
+    {
+      "id": "session-close-rolls-back",
+      "basis": "#103 완료 조건 2: 트랜잭션을 연 세션을 닫으면 미확정 변경이 사라지고 다른 세션이 이어서 쓴다",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [1, {"text": "base"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [2, {"text": "orphan"}], "expect": {"kind": "command", "affected": 1}},
+        {"drop": "A"},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "B", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "B", "sql": "INSERT INTO t VALUES (?, ?)", "params": [2, {"text": "reused id"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "B", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 2}}
+      ]
+    }
+    ,
+    {
+      "id": "difference-negative-zero",
+      "basis": "#103 완료 조건 3: SQLite의 REAL 친화성은 -0.0의 부호를 저장하지 않고 이 DB는 비트 그대로 보존한다",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE r (id INTEGER PRIMARY KEY, x REAL)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO r VALUES (?, ?)", "params": [1, {"real": -0.0}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT x FROM r WHERE id = ?", "params": [1], "difference": {"id": "D-NEGATIVE-ZERO", "reason": "SQLite REAL 컬럼은 -0.0을 0.0으로 돌려주고 이 DB는 부호를 보존한다", "reference": {"kind": "rows", "rows": 1}, "subject": {"kind": "rows", "rows": 1}, "reference_rows": [["R0000000000000000"]], "subject_rows": [["R8000000000000000"]]}},
+        {"restart": "clean"},
+        {"conn": "A", "sql": "SELECT x FROM r WHERE id = ?", "params": [1], "difference": {"id": "D-NEGATIVE-ZERO", "reason": "SQLite REAL 컬럼은 -0.0을 0.0으로 돌려주고 이 DB는 부호를 보존한다", "reference": {"kind": "rows", "rows": 1}, "subject": {"kind": "rows", "rows": 1}, "reference_rows": [["R0000000000000000"]], "subject_rows": [["R8000000000000000"]]}}
+      ]
+    },
+    {
+      "id": "null-semantics-where",
+      "basis": "#103 완료 조건 1: NULL의 3치 비교가 WHERE에서 같다",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE n (id INTEGER PRIMARY KEY, v INTEGER, t TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO n VALUES (?, ?, ?)", "params": [1, 10, {"text": "a"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO n VALUES (?, ?, ?)", "params": [2, null, null], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO n VALUES (?, ?, ?)", "params": [3, 20, {"text": ""}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO n VALUES (?, ?, ?)", "params": [4, 10, {"text": "A"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE v = NULL", "expect": {"kind": "rows", "rows": 0}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE v <> NULL", "expect": {"kind": "rows", "rows": 0}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE v != ?", "params": [10], "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE v IS NOT NULL", "expect": {"kind": "rows", "rows": 3}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE v IS NULL", "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE v < ?", "params": [15], "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE v >= ?", "params": [10], "expect": {"kind": "rows", "rows": 3}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE t = ?", "params": [{"text": "a"}], "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE t = ?", "params": [{"text": ""}], "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "UPDATE n SET v = ? WHERE v IS NULL", "params": [5], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT id FROM n WHERE v IS NULL", "expect": {"kind": "rows", "rows": 0}}
+      ]
+    },
+    {
+      "id": "multi-table-transaction",
+      "basis": "#103 완료 조건 1·2: 한 트랜잭션이 두 테이블에 쓴 변경은 commit까지 다른 세션에 보이지 않고 함께 확정되거나 함께 사라진다",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE a (id INTEGER PRIMARY KEY, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "CREATE TABLE b (k INTEGER, w BLOB)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO a VALUES (?, ?)", "params": [1, {"text": "old"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO a VALUES (?, ?)", "params": [2, {"text": "new"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO b VALUES (?, ?)", "params": [1, {"blob_gen": {"size": 9000, "seed": 21}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "UPDATE a SET v = ? WHERE id = ?", "params": [{"text": "edited"}, 1], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "B", "sql": "SELECT * FROM a", "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "B", "sql": "SELECT * FROM b", "expect": {"kind": "rows", "rows": 0}},
+        {"conn": "A", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "B", "sql": "SELECT * FROM a", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "B", "sql": "SELECT * FROM b", "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "B", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "B", "sql": "DELETE FROM a WHERE id = ?", "params": [1], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "B", "sql": "DELETE FROM b WHERE k = ?", "params": [1], "expect": {"kind": "command", "affected": 1}},
+        {"restart": "crash"},
+        {"conn": "A", "sql": "SELECT * FROM a", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "B", "sql": "SELECT * FROM b", "expect": {"kind": "rows", "rows": 1}}
+      ]
+    },
+    {
+      "id": "large-values-transaction",
+      "basis": "#103 완료 조건 1·2: 큰 값을 쓴 트랜잭션의 rollback과 commit 뒤 강제 종료",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE big (id INTEGER PRIMARY KEY, t TEXT, b BLOB)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO big VALUES (?, ?, ?)", "params": [1, {"text_gen": {"size": 300000, "seed": 31}}, {"blob_gen": {"size": 300000, "seed": 32}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "B", "sql": "SELECT * FROM big", "expect": {"kind": "rows", "rows": 0}},
+        {"conn": "A", "sql": "ROLLBACK", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "B", "sql": "SELECT * FROM big", "expect": {"kind": "rows", "rows": 0}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO big VALUES (?, ?, ?)", "params": [2, {"text_gen": {"size": 150000, "seed": 33}}, {"blob_gen": {"size": 150000, "seed": 34}}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "UPDATE big SET b = ? WHERE id = ?", "params": [{"blob_gen": {"size": 200000, "seed": 35}}, 2], "expect": {"kind": "command", "affected": 1}},
+        {"restart": "crash"},
+        {"conn": "B", "sql": "SELECT * FROM big", "expect": {"kind": "rows", "rows": 1}}
+      ]
+    },
+    {
+      "id": "transaction-ddl-rollback",
+      "basis": "#103 완료 조건 2: 트랜잭션 안의 DDL이 다른 세션에 보이지 않고 rollback으로 사라진다",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE keep (id INTEGER PRIMARY KEY, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO keep VALUES (?, ?)", "params": [1, {"text": "kept"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "CREATE TABLE temp_ddl (id INTEGER PRIMARY KEY)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO temp_ddl VALUES (?)", "params": [1], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "DROP TABLE keep", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "SELECT * FROM keep", "expect": {"kind": "error", "error_class": "semantic"}},
+        {"conn": "B", "sql": "SELECT * FROM temp_ddl", "expect": {"kind": "error", "error_class": "semantic"}},
+        {"conn": "B", "sql": "SELECT * FROM keep", "expect": {"kind": "rows", "rows": 1}},
+        {"conn": "A", "sql": "ROLLBACK", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "A", "sql": "SELECT * FROM temp_ddl", "expect": {"kind": "error", "error_class": "semantic"}},
+        {"conn": "A", "sql": "SELECT * FROM keep", "expect": {"kind": "rows", "rows": 1}}
+      ]
+    },
+    {
+      "id": "autoincrement-with-rollback",
+      "basis": "#103 완료 조건 1·2: AUTOINCREMENT 값이 rollback과 삭제 뒤 같은 규칙으로 발급된다",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE s (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO s (v) VALUES (?)", "params": [{"text": "v1"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO s (v) VALUES (?)", "params": [{"text": "v2 rolled back"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "ROLLBACK", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "A", "sql": "INSERT INTO s (v) VALUES (?)", "params": [{"text": "v3"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM s", "expect": {"kind": "rows", "rows": 2}},
+        {"conn": "A", "sql": "DELETE FROM s WHERE id = ?", "params": [2], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO s (v) VALUES (?)", "params": [{"text": "v4"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO s (id, v) VALUES (?, ?)", "params": [10, {"text": "explicit"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO s (v) VALUES (?)", "params": [{"text": "v5"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM s", "expect": {"kind": "rows", "rows": 4}},
+        {"restart": "clean"},
+        {"conn": "A", "sql": "INSERT INTO s (v) VALUES (?)", "params": [{"text": "v6"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM s", "expect": {"kind": "rows", "rows": 5}}
+      ]
+    },
+    {
+      "id": "varchar-width",
+      "basis": "#103 완료 조건 1·3: VARCHAR(n)의 폭을 넘는 값의 처리와 UTF-8 문자 수",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE vc (name VARCHAR(5) NOT NULL)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO vc VALUES (?)", "params": [{"text": "12345"}]},
+        {"conn": "A", "sql": "INSERT INTO vc VALUES (?)", "params": [{"text": "123456"}]},
+        {"conn": "A", "sql": "INSERT INTO vc VALUES (?)", "params": [{"text": "bobbybobbybobby"}]},
+        {"conn": "A", "sql": "INSERT INTO vc VALUES (?)", "params": [{"text": "한글한글한"}]},
+        {"conn": "A", "sql": "INSERT INTO vc VALUES (?)", "params": [{"text": "한글한글한글"}]},
+        {"conn": "A", "sql": "SELECT * FROM vc", "expect": {"kind": "rows", "rows": 5}}
+      ]
+    },
+    {
+      "id": "type-coercion-agreement",
+      "basis": "#103 완료 조건 1: 정수를 REAL·TEXT 컬럼에 넣으면 양쪽이 같은 값으로 저장한다",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE ty (i INTEGER, r REAL, t TEXT, b BLOB)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO ty VALUES (?, ?, ?, ?)", "params": [null, 2, null, null], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO ty VALUES (?, ?, ?, ?)", "params": [null, null, 5, null], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM ty", "expect": {"kind": "rows", "rows": 2}}
+      ]
+    },
+    {
+      "id": "difference-type-enforcement",
+      "basis": "#103 완료 조건 3: INTEGER 컬럼의 TEXT·소수 REAL 처리와 BLOB 컬럼의 TEXT 저장은 지원 차이로 선언한다",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE ty (i INTEGER)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO ty VALUES (?)", "params": [{"text": "abc"}], "difference": {"id": "D-TYPE-TEXT-INTO-INTEGER", "reason": "이 DB는 INTEGER 컬럼에 TEXT를 거절하고 SQLite는 TEXT 그대로 저장한다", "reference": {"kind": "command", "affected": 1}, "subject": {"kind": "error", "error_class": "semantic", "txn_active": false}}},
+        {"conn": "A", "sql": "INSERT INTO ty VALUES (?)", "params": [{"real": 1.5}], "difference": {"id": "D-TYPE-FRACTION-INTO-INTEGER", "reason": "이 DB는 INTEGER 컬럼에 소수 REAL을 거절하고 SQLite는 REAL 그대로 저장한다", "reference": {"kind": "command", "affected": 1}, "subject": {"kind": "error", "error_class": "semantic", "txn_active": false}}},
+        {"conn": "A", "sql": "SELECT * FROM ty", "difference": {"id": "D-TYPE-ROWS-AFTER-REJECTION", "reason": "위 두 삽입을 SQLite만 저장하므로 두 엔진의 행이 다르다", "reference": {"kind": "rows", "rows": 2}, "subject": {"kind": "rows", "rows": 0}, "reference_rows": [["T616263"], ["R3ff8000000000000"]], "subject_rows": []}},
+        {"conn": "A", "sql": "CREATE TABLE bl (b BLOB)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "INSERT INTO bl VALUES (?)", "params": [{"text": "x"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "SELECT * FROM bl", "difference": {"id": "D-TEXT-INTO-BLOB", "reason": "BLOB 컬럼에 넣은 TEXT를 SQLite는 TEXT로 두고 이 DB는 BLOB으로 저장한다", "reference": {"kind": "rows", "rows": 1}, "subject": {"kind": "rows", "rows": 1}, "reference_rows": [["T78"]], "subject_rows": [["B78"]]}}
+      ]
+    },
+    {
+      "id": "transaction-error-then-rollback",
+      "basis": "#103 완료 조건 2: 트랜잭션 안의 문장 오류 뒤 ROLLBACK은 양쪽이 같은 상태로 되돌린다",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [1, {"text": "first"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [1, {"text": "duplicate"}], "expect": {"kind": "error", "error_class": "constraint", "txn_active": true}},
+        {"conn": "A", "sql": "ROLLBACK", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 0}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [1, {"text": "after rollback"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "B", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 1}}
+      ]
+    },
+    {
+      "id": "difference-transaction-failed-state",
+      "basis": "#103 완료 조건 3: 문장 오류 뒤 트랜잭션의 실패 상태는 지원 차이로 선언한다",
+      "connections": ["A", "B"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [1, {"text": "first"}], "expect": {"kind": "command", "affected": 1}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [1, {"text": "duplicate"}], "expect": {"kind": "error", "error_class": "constraint", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?, ?)", "params": [2, {"text": "second"}], "difference": {"id": "D-TXN-FAILED-REJECTS-STATEMENT", "reason": "이 DB는 문장 오류 뒤 트랜잭션을 실패 상태로 두고 뒤 문장을 거절하며 SQLite는 계속 실행한다", "reference": {"kind": "command", "affected": 1, "txn_active": true}, "subject": {"kind": "error", "error_class": "semantic", "txn_active": true, "txn_failed": true}}},
+        {"conn": "A", "sql": "COMMIT", "difference": {"id": "D-TXN-FAILED-REJECTS-COMMIT", "reason": "이 DB는 실패한 트랜잭션의 COMMIT을 거절하고 ROLLBACK만 받으며 SQLite는 앞선 성공 변경을 commit한다", "reference": {"kind": "command", "txn_active": false}, "subject": {"kind": "error", "error_class": "semantic", "txn_active": true, "txn_failed": true}}},
+        {"conn": "B", "sql": "SELECT * FROM t", "difference": {"id": "D-TXN-FAILED-COMMIT-ROWS", "reason": "SQLite는 commit한 변경이 다른 세션에 보이고 이 DB는 commit이 거절되어 보이지 않는다", "reference": {"kind": "rows", "rows": 2}, "subject": {"kind": "rows", "rows": 0}, "reference_rows": [["I1", "T6669727374"], ["I2", "T7365636f6e64"]], "subject_rows": []}},
+        {"conn": "A", "sql": "ROLLBACK", "difference": {"id": "D-TXN-FAILED-NEEDS-ROLLBACK", "reason": "SQLite는 commit 뒤라 ROLLBACK이 오류이고 이 DB는 실패 상태를 ROLLBACK으로 푼다", "reference": {"kind": "error", "error_class": "semantic", "txn_active": false}, "subject": {"kind": "command", "txn_active": false}}},
+        {"conn": "B", "sql": "SELECT * FROM t", "difference": {"id": "D-TXN-FAILED-COMMIT-ROWS", "reason": "SQLite는 commit한 변경이 다른 세션에 보이고 이 DB는 commit이 거절되어 보이지 않는다", "reference": {"kind": "rows", "rows": 2}, "subject": {"kind": "rows", "rows": 0}, "reference_rows": [["I1", "T6669727374"], ["I2", "T7365636f6e64"]], "subject_rows": []}}
+      ]
+    },
+    {
+      "id": "begin-inside-transaction",
+      "basis": "#103 완료 조건 2: 열린 트랜잭션 안의 BEGIN과 COMMIT·ROLLBACK 뒤 상태",
+      "connections": ["A"],
+      "steps": [
+        {"conn": "A", "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY)", "expect": {"kind": "command"}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "command", "txn_active": true}},
+        {"conn": "A", "sql": "BEGIN", "expect": {"kind": "error", "txn_active": true}},
+        {"conn": "A", "sql": "INSERT INTO t VALUES (?)", "params": [1], "expect": {"kind": "command", "affected": 1, "txn_active": true}},
+        {"conn": "A", "sql": "COMMIT", "expect": {"kind": "command", "txn_active": false}},
+        {"conn": "A", "sql": "SELECT * FROM t", "expect": {"kind": "rows", "rows": 1}}
+      ]
+    }
+  ]
+}
