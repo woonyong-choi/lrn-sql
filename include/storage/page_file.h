@@ -41,7 +41,9 @@
 typedef enum {
     PAGE_KIND_CONTROL = 1,
     PAGE_KIND_RECORD = 2,
-    PAGE_KIND_OVERFLOW = 3
+    PAGE_KIND_OVERFLOW = 3,
+    /* 테이블 heap의 페이지 디렉터리. 본문은 자체 magic·version을 갖는다(heap_store.h). */
+    PAGE_KIND_DIRECTORY = 4
 } page_kind_t;
 
 typedef enum {
@@ -130,6 +132,19 @@ page_file_status_t page_file_write(page_file_t *file, uint32_t page_id, page_kin
                                    uint32_t table_id, const uint8_t body[PAGE_BODY_BYTES]);
 
 /*
+ * 페이지 하나의 envelope만 검증해 종류와 table ID를 알려 준다. 읽기 전용이며 checksum·page ID·
+ * 길이 검사는 page_file_read와 같다. 위치 locator가 어떤 종류의 페이지를 가리키는지 해석하기 전에
+ * 호출하며, 알 수 없는 종류 값은 PAGE_FILE_UNSUPPORTED다. 실패하면 info를 바꾸지 않는다.
+ */
+typedef struct {
+    page_kind_t kind;
+    uint32_t table_id;
+} page_file_page_info_t;
+
+page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
+                                       page_file_page_info_t *info);
+
+/*
  * 새 페이지 번호를 받는다. 마지막 commit이 이미 놓아 준 페이지를 먼저 재사용하고 없으면 높은
  * 수위를 올린다. 이 시점에는 파일에 아무것도 쓰지 않으며 commit된 제어 페이지가 가리키는
  * 페이지는 절대 돌려주지 않는다. 실패하면 상태를 바꾸지 않는다.
@@ -149,10 +164,25 @@ page_file_status_t page_file_stage_catalog(page_file_t *file, uint32_t head, uin
                                            uint64_t catalog_generation);
 /*
  * 데이터 fsync → 오래된 제어 슬롯에 새 세대 쓰기 → fsync. 성공해야 보류 중이던 해제 페이지가
- * 재사용 가능해진다. 실패하면 제어 페이지의 현재 세대와 보류 목록은 그대로이다. fsync가 한 번
- * 실패한 핸들은 커널이 오류를 버렸을 수 있어 이후 commit을 거절한다.
+ * 재사용 가능해진다. 이 핸들이 아는 현재 세대와 보류 목록은 실패하면 그대로이지만, 실패한
+ * commit이 디스크에 새 세대를 남기지 않았다고 항상 말할 수는 없다. 결과는 page_file_last_commit_outcome이
+ * 알린다. 제어 쓰기를 시도한 뒤의 실패는 다시 열면 새 상태가 보일 수 있고 아닐 수도 있다.
+ * fsync나 제어 쓰기가 한 번 실패한 핸들은 커널이 오류를 버렸을 수 있어 poison되며 이후 commit을
+ * 거절한다.
  */
 page_file_status_t page_file_commit(page_file_t *file);
+
+typedef enum {
+    PAGE_FILE_COMMIT_NONE,         /* 이 핸들에서 commit을 시도한 적 없음 */
+    PAGE_FILE_COMMIT_NOT_APPLIED,  /* 제어 쓰기를 시작하기 전에 실패했다. 디스크의 세대는 그대로다 */
+    PAGE_FILE_COMMIT_UNKNOWN,      /* 제어 쓰기를 시도한 뒤 실패했다. 다시 열면 새 상태가 보일 수 있다 */
+    PAGE_FILE_COMMIT_APPLIED       /* 제어 쓰기와 fsync까지 성공했다 */
+} page_file_commit_outcome_t;
+
+/* 마지막 commit 호출의 결과. poison된 핸들이 거절한 commit은 poison을 일으킨 호출의 값을 유지한다. */
+page_file_commit_outcome_t page_file_last_commit_outcome(const page_file_t *file);
+/* fsync·제어 쓰기 실패로 이 핸들이 더는 commit하지 않는지. */
+bool page_file_is_poisoned(const page_file_t *file);
 
 /*
  * overflow 어댑터. 본문 8160바이트를 한 overflow 페이지로 쓴다. ctx 저장소는 호출자가 소유하며

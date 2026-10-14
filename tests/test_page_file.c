@@ -560,17 +560,31 @@ static void test_commit_failures_keep_current_generation(void)
     CHECK(page_file_release(file, first) == PAGE_FILE_OK, "해제 보류");
     CHECK(page_file_pending_release_count(file) == 1 && page_file_reusable_count(file) == 0,
           "commit 전에는 재사용 불가");
+    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_APPLIED, "직전 commit은 적용됨");
     g_hooks.pwrite_fail_at = 1;
     g_hooks.pwrite_calls = 0;
     errno = 0;
     CHECK(page_file_commit(file) == PAGE_FILE_IO && errno == ENOSPC, "제어 쓰기 실패는 IO와 errno");
-    CHECK(page_file_control(file)->generation == 1, "현재 세대는 그대로");
+    CHECK(page_file_control(file)->generation == 1, "이 핸들이 아는 세대는 그대로");
+    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_UNKNOWN,
+          "제어 쓰기를 시도한 뒤의 실패는 미반영이라고 단정할 수 없음");
+    CHECK(page_file_is_poisoned(file), "제어 쓰기 실패는 핸들을 poison");
     CHECK(page_file_pending_release_count(file) == 1 && page_file_reusable_count(file) == 0,
           "실패한 commit은 보류 해제를 재사용 목록으로 옮기지 않음");
     uint32_t again;
     assert(page_file_alloc(file, &again) == PAGE_FILE_OK);
     CHECK(again != first, "보류 중인 페이지는 alloc이 돌려주지 않음");
     hooks_reset();
+    errno = 0;
+    CHECK(page_file_commit(file) == PAGE_FILE_IO && errno == EIO, "poison된 핸들은 이후 commit도 거절");
+    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_UNKNOWN,
+          "거절한 commit이 poison을 일으킨 결과를 덮어쓰지 않음");
+    page_file_close(file);
+
+    /* 새 핸들로 해제 -> commit -> 재사용 */
+    CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK, "다시 열기");
+    CHECK(page_file_control(file)->generation == 1, "쓰이지 않은 제어 쓰기는 보이지 않음");
+    assert(page_file_release(file, first) == PAGE_FILE_OK);
     CHECK(page_file_commit(file) == PAGE_FILE_OK, "다시 commit 성공");
     CHECK(page_file_reusable_count(file) == 1, "성공한 commit 뒤에야 재사용 가능");
     uint32_t reused;
@@ -581,12 +595,15 @@ static void test_commit_failures_keep_current_generation(void)
               page_file_release(file, reused) == PAGE_FILE_INVALID, "이중 해제 거절");
     page_file_close(file);
 
-    /* fsync 실패 뒤에는 이 핸들로 더 commit하지 않는다 */
+    /* 제어 쓰기 전의 fsync 실패는 미반영, 핸들은 poison */
     CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK, "다시 열기");
     CHECK(page_file_control(file)->generation == 2, "마지막으로 성공한 세대 2");
     hooks_reset();
     g_hooks.fsync_fail_at = 1;
-    CHECK(page_file_commit(file) == PAGE_FILE_IO, "fsync 실패");
+    CHECK(page_file_commit(file) == PAGE_FILE_IO, "데이터 fsync 실패");
+    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_NOT_APPLIED &&
+              page_file_is_poisoned(file),
+          "제어 쓰기 전의 실패는 미반영이고 핸들은 poison");
     hooks_reset();
     errno = 0;
     CHECK(page_file_commit(file) == PAGE_FILE_IO && errno == EIO,
@@ -594,6 +611,22 @@ static void test_commit_failures_keep_current_generation(void)
     CHECK(page_file_control(file)->generation == 2, "세대 그대로");
     page_file_close(file);
     CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK, "다른 핸들로는 다시 열림");
+    CHECK(page_file_control(file)->generation == 2, "미반영: 디스크도 세대 2");
+    page_file_close(file);
+
+    /* 제어 쓰기 뒤의 fsync 실패는 불확정: 응답은 실패인데 다시 열면 새 세대가 보일 수 있다 */
+    CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK, "다시 열기");
+    hooks_reset();
+    g_hooks.fsync_fail_at = 2;
+    CHECK(page_file_commit(file) == PAGE_FILE_IO, "제어 쓰기 뒤 fsync 실패");
+    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_UNKNOWN &&
+              page_file_is_poisoned(file) && page_file_control(file)->generation == 2,
+          "불확정 결과, 핸들 poison, 핸들이 아는 세대는 그대로");
+    hooks_reset();
+    page_file_close(file);
+    CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK, "불확정 뒤에도 열림");
+    CHECK(page_file_control(file)->generation == 3,
+          "실패를 돌려준 commit의 새 세대가 다시 열면 보임(불확정 결과)");
     page_file_close(file);
     clean_dir();
 }
@@ -785,6 +818,65 @@ static void test_corrupt_data_pages_are_detected(void)
     clean_dir();
 }
 
+/* ══════════════════════════════════════════════════════════════ */
+static void test_page_info_reports_verified_kind(void)
+{
+    printf("\n[test_page_info_reports_verified_kind]\n");
+    fresh_dir();
+    hooks_reset();
+    page_file_t *file;
+    assert(page_file_create(DB_PATH, &file) == PAGE_FILE_OK);
+    uint32_t rec, dir, ovf;
+    assert(page_file_alloc(file, &rec) == PAGE_FILE_OK);
+    assert(page_file_alloc(file, &dir) == PAGE_FILE_OK);
+    assert(page_file_alloc(file, &ovf) == PAGE_FILE_OK);
+    uint8_t body[PAGE_BODY_BYTES];
+    memset(body, 0x5a, sizeof(body));
+    assert(page_file_write(file, rec, PAGE_KIND_RECORD, 7, body) == PAGE_FILE_OK);
+    assert(page_file_write(file, dir, PAGE_KIND_DIRECTORY, 7, body) == PAGE_FILE_OK);
+    assert(page_file_write(file, ovf, PAGE_KIND_OVERFLOW, 9, body) == PAGE_FILE_OK);
+    page_file_page_info_t info = {PAGE_KIND_CONTROL, 0};
+    CHECK(page_file_page_info(file, rec, &info) == PAGE_FILE_OK && info.kind == PAGE_KIND_RECORD &&
+              info.table_id == 7, "record 종류와 table ID");
+    CHECK(page_file_page_info(file, dir, &info) == PAGE_FILE_OK && info.kind == PAGE_KIND_DIRECTORY &&
+              info.table_id == 7, "directory 종류와 table ID");
+    CHECK(page_file_page_info(file, ovf, &info) == PAGE_FILE_OK && info.kind == PAGE_KIND_OVERFLOW &&
+              info.table_id == 9, "overflow 종류와 table ID");
+    CHECK(page_file_read(file, dir, PAGE_KIND_RECORD, 7, body) == PAGE_FILE_CORRUPT,
+          "directory를 record로 읽으면 거절");
+    CHECK(page_file_read(file, rec, PAGE_KIND_DIRECTORY, 7, body) == PAGE_FILE_CORRUPT,
+          "record를 directory로 읽으면 거절");
+    page_file_page_info_t before = info;
+    CHECK(page_file_page_info(file, 0, &info) == PAGE_FILE_INVALID &&
+              page_file_page_info(file, 999, &info) == PAGE_FILE_INVALID &&
+              page_file_page_info(NULL, rec, &info) == PAGE_FILE_INVALID &&
+              page_file_page_info(file, rec, NULL) == PAGE_FILE_INVALID &&
+              info.kind == before.kind && info.table_id == before.table_id,
+          "범위 밖·제어 페이지·NULL은 INVALID이고 출력 불변");
+    assert(page_file_commit(file) == PAGE_FILE_OK);
+    assert(page_file_publish(file) == PAGE_FILE_OK);
+    page_file_close(file);
+
+    /* 손상된 envelope와 알 수 없는 종류 */
+    size_t size;
+    uint8_t *bytes = slurp(DB_PATH, &size);
+    assert(bytes != NULL);
+    bytes[(size_t)dir * PAGE_FILE_PAGE_BYTES + 100] ^= 1;   /* 본문 손상은 checksum으로 탐지 */
+    uint8_t *ovf_page = bytes + (size_t)ovf * PAGE_FILE_PAGE_BYTES;
+    ovf_page[6] = 9;                                         /* 알 수 없는 종류 */
+    ovf_page[7] = 0;
+    reseal(ovf_page);
+    spit(DB_PATH, bytes, size);
+    free(bytes);
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    CHECK(page_file_page_info(file, dir, &info) == PAGE_FILE_CORRUPT, "손상된 페이지는 CORRUPT");
+    CHECK(page_file_page_info(file, ovf, &info) == PAGE_FILE_UNSUPPORTED, "알 수 없는 종류는 UNSUPPORTED");
+    CHECK(page_file_page_info(file, rec, &info) == PAGE_FILE_OK && info.kind == PAGE_KIND_RECORD,
+          "다른 페이지는 영향 없음");
+    page_file_close(file);
+    clean_dir();
+}
+
 int main(void)
 {
     page_file_set_default_io(&HOOKED);
@@ -796,6 +888,7 @@ int main(void)
     test_publish_never_clobbers_destination();
     test_locking_and_unpublished_files();
     test_corrupt_data_pages_are_detected();
+    test_page_info_reports_verified_kind();
     page_file_set_default_io(NULL);
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
