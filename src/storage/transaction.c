@@ -11,7 +11,6 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <time.h>
-#include <unistd.h>
 
 /*
  * 대기 시계. writer 대기는 deadline을 단조 시계(now_ms)로 재고, 조건 변수 대기는 짧은 조각으로 나눈다.
@@ -157,13 +156,68 @@ static void wait_slice(txn_manager_t *manager)
 #endif
 }
 
-static uint32_t generate_epoch(void)
-{
-    static _Atomic uint32_t counter;
-    uint32_t mixed = (uint32_t)time(NULL) * 2654435761u ^ ((uint32_t)getpid() << 12) ^
-                     (atomic_fetch_add(&counter, 1) + 1) * 40503u;
+/*
+ * 프로세스 안에서 쓴 세대 번호 기록. 자동 발급은 이 기록에 없는 다음 번호를 단조 증가로 고르고, 호출자가 지정한
+ * 번호가 이미 기록에 있으면 거절한다. 기록은 manager가 닫혀도 프로세스가 끝날 때까지 남으므로 같은 프로세스에서
+ * 한 번 쓴 번호는 다시 쓰이지 않는다. 프로세스를 넘는 유일성은 이 기록이 보장하지 못한다. 재시작하면 자동 발급은
+ * 1부터 다시 시작하므로, 재시작 경계에서는 호출자가 backend에 저장한 증가하는 세대 번호를 넘겨야 한다.
+ */
+static pthread_mutex_t epoch_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t *epoch_used;
+static size_t epoch_used_count;
+static size_t epoch_used_cap;
+static uint64_t epoch_next_auto = 1;   /* UINT32_MAX를 넘으면 자동 발급이 소진된 것이다 */
 
-    return mixed != 0 ? mixed : 1;
+static bool epoch_seen_locked(uint32_t epoch)
+{
+    for (size_t i = 0; i < epoch_used_count; i++) {
+        if (epoch_used[i] == epoch) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* requested가 0이면 자동 발급. 중복은 INVALID, 자동 발급 소진은 LIMIT, 기록 확장 실패는 NOMEM이다. */
+static txn_status_t epoch_reserve(uint32_t requested, uint32_t *out)
+{
+    txn_status_t status = TXN_OK;
+    uint32_t epoch;
+
+    pthread_mutex_lock(&epoch_mutex);
+    if (epoch_used_count == epoch_used_cap) {
+        size_t cap = epoch_used_cap != 0 ? epoch_used_cap * 2 : 16;
+        uint32_t *grown = realloc(epoch_used, cap * sizeof(*grown));
+
+        if (grown == NULL) {
+            pthread_mutex_unlock(&epoch_mutex);
+            return TXN_NOMEM;
+        }
+        epoch_used = grown;
+        epoch_used_cap = cap;
+    }
+    if (requested != 0) {
+        epoch = requested;
+        if (epoch_seen_locked(epoch)) {
+            status = TXN_INVALID;
+        }
+    } else {
+        while (epoch_next_auto <= UINT32_MAX && epoch_seen_locked((uint32_t)epoch_next_auto)) {
+            epoch_next_auto++;
+        }
+        if (epoch_next_auto > UINT32_MAX) {
+            status = TXN_LIMIT;
+            epoch = 0;
+        } else {
+            epoch = (uint32_t)epoch_next_auto++;
+        }
+    }
+    if (status == TXN_OK) {
+        epoch_used[epoch_used_count++] = epoch;
+        *out = epoch;
+    }
+    pthread_mutex_unlock(&epoch_mutex);
+    return status;
 }
 
 /* 0이면 이 세대의 id가 소진된 것이다. */
@@ -258,6 +312,8 @@ txn_status_t txn_manager_open(const txn_manager_spec_t *spec, txn_manager_t **ou
     txn_manager_t *manager;
     size_t ring_cap;
     size_t max_readers;
+    txn_status_t status;
+    uint32_t epoch;
 
     if (out == NULL) {
         return TXN_INVALID;
@@ -280,6 +336,7 @@ txn_status_t txn_manager_open(const txn_manager_spec_t *spec, txn_manager_t **ou
         free(manager);
         return TXN_NOMEM;
     }
+    status = TXN_NOMEM;
     if (pthread_mutex_init(&manager->mutex, NULL) != 0) {
         goto fail_ring;
     }
@@ -289,6 +346,11 @@ txn_status_t txn_manager_open(const txn_manager_spec_t *spec, txn_manager_t **ou
     if (pthread_mutex_init(&manager->reclaim_mutex, NULL) != 0) {
         goto fail_cond;
     }
+    /* 마지막에 예약한다. 앞선 할당이 실패해도 세대 번호를 소모하지 않는다. */
+    status = epoch_reserve(spec->epoch, &epoch);
+    if (status != TXN_OK) {
+        goto fail_reclaim_mutex;
+    }
     manager->ops = *spec->ops;
     manager->ctx = spec->ctx;
     manager->max_guarantee = spec->max_guarantee;
@@ -296,13 +358,15 @@ txn_status_t txn_manager_open(const txn_manager_spec_t *spec, txn_manager_t **ou
     manager->clock_ctx = spec->clock_ctx;
     manager->last_committed = spec->initial_seq;
     manager->last_reclaim = spec->initial_seq;
-    manager->epoch = spec->epoch != 0 ? spec->epoch : generate_epoch();
+    manager->epoch = epoch;
     manager->next_serial = 1;
     manager->max_readers = max_readers;
     manager->ring_cap = ring_cap;
     *out = manager;
     return TXN_OK;
 
+fail_reclaim_mutex:
+    pthread_mutex_destroy(&manager->reclaim_mutex);
 fail_cond:
     pthread_cond_destroy(&manager->writer_free);
 fail_mutex:
@@ -310,7 +374,7 @@ fail_mutex:
 fail_ring:
     free(manager->ring);
     free(manager);
-    return TXN_NOMEM;
+    return status;
 }
 
 txn_status_t txn_manager_close(txn_manager_t **manager_ptr)
