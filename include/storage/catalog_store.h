@@ -22,18 +22,28 @@ typedef enum {
     CATALOG_STORE_EMPTY,        /* 저장된 카탈로그가 없다 */
     CATALOG_STORE_INVALID,
     CATALOG_STORE_STALE,        /* 저장된 것보다 낮은 generation의 카탈로그 */
-    CATALOG_STORE_IO,           /* errno를 남긴다. 저장은 반영되지 않았다 */
+    CATALOG_STORE_IO,           /* errno를 남긴다. 제어 쓰기를 시도하기 전의 실패라 저장은 반영되지 않았다 */
     CATALOG_STORE_CORRUPT,
     CATALOG_STORE_UNSUPPORTED,
     CATALOG_STORE_NOMEM,
     CATALOG_STORE_LIMIT,
     /* 저장은 성공했으나 옛 체인을 회수하지 못해 페이지가 샌다. */
-    CATALOG_STORE_UNRECLAIMED
+    CATALOG_STORE_UNRECLAIMED,
+    /*
+     * 제어 쓰기를 시도한 뒤 pwrite나 fsync가 실패했다. 다시 열면 이전 카탈로그가 보일 수도, 새
+     * 카탈로그가 보일 수도 있으며 호출자는 어느 쪽인지 알 수 없다. 핸들은 poison되어 더는 쓸 수 없고,
+     * 새 체인과 옛 체인 모두 release하지 않았다. 이 결과를 성공으로 응답하거나 "반영되지 않았다"고
+     * 말하면 안 된다. errno를 남긴다.
+     */
+    CATALOG_STORE_OUTCOME_UNKNOWN
 } catalog_store_status_t;
 
 /*
- * 카탈로그를 저장하고 commit한다. 실패하면 제어 페이지는 이전 세대를 가리키고 이전 카탈로그는
- * 그대로 읽힌다. catalog_generation(catalog)가 저장된 값보다 작으면 STALE이다.
+ * 카탈로그를 저장하고 commit한다. 제어 쓰기를 시도하기 전에 실패하면(IO·NOMEM·LIMIT 등) 제어
+ * 페이지는 이전 세대를 가리키고 이전 카탈로그는 그대로 읽히며, 새 체인은 해제한다. 제어 쓰기를
+ * 시도한 뒤의 실패는 CATALOG_STORE_OUTCOME_UNKNOWN이며 어느 세대가 남았는지 알 수 없다.
+ * poison된 핸들은 아무것도 쓰지 않고 IO로 거절한다.
+ * catalog_generation(catalog)가 저장된 값보다 작으면 STALE이다.
  */
 catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *catalog);
 /* 현재 제어 페이지가 가리키는 카탈로그를 읽는다. 성공한 *out은 호출자가 catalog_close한다. */
