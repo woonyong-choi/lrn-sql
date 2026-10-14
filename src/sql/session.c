@@ -2,6 +2,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "sql/session.h"
 
@@ -66,6 +67,8 @@ struct session_db {
 struct session {
     session_db_t *db;
     account_t *account;
+    database_conn_t *conn;  /* 트랜잭션 계층이 붙은 데이터베이스에서만 있다 */
+    uint32_t begin_timeout_ms;
     atomic_bool cancel;
     bool executing;       /* 풀의 lock으로 보호. session_exec의 마지막 접근 뒤에만 내려간다 */
 };
@@ -347,6 +350,25 @@ session_status_t session_pool_create_database(session_pool_t *pool, const char *
     return finish_open(wrapper, db, status, database_status, out);
 }
 
+session_status_t session_pool_open_transactional(session_pool_t *pool, const char *path,
+                                                 const database_txn_options_t *options, session_db_t **out,
+                                                 database_status_t *database_status, database_txn_info_t *info)
+{
+    if (pool == NULL || path == NULL || out == NULL) return SESSION_INVALID;
+    *out = NULL;
+    session_db_t *wrapper = wrapper_acquire(pool);
+    if (wrapper == NULL) {
+        if (database_status != NULL) *database_status = DATABASE_NOMEM;
+        return SESSION_NOMEM;
+    }
+    mem_ledger_t ledger = {&POOL_OPS, pool};
+    database_txn_options_t opened = options != NULL ? *options : (database_txn_options_t){0};
+    opened.resident = &ledger;
+    database_t *db = NULL;
+    database_status_t status = database_open_transactional(path, &opened, &db, info);
+    return finish_open(wrapper, db, status, database_status, out);
+}
+
 session_status_t session_pool_close_database(session_db_t *wrapper, database_status_t *database_status)
 {
     if (wrapper == NULL) return SESSION_INVALID;
@@ -357,6 +379,7 @@ session_status_t session_pool_close_database(session_db_t *wrapper, database_sta
     if (busy) return SESSION_BUSY;
     database_status_t closed = database_close(wrapper->db);  /* 상주 몫을 돌려준다 */
     if (database_status != NULL) *database_status = closed;
+    if (closed == DATABASE_BUSY) return SESSION_BUSY;  /* 해제하지 않은 트랜잭션이 남았다. 핸들은 그대로다 */
     wrapper_discard(wrapper);
     return SESSION_OK;
 }
@@ -407,6 +430,8 @@ session_status_t session_open(session_db_t *db, session_t **out)
     session->db = db;
     session->account = account;
     atomic_init(&session->cancel, false);
+    /* 트랜잭션 계층이 없으면 conn은 NULL이고 세션은 문장마다 자동 commit이다 */
+    if (database_conn_open(db->db, NULL, &session->conn) != DATABASE_OK) session->conn = NULL;
     *out = session;
     return SESSION_OK;
 }
@@ -423,6 +448,12 @@ session_status_t session_close(session_t *session)
         return SESSION_BUSY;
     }
     pthread_mutex_unlock(&pool->lock);
+    /* 열린 트랜잭션은 rollback한다. 실행 잠금 아래에서 하므로 다른 세션의 문장과 겹치지 않는다 */
+    if (session->conn != NULL) {
+        pthread_mutex_lock(&db->run);
+        database_conn_close(&session->conn);
+        pthread_mutex_unlock(&db->run);
+    }
     /* 세션 구조체를 해제한 뒤에 몫을 돌려준다. sessions_open·db->sessions는 그 뒤에 내려가므로 그 사이에
      * 풀이나 DB 래퍼가 해제되지 않는다. account 몫은 마지막 참조가 사라질 때 account_drop이 돌려준다 */
     free(session);
@@ -456,6 +487,11 @@ session_status_t session_stats_get(const session_t *session, session_stats_t *ou
     return SESSION_OK;
 }
 
+void session_set_begin_timeout(session_t *session, uint32_t timeout_ms)
+{
+    if (session != NULL) session->begin_timeout_ms = timeout_ms;
+}
+
 void session_cancel(session_t *session)
 {
     if (session != NULL) atomic_store(&session->cancel, true);
@@ -472,6 +508,41 @@ static bool cancel_requested(void *ctx)
     const cancel_ctx_t *cancel = ctx;
     if (atomic_load(&cancel->session->cancel)) return true;
     return cancel->user != NULL && cancel->user->requested != NULL && cancel->user->requested(cancel->user->ctx);
+}
+
+static void sleep_ms(long ms)
+{
+    struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+}
+
+static uint64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* 실행 중 표시를 올린다. 이미 실행 중이면 false */
+static bool enter(session_t *session)
+{
+    session_pool_t *pool = session->db->pool;
+    pthread_mutex_lock(&pool->lock);
+    if (session->executing) {
+        pthread_mutex_unlock(&pool->lock);
+        return false;
+    }
+    session->executing = true;
+    pthread_mutex_unlock(&pool->lock);
+    return true;
+}
+
+static void leave(session_t *session)
+{
+    session_pool_t *pool = session->db->pool;
+    pthread_mutex_lock(&pool->lock);
+    session->executing = false;
+    pthread_mutex_unlock(&pool->lock);
 }
 
 database_exec_status_t session_exec(session_t *session, const session_exec_options_t *options,
@@ -495,9 +566,24 @@ database_exec_status_t session_exec(session_t *session, const session_exec_optio
     mem_ledger_t ledger = {&ACCOUNT_OPS, account};
     database_exec_options_t exec_options = {&ledger, &cancel, pool->limits.max_sql_bytes};
 
-    pthread_mutex_lock(&session->db->run);
-    database_exec_status_t status = database_exec_ex(session->db->db, &exec_options, sql, size, binding, out);
-    pthread_mutex_unlock(&session->db->run);
+    uint32_t wait_ms = session->begin_timeout_ms;
+    uint64_t deadline = wait_ms > 0 ? now_ms() + wait_ms : 0;
+    database_exec_status_t status;
+    for (;;) {
+        pthread_mutex_lock(&session->db->run);
+        status = session->conn != NULL
+                     ? database_conn_exec(session->conn, &exec_options, sql, size, binding, out)
+                     : database_exec_ex(session->db->db, &exec_options, sql, size, binding, out);
+        pthread_mutex_unlock(&session->db->run);
+        /* BEGIN이 다른 세션의 writer 때문에 거절됐다: 실행 잠금을 놓은 채 기다렸다 다시 시도한다 */
+        if (status != DATABASE_EXEC_OK || session->conn == NULL || !database_conn_begin_busy(session->conn) ||
+            wait_ms == 0 || now_ms() >= deadline || atomic_load(&session->cancel)) {
+            break;
+        }
+        result_release(out);
+        *out = NULL;
+        sleep_ms(1);
+    }
 
     /* 결과를 호출자에게 넘긴다: query 몫을 session의 이전된 결과로 옮기고 결과가 반환할 곳을 바꾼다.
      * 옮기는 일은 카운터 이동이라 shared_used는 변하지 않는다. 먼저 옮겨야 rebind 뒤 release가 맞는 곳을 본다 */
@@ -527,6 +613,70 @@ database_exec_status_t session_exec(session_t *session, const session_exec_optio
     session->executing = false;
     pthread_mutex_unlock(&pool->lock);
     return status;
+}
+
+
+/* ── 세션의 트랜잭션 ── */
+
+txn_status_t session_txn_begin(session_t *session, const session_txn_options_t *options)
+{
+    if (session == NULL) return TXN_INVALID;
+    if (session->conn == NULL) return TXN_UNSUPPORTED;
+    if (!enter(session)) return TXN_INVALID;
+    session_txn_options_t defaults = {TXN_GUARANTEE_VISIBLE, 0};
+    const session_txn_options_t *use = options != NULL ? options : &defaults;
+    /* 매니저의 대기는 실행 잠금을 쥔 채 하지 않는다. 잠깐 시도하고 놓은 뒤 기다린다 */
+    txn_begin_options_t begin = {TXN_ACCESS_READ_WRITE, TXN_ISOLATION_SNAPSHOT, use->guarantee, 0, NULL};
+    uint64_t deadline = use->timeout_ms > 0 ? now_ms() + use->timeout_ms : 0;
+    txn_status_t st;
+    for (;;) {
+        pthread_mutex_lock(&session->db->run);
+        st = database_conn_begin(session->conn, &begin);
+        pthread_mutex_unlock(&session->db->run);
+        if ((st != TXN_BUSY && st != TXN_TIMEOUT) || use->timeout_ms == 0 || now_ms() >= deadline ||
+            atomic_load(&session->cancel)) {
+            break;
+        }
+        sleep_ms(1);
+    }
+    if (st == TXN_BUSY && use->timeout_ms > 0 && now_ms() >= deadline) st = TXN_TIMEOUT;
+    atomic_store(&session->cancel, false);
+    leave(session);
+    return st;
+}
+
+txn_status_t session_txn_commit(session_t *session, txn_commit_info_t *info)
+{
+    if (session == NULL) return TXN_INVALID;
+    if (session->conn == NULL) return TXN_UNSUPPORTED;
+    if (!enter(session)) return TXN_INVALID;
+    pthread_mutex_lock(&session->db->run);
+    txn_status_t st = database_conn_commit(session->conn, info);
+    pthread_mutex_unlock(&session->db->run);
+    leave(session);
+    return st;
+}
+
+txn_status_t session_txn_rollback(session_t *session)
+{
+    if (session == NULL) return TXN_INVALID;
+    if (session->conn == NULL) return TXN_UNSUPPORTED;
+    if (!enter(session)) return TXN_INVALID;
+    pthread_mutex_lock(&session->db->run);
+    txn_status_t st = database_conn_rollback(session->conn);
+    pthread_mutex_unlock(&session->db->run);
+    leave(session);
+    return st;
+}
+
+bool session_txn_active(const session_t *session)
+{
+    return session != NULL && database_conn_in_txn(session->conn);
+}
+
+bool session_txn_failed(const session_t *session)
+{
+    return session != NULL && database_conn_failed(session->conn);
 }
 
 
