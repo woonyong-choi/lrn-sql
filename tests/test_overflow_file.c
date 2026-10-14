@@ -48,7 +48,9 @@ static overflow_io_t io_for(file_store_t *store)
 
 /*
  * #81: 합성 데이터를 실제 파일에 쓰고 닫은 뒤 새 핸들로 다시 읽는다.
+ * 정상 close/reopen만 확인하며 전원 장애·중간 crash 복구는 검증하지 않는다.
  * 사용법: test_overflow_file <새로 만들 파일 경로>. 경로가 없으면 검사하지 않고 종료 2.
+ * 성공하면 합성 파일을 지운다.
  * 페이지 0은 예약이라 첫 할당 번호는 1이다. 할당표 복원은 이 검사의 범위가 아니다.
  */
 int main(int argc, char **argv)
@@ -91,6 +93,7 @@ int main(int argc, char **argv)
     assert(overflow_read(&read_io, ref, &back) == OVERFLOW_CORRUPT && back == NULL);
     fclose(reader.file);
     free(bytes);
-    puts("overflow file: chain survives close/reopen; on-disk bit flip is detected");
+    assert(remove(argv[1]) == 0);
+    puts("overflow file: normal close/reopen roundtrip; on-disk bit flip is detected (no crash recovery claim)");
     return 0;
 }
