@@ -142,4 +142,16 @@ uint64_t catalog_generation(const catalog_t *catalog);
 catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_t *size);
 catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **out);
 
+/*
+ * 메모리 회계용 읽기 전용 접근자. 요청한 바이트 기준이며 allocator 오버헤드는 포함하지 않는다.
+ * catalog_memory_bytes: 이 카탈로그가 지금 쥔 할당(구조체, tables 배열 용량, 이름과 컬럼 배열)의 합.
+ * catalog_clone_peak_bytes: catalog_encode한 뒤 catalog_decode로 복제하는 동안 요청 바이트의 순간 최대치
+ *   상한(부호화 buffer, 복제본, 복호화 임시 배열). 복제 성공 뒤 남는 몫은 복제본의 catalog_memory_bytes다.
+ * catalog_create_peak_bytes: 컬럼 column_count개, 이름 바이트 합 names_bytes(테이블 이름 포함)인 테이블을
+ *   catalog_create_table로 추가하는 동안의 순간 최대치 상한. tables 배열을 늘릴 때의 old+new를 포함한다.
+ */
+size_t catalog_memory_bytes(const catalog_t *catalog);
+size_t catalog_clone_peak_bytes(const catalog_t *catalog);
+size_t catalog_create_peak_bytes(const catalog_t *catalog, size_t column_count, size_t names_bytes);
+
 #endif
