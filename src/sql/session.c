@@ -6,6 +6,24 @@
 #include "sql/session.h"
 
 /*
+ * 시험 전용 훅. SESSION_TEST_HOOK을 켜고 빌드하면 풀 mutex를 쥔 채 호출된다. 켜지 않으면 아무 코드도 없다.
+ * 반환 바이트가 아직 살아 있는 메모리와 겹치지 않는지(반환은 항상 해제 뒤) 시험이 검사한다.
+ */
+#ifdef SESSION_TEST_HOOK
+void session_test_locked(const char *where, size_t shared_used);
+bool session_test_fail_reserve(void);
+void session_test_returning(const void *object, const char *where);
+#define TEST_LOCKED(pool, where) session_test_locked((where), (pool)->shared_used)
+#define TEST_FAIL_RESERVE() session_test_fail_reserve()
+/* 몫을 돌려주기 직전에 그 몫의 객체가 이미 해제됐는지 시험이 본다(주소 비교만) */
+#define TEST_RETURNING(object, where) session_test_returning((object), (where))
+#else
+#define TEST_LOCKED(pool, where) ((void)0)
+#define TEST_FAIL_RESERVE() false
+#define TEST_RETURNING(object, where) ((void)0)
+#endif
+
+/*
  * 모든 카운터는 풀의 mutex 하나로 보호한다. 한 번의 reserve는 query·session·shared를 같은 임계 구역에서
  * 모두 확인하고 모두 올리므로 일부만 반영되는 순간이 없다.
  */
@@ -85,7 +103,7 @@ static bool account_reserve(void *ctx, mem_scope_t scope, size_t bytes)
     session_pool_t *pool = account->pool;
     pthread_mutex_lock(&pool->lock);
     size_t session_total = account->query_used + account->result_used;
-    bool ok = fits(pool->shared_used, bytes, pool->limits.shared_limit);
+    bool ok = !TEST_FAIL_RESERVE() && fits(pool->shared_used, bytes, pool->limits.shared_limit);
     if (ok && scope != MEM_SCOPE_RESIDENT) ok = fits(session_total, bytes, pool->limits.session_limit);
     if (ok && scope == MEM_SCOPE_QUERY) ok = fits(account->query_used, bytes, pool->limits.query_limit);
     if (!ok) {
@@ -104,6 +122,7 @@ static bool account_reserve(void *ctx, mem_scope_t scope, size_t bytes)
         case MEM_SCOPE_RESIDENT: pool->resident_used += bytes; break;
     }
     note_peak(pool, account);
+    TEST_LOCKED(pool, "account_reserve");
     pthread_mutex_unlock(&pool->lock);
     return true;
 }
@@ -122,6 +141,7 @@ static void account_release(void *ctx, mem_scope_t scope, size_t bytes)
             break;
         case MEM_SCOPE_RESIDENT: take(pool, &pool->resident_used, bytes); break;
     }
+    TEST_LOCKED(pool, "account_release");
     pthread_mutex_unlock(&pool->lock);
 }
 
@@ -133,20 +153,27 @@ static void account_retain(void *ctx)
     pthread_mutex_unlock(&account->pool->lock);
 }
 
+/*
+ * 마지막 참조면 메모리를 먼저 해제하고 그 뒤에 몫을 돌려준다. 몫을 먼저 돌려주면 다른 스레드가 그 몫으로 새로
+ * 할당해 아직 살아 있는 옛 계상 객체와 겹친다. 그 사이 풀이 사라지지 않도록 accounts_live는 몫을 돌려준 뒤에만
+ * 내려간다(session_pool_close가 BUSY).
+ */
 static void account_drop(void *ctx)
 {
     account_t *account = ctx;
     session_pool_t *pool = account->pool;
     pthread_mutex_lock(&pool->lock);
     bool last = --account->refs == 0;
-    if (last) {
-        /* 계상 객체 자신의 몫은 마지막 참조가 사라질 때 돌려준다. 풀은 accounts_live가 0이 될 때까지 닫히지 않는다 */
-        take(pool, &pool->shared_used, sizeof(account_t));
-        take(pool, &pool->resident_used, sizeof(account_t));
-        pool->accounts_live--;
-    }
     pthread_mutex_unlock(&pool->lock);
-    if (last) free(account);
+    if (!last) return;
+    free(account);
+    pthread_mutex_lock(&pool->lock);
+    TEST_RETURNING(account, "account_drop");
+    take(pool, &pool->shared_used, sizeof(account_t));
+    take(pool, &pool->resident_used, sizeof(account_t));
+    pool->accounts_live--;
+    TEST_LOCKED(pool, "account_drop");
+    pthread_mutex_unlock(&pool->lock);
 }
 
 static const mem_ledger_ops_t ACCOUNT_OPS = {account_reserve, account_release, account_retain, account_drop};
@@ -158,7 +185,7 @@ static bool pool_reserve(void *ctx, mem_scope_t scope, size_t bytes)
     (void)scope;
     session_pool_t *pool = ctx;
     pthread_mutex_lock(&pool->lock);
-    bool ok = fits(pool->shared_used, bytes, pool->limits.shared_limit);
+    bool ok = !TEST_FAIL_RESERVE() && fits(pool->shared_used, bytes, pool->limits.shared_limit);
     if (!ok) {
         pool->refused++;
     } else {
@@ -166,6 +193,7 @@ static bool pool_reserve(void *ctx, mem_scope_t scope, size_t bytes)
         pool->resident_used += bytes;
         note_peak(pool, NULL);
     }
+    TEST_LOCKED(pool, "pool_reserve");
     pthread_mutex_unlock(&pool->lock);
     return ok;
 }
@@ -177,6 +205,7 @@ static void pool_release(void *ctx, mem_scope_t scope, size_t bytes)
     pthread_mutex_lock(&pool->lock);
     take(pool, &pool->shared_used, bytes);
     take(pool, &pool->resident_used, bytes);
+    TEST_LOCKED(pool, "pool_release");
     pthread_mutex_unlock(&pool->lock);
 }
 
@@ -193,6 +222,8 @@ static bool limits_valid(const session_limits_t *limits)
 session_status_t session_pool_open(const session_limits_t *limits, session_pool_t **out)
 {
     if (out == NULL || !limits_valid(limits)) return SESSION_INVALID;
+    /* 풀 구조체 자신이 shared 한도 안에 들어가는지 할당 전에 본다. 실패한 open도 한도를 넘기지 않는다 */
+    if (!fits(0, sizeof(session_pool_t), limits->shared_limit)) return SESSION_NOMEM;
     session_pool_t *pool = calloc(1, sizeof(*pool));
     if (pool == NULL) return SESSION_NOMEM;
     if (pthread_mutex_init(&pool->lock, NULL) != 0) {
@@ -200,11 +231,6 @@ session_status_t session_pool_open(const session_limits_t *limits, session_pool_
         return SESSION_NOMEM;
     }
     pool->limits = *limits;
-    if (!fits(0, sizeof(*pool), limits->shared_limit)) {
-        pthread_mutex_destroy(&pool->lock);
-        free(pool);
-        return SESSION_NOMEM;
-    }
     pool->shared_used = sizeof(*pool);
     pool->resident_used = sizeof(*pool);
     pool->shared_peak = sizeof(*pool);
@@ -261,17 +287,19 @@ static session_db_t *wrapper_acquire(session_pool_t *pool)
     return wrapper;
 }
 
-/* 풀을 건드리는 마지막 일이 databases_open 감소이므로 몫을 먼저 돌려준다 */
+/* 구조체를 해제한 뒤에 몫을 돌려주고, 풀을 건드리는 마지막 일은 databases_open 감소다 */
 static void wrapper_discard(session_db_t *wrapper)
 {
     session_pool_t *pool = wrapper->pool;
-    mem_ledger_t ledger = {&POOL_OPS, pool};
-    mem_release(&ledger, MEM_SCOPE_RESIDENT, wrapper->overhead);
+    size_t overhead = wrapper->overhead;
     pthread_mutex_destroy(&wrapper->run);
+    free(wrapper);
+    TEST_RETURNING(wrapper, "wrapper_discard");
+    mem_ledger_t ledger = {&POOL_OPS, pool};
+    mem_release(&ledger, MEM_SCOPE_RESIDENT, overhead);
     pthread_mutex_lock(&pool->lock);
     pool->databases_open--;
     pthread_mutex_unlock(&pool->lock);
-    free(wrapper);
 }
 
 static session_status_t finish_open(session_db_t *wrapper, database_t *db, database_status_t status,
@@ -347,7 +375,7 @@ session_status_t session_open(session_db_t *db, session_t **out)
         pthread_mutex_unlock(&pool->lock);
         return SESSION_LIMIT;
     }
-    if (!fits(pool->shared_used, overhead, pool->limits.shared_limit)) {
+    if (TEST_FAIL_RESERVE() || !fits(pool->shared_used, overhead, pool->limits.shared_limit)) {
         pool->refused++;
         pthread_mutex_unlock(&pool->lock);
         return SESSION_NOMEM;
@@ -386,26 +414,32 @@ session_status_t session_open(session_db_t *db, session_t **out)
 session_status_t session_close(session_t *session)
 {
     if (session == NULL) return SESSION_INVALID;
-    session_pool_t *pool = session->db->pool;
+    session_db_t *db = session->db;
+    session_pool_t *pool = db->pool;
     account_t *account = session->account;
     pthread_mutex_lock(&pool->lock);
     if (session->executing) {
         pthread_mutex_unlock(&pool->lock);
         return SESSION_BUSY;
     }
-    /* 세션 구조체 몫만 돌려준다. account 몫은 마지막 참조가 사라질 때 account_drop이 돌려준다 */
+    pthread_mutex_unlock(&pool->lock);
+    /* 세션 구조체를 해제한 뒤에 몫을 돌려준다. sessions_open·db->sessions는 그 뒤에 내려가므로 그 사이에
+     * 풀이나 DB 래퍼가 해제되지 않는다. account 몫은 마지막 참조가 사라질 때 account_drop이 돌려준다 */
+    free(session);
+    pthread_mutex_lock(&pool->lock);
+    TEST_RETURNING(session, "session_close");
     take(pool, &pool->shared_used, sizeof(session_t));
     take(pool, &pool->resident_used, sizeof(session_t));
-    session->db->sessions--;
     /* 남은 query 몫이 있으면 불변식 위반이다. 세고 돌려준다 */
     if (account->query_used > 0) {
         pool->faults++;
         take(pool, &pool->shared_used, account->query_used);
         account->query_used = 0;
     }
+    db->sessions--;
     pool->sessions_open--;
+    TEST_LOCKED(pool, "session_close");
     pthread_mutex_unlock(&pool->lock);
-    free(session);
     account_drop(account);  /* 이전된 결과가 남아 있으면 그쪽이 마지막 참조다 */
     return SESSION_OK;
 }
@@ -494,3 +528,14 @@ database_exec_status_t session_exec(session_t *session, const session_exec_optio
     pthread_mutex_unlock(&pool->lock);
     return status;
 }
+
+
+#ifdef SESSION_TEST_HOOK
+/* 시험이 풀 mutex 안에서 검사하도록 연다 */
+void session_test_with_lock(session_pool_t *pool, void (*fn)(void *ctx, size_t shared_used), void *ctx)
+{
+    pthread_mutex_lock(&pool->lock);
+    fn(ctx, pool->shared_used);
+    pthread_mutex_unlock(&pool->lock);
+}
+#endif
