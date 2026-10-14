@@ -190,6 +190,11 @@ wal_lsn_t wal_flushed_lsn(const wal_t *wal);    /* fsync된 마지막 레코드�
 wal_lsn_t wal_end_lsn(const wal_t *wal);        /* 다음 레코드가 놓일 오프셋 */
 /* 로그에서 본 가장 큰 xid. 새 xid는 이보다 커야 한다. 거래가 없으면 0 */
 wal_xid_t wal_max_xid(const wal_t *wal);
+/*
+ * 이 로그 파일의 식별자(헤더의 file_id, 만들 때 무작위로 정해지며 0이 아니다). 읽기 전용이다. LSN은 이 파일 안의
+ * 오프셋이라 다른 로그에는 의미가 없으므로, 데이터 파일이 짝인 로그를 기억하는 데 쓴다. wal을 NULL로 주면 0이다.
+ */
+uint64_t wal_file_id(const wal_t *wal);
 bool wal_is_poisoned(const wal_t *wal);
 uint64_t wal_memory_used(const wal_t *wal);  /* 지금 WAL이 쥔 힙 바이트 */
 uint64_t wal_memory_peak(const wal_t *wal);
