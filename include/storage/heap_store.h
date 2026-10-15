@@ -190,11 +190,17 @@ size_t heap_record_page_count(const heap_t *heap);
  * 실패하면 out은 변경하지 않는다.
  */
 heap_status_t heap_get(heap_t *heap, heap_locator_t locator, value_t *row);
+/* selected는 column_count개의 bool이다. NULL이면 모든 컬럼을 복원한다. */
+heap_status_t heap_get_projected(heap_t *heap, heap_locator_t locator, const bool *selected,
+                                 value_t *row);
 
 /* 디렉터리 순서·slot 순서로 행을 하나씩 돌려준다. cursor는 열 때의 heap_t 상태를 본다. */
 heap_status_t heap_cursor_open(heap_t *heap, heap_cursor_t **out);
 /* HEAP_OK면 row(column_count개)와 locator를 채우고, 끝이면 HEAP_DONE이다. row는 호출자가 clear한다. */
 heap_status_t heap_cursor_next(heap_cursor_t *cursor, value_t *row, heap_locator_t *locator);
+/* 선택하지 않은 overflow 체인은 읽지 않으며, 레코드의 기본 형식은 검사한다. */
+heap_status_t heap_cursor_next_projected(heap_cursor_t *cursor, const bool *selected, value_t *row,
+                                         heap_locator_t *locator);
 void heap_cursor_close(heap_cursor_t *cursor);
 
 /*
