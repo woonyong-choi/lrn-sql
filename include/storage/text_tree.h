@@ -21,5 +21,8 @@ pk_status_t text_tree_remove(const pk_tree_io_t *io, uint32_t table_id, uint32_t
                              const uint8_t *key, size_t key_bytes, heap_locator_t *removed);
 pk_status_t text_tree_visit_pages(const pk_tree_io_t *io, uint32_t table_id, uint32_t root,
                                   bool (*visit)(void *context, uint32_t page_id), void *context);
+pk_status_t text_tree_visit_prefix(const pk_tree_io_t *io, uint32_t table_id, uint32_t root,
+                                   const uint8_t *prefix, size_t prefix_bytes,
+                                   bool (*visit)(void *context, heap_locator_t locator), void *context);
 
 #endif

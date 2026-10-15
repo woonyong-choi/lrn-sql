@@ -450,3 +450,53 @@ pk_status_t text_tree_visit_pages(const pk_tree_io_t *io, uint32_t table_id, uin
 {
     return visit_node(io, table_id, root, LEVEL_ANY, visit, context);
 }
+
+static int compare_prefix(text_key_t key, text_key_t prefix)
+{
+    size_t common = key.size < prefix.size ? key.size : prefix.size;
+    int compared = common == 0 ? 0 : memcmp(key.bytes, prefix.bytes, common);
+    if (compared != 0) return compared;
+    return key.size < prefix.size ? -1 : 0;
+}
+
+/* 중복값의 composite key는 같은 prefix로 모이므로 시작 child부터 끝 경계까지만 방문한다. */
+static pk_status_t visit_prefix_node(const pk_tree_io_t *io, uint32_t table_id, uint32_t page,
+                                     int expected_level, text_key_t prefix,
+                                     bool (*visit)(void *context, heap_locator_t locator), void *context)
+{
+    node_t node;
+    pk_status_t status = load_node(io, table_id, page, expected_level, &node);
+    if (status != PK_OK) return status;
+    if (node.level == 0) {
+        bool found;
+        uint32_t start = leaf_search(&node, prefix, &found);
+        for (uint32_t i = start; i < node.count; i++) {
+            entry_t entry = entry_at(&node, i);
+            if (compare_prefix(entry.key, prefix) != 0) break;
+            heap_locator_t locator = {entry.target, entry.slot};
+            if (!visit(context, locator)) return PK_NOMEM;
+        }
+        return PK_OK;
+    }
+    uint32_t start = child_index(&node, prefix);
+    for (uint32_t i = start; i < node.count; i++) {
+        entry_t child = entry_at(&node, i);
+        if (i > start && compare_prefix(child.key, prefix) > 0) break;
+        status = visit_prefix_node(io, table_id, child.target, node.level - 1, prefix, visit, context);
+        if (status != PK_OK) return status;
+    }
+    return PK_OK;
+}
+
+// cost: time O(d·log c + m), heap O(1), stack O(d), io O(d + m/c)
+// vars: d = 트리 깊이, c = 노드당 항목 수, m = 일치하는 항목 수
+// basis: estimate
+pk_status_t text_tree_visit_prefix(const pk_tree_io_t *io, uint32_t table_id, uint32_t root,
+                                   const uint8_t *prefix, size_t prefix_bytes,
+                                   bool (*visit)(void *context, heap_locator_t locator), void *context)
+{
+    if (visit == NULL || prefix_bytes > TEXT_TREE_KEY_MAX_BYTES ||
+        (prefix_bytes > 0 && prefix == NULL)) return PK_LIMIT;
+    return visit_prefix_node(io, table_id, root, LEVEL_ANY,
+                             (text_key_t){prefix, (uint16_t)prefix_bytes}, visit, context);
+}

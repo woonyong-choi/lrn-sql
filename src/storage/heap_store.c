@@ -65,6 +65,9 @@ struct heap_batch {
     bool finished;
     uint32_t new_root;
     uint32_t index_root;    /* 이 batch가 바꾸고 있는 색인의 현재 root */
+    heap_secondary_spec_t *secondary;
+    uint32_t *secondary_roots;
+    size_t secondary_count;
 };
 
 struct heap_cursor {
@@ -1045,9 +1048,11 @@ static heap_status_t collect_index_pages(heap_t *heap, u32_list_t *list)
     return heap_from_pk(heap, visited);
 }
 
-heap_status_t heap_collect_pages(heap_t *heap, uint32_t **pages, size_t *count)
+heap_status_t heap_collect_pages_with_indexes(heap_t *heap, const uint32_t *roots, size_t root_count,
+                                              uint32_t **pages, size_t *count)
 {
-    if (heap == NULL || pages == NULL || count == NULL) return HEAP_INVALID;
+    if (heap == NULL || pages == NULL || count == NULL ||
+        (root_count > 0 && roots == NULL)) return HEAP_INVALID;
     const mem_ledger_t *ledger = &heap->ledger;
     u32_list_t list = {NULL, 0, 0};
     heap_status_t result = HEAP_OK;
@@ -1069,6 +1074,14 @@ heap_status_t heap_collect_pages(heap_t *heap, uint32_t **pages, size_t *count)
     /* 읽기에 쓰지 않는 어긋난 색인도 DROP 때는 그 페이지를 회수해야 한다. */
     if (result == HEAP_OK && heap->index_root != PAGE_FILE_NO_PAGE) {
         result = collect_index_pages(heap, &list);
+    }
+    pk_tree_io_t index_io = index_read_io(heap);
+    index_collect_t index_collect = {&list, ledger};
+    for (size_t i = 0; i < root_count && result == HEAP_OK; i++) {
+        if (roots[i] == PAGE_FILE_NO_PAGE) continue;
+        pk_status_t visited = text_tree_visit_pages(&index_io, heap->table_id, roots[i],
+                                                     collect_index_page, &index_collect);
+        result = heap_from_pk(heap, visited);
     }
     for (size_t i = 0; result == HEAP_OK && i < heap->dir_count; i++) list.items[list.len++] = heap->dirs[i];
     for (size_t i = 0; result == HEAP_OK && i < heap->entry_count; i++) {
@@ -1134,6 +1147,11 @@ heap_status_t heap_collect_pages(heap_t *heap, uint32_t **pages, size_t *count)
     return HEAP_OK;
 }
 
+heap_status_t heap_collect_pages(heap_t *heap, uint32_t **pages, size_t *count)
+{
+    return heap_collect_pages_with_indexes(heap, NULL, 0, pages, count);
+}
+
 /* ── batch ── */
 
 /* batch의 entries·bufs·dirty 배열이 항목 하나당 쥐는 바이트 */
@@ -1190,11 +1208,16 @@ void heap_batch_free(heap_batch_t *batch)
     free(batch->entries);
     free(batch->bufs);
     free(batch->dirty);
+    size_t secondary_bytes = batch->secondary_count *
+                             (sizeof(*batch->secondary) + sizeof(*batch->secondary_roots));
+    free(batch->secondary);
+    free(batch->secondary_roots);
     list_free(&batch->old_pages, &ledger);
     list_free(&batch->fresh, &ledger);
     free(batch);
     /* 모든 메모리를 해제한 뒤에 몫을 돌려준다 */
     acct_release(&ledger, pages * RECORD_PAGE_BYTES);
+    acct_release(&ledger, secondary_bytes);
     acct_release(&ledger, structure);
 }
 
@@ -1309,9 +1332,224 @@ static pk_tree_io_t batch_index_io(heap_batch_t *batch)
     return io;
 }
 
+static bool same_locator(heap_locator_t a, heap_locator_t b);
+
+static heap_status_t encode_secondary_key(const value_view_t *value, bool unique,
+                                          heap_locator_t locator, uint8_t key[TEXT_TREE_KEY_MAX_BYTES],
+                                          size_t *key_bytes)
+{
+    size_t used = 0;
+    if (value->type == VALUE_INTEGER || value->type == VALUE_REAL) {
+        uint64_t bits;
+        if (value->type == VALUE_INTEGER) bits = (uint64_t)value->integer ^ (UINT64_C(1) << 63);
+        else {
+            double real = value->real == 0.0 ? 0.0 : value->real;
+            memcpy(&bits, &real, sizeof(bits));
+            bits = (bits & (UINT64_C(1) << 63)) ? ~bits : bits ^ (UINT64_C(1) << 63);
+        }
+        for (size_t i = 0; i < 8; i++) key[used++] = (uint8_t)(bits >> (56u - 8u * i));
+    } else if (value->type == VALUE_TEXT || value->type == VALUE_BLOB) {
+        for (size_t i = 0; i < value->size_bytes; i++) {
+            if (used + 2u > TEXT_TREE_KEY_MAX_BYTES) return HEAP_LIMIT;
+            key[used++] = value->bytes[i];
+            if (value->bytes[i] == 0) key[used++] = 0xff;
+        }
+        if (used + 2u > TEXT_TREE_KEY_MAX_BYTES) return HEAP_LIMIT;
+        key[used++] = 0;
+        key[used++] = 0;
+    } else return HEAP_INVALID;
+    if (!unique) {
+        if (used + 6u > TEXT_TREE_KEY_MAX_BYTES) return HEAP_LIMIT;
+        for (size_t i = 0; i < 4; i++) {
+            key[used++] = (uint8_t)(locator.directory_index >> (24u - 8u * i));
+        }
+        key[used++] = (uint8_t)(locator.slot >> 8);
+        key[used++] = (uint8_t)locator.slot;
+    }
+    *key_bytes = used;
+    return HEAP_OK;
+}
+
+bool heap_secondary_key_fits(const value_view_t *value)
+{
+    if (value == NULL || value->type == VALUE_NULL) return false;
+    uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
+    size_t key_bytes;
+    return encode_secondary_key(value, false, (heap_locator_t){0, 0}, key, &key_bytes) == HEAP_OK;
+}
+
+// cost: time O(d·log c + m), heap O(1), stack O(d), io O(d + m/c)
+// vars: d = 색인 깊이, c = 노드당 항목 수, m = 일치하는 locator 수
+// basis: estimate
+heap_status_t heap_secondary_visit_equal(heap_t *heap, heap_secondary_spec_t spec,
+                                         const value_view_t *value,
+                                         bool (*visit)(void *context, heap_locator_t locator), void *context)
+{
+    if (heap == NULL || value == NULL || visit == NULL || spec.column >= heap->column_count ||
+        value->type == VALUE_NULL) return HEAP_INVALID;
+    if (spec.root == PAGE_FILE_NO_PAGE) return heap->root == PAGE_FILE_NO_PAGE ? HEAP_OK : HEAP_CORRUPT;
+    uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
+    size_t key_bytes;
+    heap_status_t encoded = encode_secondary_key(value, true, (heap_locator_t){0, 0}, key, &key_bytes);
+    if (encoded != HEAP_OK) return encoded;
+    pk_tree_io_t io = index_read_io(heap);
+    uint32_t stamp;
+    pk_status_t checked = text_tree_stamp(&io, heap->table_id, spec.root, &stamp);
+    heap_status_t status = heap_from_pk(heap, checked);
+    if (status != HEAP_OK) return status;
+    if (stamp != heap->root) return HEAP_CORRUPT;
+    if (heap->stats != NULL) heap->stats->index_lookups++;
+    if (spec.unique) {
+        heap_locator_t locator;
+        checked = text_tree_find(&io, heap->table_id, spec.root, key, key_bytes, &locator);
+        if (checked == PK_NOT_FOUND) return HEAP_OK;
+        if (checked != PK_OK) return heap_from_pk(heap, checked);
+        return visit(context, locator) ? HEAP_OK : HEAP_NOMEM;
+    }
+    checked = text_tree_visit_prefix(&io, heap->table_id, spec.root, key, key_bytes, visit, context);
+    return heap_from_pk(heap, checked);
+}
+
+heap_status_t heap_batch_configure_secondary(heap_batch_t *batch, const heap_secondary_spec_t *specs,
+                                             size_t count)
+{
+    if (batch == NULL || batch->finished || batch->failed || batch->secondary != NULL ||
+        count > 64 || (count > 0 && specs == NULL)) return HEAP_INVALID;
+    if (count == 0) return HEAP_OK;
+    size_t bytes = count * (sizeof(*batch->secondary) + sizeof(*batch->secondary_roots));
+    if (!acct_reserve(&batch->ledger, bytes)) return fail(batch, HEAP_NOMEM);
+    heap_secondary_spec_t *copied = malloc(count * sizeof(*copied));
+    uint32_t *roots = malloc(count * sizeof(*roots));
+    if (copied == NULL || roots == NULL) {
+        free(copied);
+        free(roots);
+        acct_release(&batch->ledger, bytes);
+        return fail(batch, HEAP_NOMEM);
+    }
+    pk_tree_io_t io = index_read_io(batch->heap);
+    for (size_t i = 0; i < count; i++) {
+        if (specs[i].column >= batch->heap->column_count) {
+            free(copied);
+            free(roots);
+            acct_release(&batch->ledger, bytes);
+            return fail(batch, HEAP_INVALID);
+        }
+        if (specs[i].root != PAGE_FILE_NO_PAGE) {
+            uint32_t stamp;
+            pk_status_t checked = text_tree_stamp(&io, batch->heap->table_id, specs[i].root, &stamp);
+            heap_status_t status = heap_from_pk(batch->heap, checked);
+            if (status == HEAP_OK && stamp != batch->heap->root) status = HEAP_CORRUPT;
+            if (status != HEAP_OK) {
+                free(copied);
+                free(roots);
+                acct_release(&batch->ledger, bytes);
+                return fail(batch, status);
+            }
+        }
+        copied[i] = specs[i];
+        roots[i] = specs[i].root;
+    }
+    batch->secondary = copied;
+    batch->secondary_roots = roots;
+    batch->secondary_count = count;
+    return HEAP_OK;
+}
+
+static heap_status_t secondary_put_one(heap_batch_t *batch, size_t index,
+                                       const value_view_t *value, heap_locator_t locator)
+{
+    if (value->type == VALUE_NULL) return HEAP_OK;
+    uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
+    size_t key_bytes;
+    heap_status_t status = encode_secondary_key(value, batch->secondary[index].unique,
+                                                locator, key, &key_bytes);
+    if (status != HEAP_OK) return status;
+    pk_tree_io_t io = batch_index_io(batch);
+    uint32_t *root = &batch->secondary_roots[index];
+    if (*root == PAGE_FILE_NO_PAGE) {
+        status = heap_from_pk(batch->heap, text_tree_create(&io, batch->heap->table_id, root));
+        if (status != HEAP_OK) return status;
+    }
+    return heap_from_pk(batch->heap, text_tree_put(&io, batch->heap->table_id, root,
+                                                  key, key_bytes, locator, false, NULL));
+}
+
+heap_status_t heap_batch_secondary_insert(heap_batch_t *batch, const value_view_t *values,
+                                          size_t count, heap_locator_t locator)
+{
+    if (batch == NULL || batch->finished || batch->failed || values == NULL ||
+        count != batch->heap->column_count) return HEAP_INVALID;
+    for (size_t i = 0; i < batch->secondary_count; i++) {
+        heap_status_t status = secondary_put_one(batch, i, &values[batch->secondary[i].column], locator);
+        if (status != HEAP_OK) return fail(batch, status);
+    }
+    return HEAP_OK;
+}
+
+heap_status_t heap_batch_secondary_remove(heap_batch_t *batch, const value_view_t *values,
+                                          size_t count, heap_locator_t locator)
+{
+    if (batch == NULL || batch->finished || batch->failed || values == NULL ||
+        count != batch->heap->column_count) return HEAP_INVALID;
+    pk_tree_io_t io = batch_index_io(batch);
+    for (size_t i = 0; i < batch->secondary_count; i++) {
+        const value_view_t *value = &values[batch->secondary[i].column];
+        if (value->type == VALUE_NULL) continue;
+        uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
+        size_t key_bytes;
+        heap_status_t status = encode_secondary_key(value, batch->secondary[i].unique,
+                                                    locator, key, &key_bytes);
+        if (status != HEAP_OK) return fail(batch, status);
+        heap_locator_t removed;
+        pk_status_t result = text_tree_remove(&io, batch->heap->table_id,
+                                              &batch->secondary_roots[i], key, key_bytes, &removed);
+        if (result == PK_NOT_FOUND || (result == PK_OK && !same_locator(removed, locator))) {
+            return fail(batch, HEAP_CORRUPT);
+        }
+        status = heap_from_pk(batch->heap, result);
+        if (status != HEAP_OK) return fail(batch, status);
+    }
+    return HEAP_OK;
+}
+
 static bool same_locator(heap_locator_t a, heap_locator_t b)
 {
     return a.directory_index == b.directory_index && a.slot == b.slot;
+}
+
+heap_status_t heap_batch_secondary_build(heap_batch_t *batch, size_t index, heap_t *source)
+{
+    if (batch == NULL || source == NULL || batch->finished || batch->failed ||
+        index >= batch->secondary_count || batch->secondary_roots[index] != PAGE_FILE_NO_PAGE ||
+        source != batch->heap) return HEAP_INVALID;
+    pk_tree_io_t io = batch_index_io(batch);
+    heap_status_t status = heap_from_pk(batch->heap, text_tree_create(&io, source->table_id,
+                                                                      &batch->secondary_roots[index]));
+    if (status != HEAP_OK) return fail(batch, status);
+    size_t bytes = source->column_count * sizeof(value_t);
+    if (!acct_reserve(&batch->ledger, bytes)) return fail(batch, HEAP_NOMEM);
+    value_t *row = calloc(source->column_count, sizeof(*row));
+    if (row == NULL) {
+        acct_release(&batch->ledger, bytes);
+        return fail(batch, HEAP_NOMEM);
+    }
+    heap_cursor_t *cursor = NULL;
+    status = heap_cursor_open(source, &cursor);
+    while (status == HEAP_OK) {
+        heap_locator_t locator;
+        heap_status_t next = heap_cursor_next(cursor, row, &locator);
+        if (next == HEAP_DONE) break;
+        if (next != HEAP_OK) {
+            status = next;
+            break;
+        }
+        status = secondary_put_one(batch, index, &row[batch->secondary[index].column].view, locator);
+        for (size_t column = 0; column < source->column_count; column++) value_clear(&row[column]);
+    }
+    heap_cursor_close(cursor);
+    free(row);
+    acct_release(&batch->ledger, bytes);
+    return fail(batch, status);
 }
 
 /* 빈 heap의 첫 변경이 색인 root(빈 leaf)를 만든다. 키가 NULL인 행만 있어도 root는 있어야 색인이 이어진다. */
@@ -1991,7 +2229,8 @@ heap_status_t heap_batch_finish(heap_batch_t *batch, heap_batch_result_t *result
 
     bool changed = batch->fresh.len > 0 || batch->old_pages.len > 0;
     if (!changed) {
-        *result = (heap_batch_result_t){heap->root, NULL, 0, NULL, 0, heap->index_root};
+        *result = (heap_batch_result_t){heap->root, NULL, 0, NULL, 0, heap->index_root,
+                                         batch->secondary_roots, batch->secondary_count};
         batch->finished = true;
         return HEAP_OK;
     }
@@ -2008,12 +2247,19 @@ heap_status_t heap_batch_finish(heap_batch_t *batch, heap_batch_result_t *result
     if (status == HEAP_OK && heap->indexed && batch->index_root != PAGE_FILE_NO_PAGE) {
         status = index_restamp(batch, new_root);
     }
+    pk_tree_io_t io = batch_index_io(batch);
+    for (size_t i = 0; i < batch->secondary_count && status == HEAP_OK; i++) {
+        if (batch->secondary_roots[i] == PAGE_FILE_NO_PAGE) continue;
+        status = heap_from_pk(heap, text_tree_restamp(&io, heap->table_id,
+                                                      &batch->secondary_roots[i], new_root));
+    }
     if (status != HEAP_OK) return fail(batch, status);
 
     batch->new_root = new_root;
     batch->finished = true;
     *result = (heap_batch_result_t){new_root, batch->old_pages.items, batch->old_pages.len,
-                                    batch->fresh.items, batch->fresh.len, batch->index_root};
+                                    batch->fresh.items, batch->fresh.len, batch->index_root,
+                                    batch->secondary_roots, batch->secondary_count};
     return HEAP_OK;
 }
 

@@ -384,6 +384,39 @@ static void test_commit_and_rollback(void)
     free(before);
 }
 
+static void test_index_transaction(void)
+{
+    printf("\n[보조 인덱스의 commit·rollback과 writer 직렬화]\n");
+    make_db();
+    database_t *db = open_tx(false, false, NULL);
+    assert(db != NULL);
+    exec_ok(db, NULL, "CREATE TABLE indexed (id INTEGER PRIMARY KEY, email TEXT)");
+    exec_ok(db, NULL, "CREATE UNIQUE INDEX by_email ON indexed (email)");
+    txn_begin_options_t options = rw(TXN_GUARANTEE_SYNCED, 0);
+    database_txn_t *txn = NULL;
+    CHECK(database_txn_begin(db, &options, &txn) == TXN_OK, "인덱스 writer 시작");
+    exec_ok(db, txn, "INSERT INTO indexed VALUES (1, 'a@x')");
+    expect(db, txn, "SELECT id FROM indexed WHERE email = 'a@x'", "[1] 1");
+    expect(db, NULL, "SELECT id FROM indexed WHERE email = 'a@x'", "[0]");
+    database_txn_t *second = NULL;
+    CHECK(database_txn_begin(db, &options, &second) == TXN_BUSY && second == NULL,
+          "같은 unique 값을 쓸 수 있는 둘째 writer는 대기");
+    CHECK(database_txn_commit(txn, NULL) == TXN_OK, "인덱스 writer 게시");
+    CHECK(database_txn_release(&txn) == TXN_OK, "인덱스 writer 해제");
+    expect(db, NULL, "SELECT id FROM indexed WHERE email = 'a@x'", "[1] 1");
+    CHECK(database_close(db) == DATABASE_OK, "인덱스 재열기 전 종료");
+    db = open_tx(false, false, NULL);
+    assert(db != NULL);
+    expect(db, NULL, "SELECT id FROM indexed WHERE email = 'a@x'", "[1] 1");
+    CHECK(database_txn_begin(db, &options, &txn) == TXN_OK, "rollback writer 시작");
+    exec_ok(db, txn, "UPDATE indexed SET email = 'b@x' WHERE email = 'a@x'");
+    CHECK(database_txn_rollback(txn) == TXN_OK, "인덱스와 행 변경 rollback");
+    CHECK(database_txn_release(&txn) == TXN_OK, "rollback writer 해제");
+    expect(db, NULL, "SELECT id FROM indexed WHERE email = 'a@x'", "[1] 1");
+    expect(db, NULL, "SELECT id FROM indexed WHERE email = 'b@x'", "[0]");
+    CHECK(database_close(db) == DATABASE_OK, "인덱스 거래 검사 종료");
+}
+
 /* ── 2. 문장 오류 뒤에는 rollback이 필요하다 ── */
 
 static void test_statement_error_requires_rollback(void)
@@ -965,6 +998,7 @@ int main(void)
 {
     mkdir(DIR_NAME, 0700);
     test_commit_and_rollback();
+    test_index_transaction();
     test_statement_error_requires_rollback();
     test_waiting_writer();
     test_rollback_space();
