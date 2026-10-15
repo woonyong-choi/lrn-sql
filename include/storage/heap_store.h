@@ -126,11 +126,11 @@ typedef struct {
 } heap_stats_t;
 
 /*
- * 정수 키 색인(pk_tree.h). key_column의 NULL이 아닌 값마다 locator를 색인에 두며, heap batch의 insert·update·
+ * 정수 또는 TEXT 키 색인(pk_tree.h, text_tree.h). key_column의 NULL이 아닌 값마다 locator를 색인에 두며, heap batch의 insert·update·
  * delete가 행과 같은 batch 안에서 색인을 함께 바꾼다. 색인 페이지는 행 페이지와 같은 fresh·old 목록에 실려
  * 같은 catalog 게시로 올라가므로 게시된 색인은 항상 게시된 heap의 행 위치를 가리킨다.
  *
- * 색인을 쓰는 조건(heap_is_indexed): key_column이 INTEGER 컬럼이고 다음 중 하나다.
+ * 색인을 쓰는 조건(heap_is_indexed): key_column이 INTEGER 또는 TEXT 컬럼이고 다음 중 하나다.
  *   - index_root가 있고 root의 stamp가 heap root와 같다(이 heap의 색인이다).
  *   - index_root가 없고 heap_root도 없다(빈 heap. 첫 batch가 root를 만든다).
  * 그 밖에는 색인이 없는 것으로 보고 호출자는 cursor로 스캔한다. 색인 없이 만들어진 heap에 행이 있으면(옛 파일)
@@ -177,6 +177,8 @@ bool heap_is_indexed(const heap_t *heap);
  * 어긋나면 HEAP_CORRUPT다(낡은 locator를 돌려주지 않는다). 색인을 쓰지 않으면 HEAP_INVALID다.
  */
 heap_status_t heap_find_key(heap_t *heap, int64_t key, heap_locator_t *locator);
+heap_status_t heap_find_text_key(heap_t *heap, const uint8_t *key, size_t key_bytes,
+                                 heap_locator_t *locator);
 /* 색인에 있는 가장 큰 키. 비어 있으면 *present가 false다. */
 heap_status_t heap_max_key(heap_t *heap, bool *present, int64_t *key);
 void heap_release_row(const heap_t *heap, value_t *row);

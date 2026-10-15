@@ -73,11 +73,12 @@ $(BUILD_DIR)/tests/%.o: tests/%.c
 STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o \
                $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o \
                $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/catalog_store.o $(BUILD_DIR)/storage/legacy_migrate.o \
-               $(BUILD_DIR)/storage/pk_tree.o
+               $(BUILD_DIR)/storage/pk_tree.o $(BUILD_DIR)/storage/text_tree.o
 BASIC_TESTS = test_all test_record test_record_fault test_overflow \
               test_overflow_fault test_value test_value_fault test_value_legacy_varchar test_parser_boundary \
               test_http_input test_io test_io_lock test_catalog test_catalog_fault \
-              test_lexer test_lexer_fault test_page_file test_catalog_store test_legacy_migrate test_pk_tree
+              test_lexer test_lexer_fault test_page_file test_catalog_store test_legacy_migrate test_pk_tree \
+              test_text_tree
 TEST_BINS = $(addprefix $(BUILD_DIR)/,$(BASIC_TESTS))
 
 $(BUILD_DIR)/test_all: $(BUILD_DIR)/tests/test_all.o $(OBJS)
@@ -110,6 +111,7 @@ $(BUILD_DIR)/test_page_file: $(BUILD_DIR)/tests/test_page_file.o $(STORAGE_OBJS)
 $(BUILD_DIR)/test_catalog_store: $(BUILD_DIR)/tests/test_catalog_store.o $(STORAGE_OBJS)
 $(BUILD_DIR)/test_legacy_migrate: $(BUILD_DIR)/tests/test_legacy_migrate.o $(STORAGE_OBJS)
 $(BUILD_DIR)/test_pk_tree: $(BUILD_DIR)/tests/test_pk_tree.o $(BUILD_DIR)/storage/pk_tree.o
+$(BUILD_DIR)/test_text_tree: $(BUILD_DIR)/tests/test_text_tree.o $(BUILD_DIR)/storage/text_tree.o
 
 $(BUILD_DIR)/test_result: $(BUILD_DIR)/tests/test_result.o $(BUILD_DIR)/sql/result.o $(BUILD_DIR)/storage/value.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)

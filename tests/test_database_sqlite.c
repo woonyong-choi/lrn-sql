@@ -387,6 +387,23 @@ static void build_steps(void)
         }
     }
     for (int key = KEY_LOW; key < KEY_LOW + KEY_SPAN; key += 7) add_step(STEP_SELECT, "SELECT k, v FROM kv WHERE k = %d", key);
+
+    add_step(STEP_OK, "CREATE TABLE text_keys (k TEXT PRIMARY KEY, v TEXT)");
+    add_step(STEP_OK, "INSERT INTO text_keys VALUES ('', 'empty')");
+    add_step(STEP_OK, "INSERT INTO text_keys VALUES ('가나다', 'hangul')");
+    add_step(STEP_OK, "INSERT INTO text_keys VALUES ('😀', 'emoji')");
+    add_step(STEP_ERROR, "INSERT INTO text_keys VALUES ('가나다', 'duplicate')");
+    add_step(STEP_SELECT, "SELECT v FROM text_keys WHERE k = ''");
+    add_step(STEP_SELECT, "SELECT v FROM text_keys WHERE k = '가나다'");
+    add_step(STEP_REOPEN, NULL);
+    add_step(STEP_SELECT, "SELECT * FROM text_keys");
+    add_step(STEP_OK, "UPDATE text_keys SET v = 'changed' WHERE k = '가나다'");
+    add_step(STEP_OK, "UPDATE text_keys SET k = '새 키' WHERE k = '😀'");
+    add_step(STEP_SELECT, "SELECT * FROM text_keys");
+    add_step(STEP_OK, "DELETE FROM text_keys WHERE k = ''");
+    add_step(STEP_OK, "INSERT INTO text_keys VALUES ('', 'reused')");
+    add_step(STEP_REOPEN, NULL);
+    add_step(STEP_SELECT, "SELECT * FROM text_keys");
 }
 
 int main(void)

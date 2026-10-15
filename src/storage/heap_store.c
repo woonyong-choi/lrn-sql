@@ -6,6 +6,7 @@
 #include "storage/heap_store.h"
 #include "storage/overflow.h"
 #include "storage/pk_tree.h"
+#include "storage/text_tree.h"
 #include "storage/record.h"
 #include "storage/record_page.h"
 
@@ -45,6 +46,7 @@ struct heap {
     page_file_status_t last_status;
     bool indexed;           /* 키 색인을 쓴다(heap_index_spec_t) */
     size_t key_column;
+    value_type_t key_type;
     uint32_t index_root;    /* 열 때의 색인 root */
     heap_stats_t *stats;
 };
@@ -582,6 +584,7 @@ static heap_status_t heap_from_pk(heap_t *heap, pk_status_t status)
         case PK_EXISTS: return HEAP_KEY_EXISTS;
         case PK_CORRUPT: return HEAP_CORRUPT;
         case PK_NOMEM: return HEAP_NOMEM;
+        case PK_LIMIT: return HEAP_LIMIT;
         default: return heap->last_status == PAGE_FILE_OK ? HEAP_IO : map_pf(heap, heap->last_status);
     }
 }
@@ -603,15 +606,21 @@ static heap_status_t setup_index(heap_t *heap, const heap_index_spec_t *spec)
 {
     heap->index_root = spec->index_root;
     heap->stats = spec->stats;
-    if (spec->key_column >= heap->column_count || heap->types[spec->key_column] != VALUE_INTEGER) return HEAP_OK;
+    if (spec->key_column >= heap->column_count) return HEAP_OK;
+    value_type_t type = heap->types[spec->key_column];
+    if (type != VALUE_INTEGER && type != VALUE_TEXT) return HEAP_OK;
     heap->key_column = spec->key_column;
+    heap->key_type = type;
     if (spec->index_root == PAGE_FILE_NO_PAGE) {
         heap->indexed = heap->root == PAGE_FILE_NO_PAGE;
         return HEAP_OK;
     }
     pk_tree_io_t io = index_read_io(heap);
     uint32_t stamp = 0;
-    heap_status_t status = heap_from_pk(heap, pk_tree_stamp(&io, heap->table_id, spec->index_root, &stamp));
+    pk_status_t checked = type == VALUE_INTEGER
+                              ? pk_tree_stamp(&io, heap->table_id, spec->index_root, &stamp)
+                              : text_tree_stamp(&io, heap->table_id, spec->index_root, &stamp);
+    heap_status_t status = heap_from_pk(heap, checked);
     if (status == HEAP_OK) heap->indexed = heap->root != PAGE_FILE_NO_PAGE && stamp == heap->root;
     return status;
 }
@@ -767,7 +776,9 @@ heap_status_t heap_get(heap_t *heap, heap_locator_t locator, value_t *row)
 
 typedef struct {
     bool present;
-    int64_t key;
+    int64_t integer;
+    size_t size_bytes;
+    uint8_t bytes[TEXT_TREE_KEY_MAX_BYTES];
 } row_key_t;
 
 /* 행(record 조각)의 키 컬럼 값을 읽는다. NULL이면 present가 false다. */
@@ -786,7 +797,33 @@ static heap_status_t slice_key(const heap_t *heap, record_slice_t slice, row_key
     heap_status_t status = parse_fields(heap, slice, fields, ROW_FIELDS(heap->column_count));
     if (status == HEAP_OK) {
         out->present = fields[1 + 2 * heap->key_column].integer != KIND_NULL;
-        out->key = out->present ? fields[2 + 2 * heap->key_column].integer : 0;
+        if (out->present && heap->key_type == VALUE_INTEGER) {
+            out->integer = fields[2 + 2 * heap->key_column].integer;
+        } else if (out->present) {
+            size_t row_bytes = heap->column_count * sizeof(value_t);
+            if (!acct_reserve(&heap->ledger, row_bytes)) status = HEAP_NOMEM;
+            else {
+                value_t *row = calloc(heap->column_count, sizeof(*row));
+                if (row == NULL) status = HEAP_NOMEM;
+                else {
+                    bool selected[HEAP_MAX_COLUMNS] = {false};
+                    selected[heap->key_column] = true;
+                    size_t charged = 0;
+                    status = decode_row((heap_t *)heap, fields, selected, row, &charged);
+                    if (status == HEAP_OK) {
+                        out->size_bytes = row[heap->key_column].view.size_bytes;
+                        if (out->size_bytes > TEXT_TREE_KEY_MAX_BYTES) status = HEAP_LIMIT;
+                        else if (out->size_bytes > 0) {
+                            memcpy(out->bytes, row[heap->key_column].view.bytes, out->size_bytes);
+                        }
+                    }
+                    for (size_t i = 0; i < heap->column_count; i++) value_clear(&row[i]);
+                    acct_release(&heap->ledger, charged);
+                    free(row);
+                }
+                acct_release(&heap->ledger, row_bytes);
+            }
+        }
     }
     free(fields);
     acct_release(&heap->ledger, field_bytes);
@@ -794,7 +831,7 @@ static heap_status_t slice_key(const heap_t *heap, record_slice_t slice, row_key
 }
 
 /* 색인이 가리킨 행이 실제로 있고 그 키가 같은지 확인한다. 아니면 낡은 locator이므로 CORRUPT다. */
-static heap_status_t check_indexed_row(heap_t *heap, heap_locator_t at, int64_t key)
+static heap_status_t check_indexed_row(heap_t *heap, heap_locator_t at, const row_key_t *key)
 {
     if (at.directory_index >= heap->entry_count) return HEAP_CORRUPT;
     uint8_t page[RECORD_PAGE_BYTES];
@@ -805,7 +842,11 @@ static heap_status_t check_indexed_row(heap_t *heap, heap_locator_t at, int64_t 
     row_key_t found;
     status = slice_key(heap, slice, &found);
     if (status != HEAP_OK) return status;
-    return found.present && found.key == key ? HEAP_OK : HEAP_CORRUPT;
+    if (!found.present) return HEAP_CORRUPT;
+    if (heap->key_type == VALUE_INTEGER) return found.integer == key->integer ? HEAP_OK : HEAP_CORRUPT;
+    return found.size_bytes == key->size_bytes &&
+                   (found.size_bytes == 0 || memcmp(found.bytes, key->bytes, found.size_bytes) == 0)
+               ? HEAP_OK : HEAP_CORRUPT;
 }
 
 // cost: time O(d·log c + p), heap O(1), stack O(1), io d + 1
@@ -815,21 +856,43 @@ static heap_status_t check_indexed_row(heap_t *heap, heap_locator_t at, int64_t 
 // alt: heap_cursor 전체 스캔. time O(n), heap O(1), io O(n). 잃는 것: 키 조회 시간
 heap_status_t heap_find_key(heap_t *heap, int64_t key, heap_locator_t *locator)
 {
-    if (heap == NULL || locator == NULL || !heap->indexed) return HEAP_INVALID;
+    if (heap == NULL || locator == NULL || !heap->indexed || heap->key_type != VALUE_INTEGER) return HEAP_INVALID;
     if (heap->stats != NULL) heap->stats->index_lookups++;
     if (heap->index_root == PAGE_FILE_NO_PAGE) return HEAP_NOT_FOUND;
     pk_tree_io_t io = index_read_io(heap);
     heap_locator_t at;
     heap_status_t status = heap_from_pk(heap, pk_tree_find(&io, heap->table_id, heap->index_root, key, &at));
     if (status != HEAP_OK) return status;
-    status = check_indexed_row(heap, at, key);
+    row_key_t expected = {.present = true, .integer = key};
+    status = check_indexed_row(heap, at, &expected);
+    if (status == HEAP_OK) *locator = at;
+    return status;
+}
+
+heap_status_t heap_find_text_key(heap_t *heap, const uint8_t *key, size_t key_bytes,
+                                 heap_locator_t *locator)
+{
+    if (heap == NULL || locator == NULL || !heap->indexed || heap->key_type != VALUE_TEXT ||
+        (key_bytes > 0 && key == NULL)) return HEAP_INVALID;
+    if (key_bytes > TEXT_TREE_KEY_MAX_BYTES) return HEAP_LIMIT;
+    if (heap->stats != NULL) heap->stats->index_lookups++;
+    if (heap->index_root == PAGE_FILE_NO_PAGE) return HEAP_NOT_FOUND;
+    pk_tree_io_t io = index_read_io(heap);
+    heap_locator_t at;
+    heap_status_t status = heap_from_pk(heap, text_tree_find(&io, heap->table_id, heap->index_root,
+                                                              key, key_bytes, &at));
+    if (status != HEAP_OK) return status;
+    row_key_t expected = {.present = true, .size_bytes = key_bytes};
+    if (key_bytes > 0) memcpy(expected.bytes, key, key_bytes);
+    status = check_indexed_row(heap, at, &expected);
     if (status == HEAP_OK) *locator = at;
     return status;
 }
 
 heap_status_t heap_max_key(heap_t *heap, bool *present, int64_t *key)
 {
-    if (heap == NULL || present == NULL || key == NULL || !heap->indexed) return HEAP_INVALID;
+    if (heap == NULL || present == NULL || key == NULL || !heap->indexed ||
+        heap->key_type != VALUE_INTEGER) return HEAP_INVALID;
     if (heap->stats != NULL) heap->stats->index_lookups++;
     *present = false;
     if (heap->index_root == PAGE_FILE_NO_PAGE) return HEAP_OK;
@@ -974,8 +1037,12 @@ static heap_status_t collect_index_pages(heap_t *heap, u32_list_t *list)
 {
     pk_tree_io_t io = index_read_io(heap);
     index_collect_t collect = {list, &heap->ledger};
-    return heap_from_pk(heap, pk_tree_visit_pages(&io, heap->table_id, heap->index_root, collect_index_page,
-                                                  &collect));
+    pk_status_t visited = heap->key_type == VALUE_TEXT
+                              ? text_tree_visit_pages(&io, heap->table_id, heap->index_root,
+                                                      collect_index_page, &collect)
+                              : pk_tree_visit_pages(&io, heap->table_id, heap->index_root,
+                                                    collect_index_page, &collect);
+    return heap_from_pk(heap, visited);
 }
 
 heap_status_t heap_collect_pages(heap_t *heap, uint32_t **pages, size_t *count)
@@ -1252,22 +1319,33 @@ static heap_status_t index_ensure_root(heap_batch_t *batch)
 {
     if (batch->index_root != PAGE_FILE_NO_PAGE) return HEAP_OK;
     pk_tree_io_t io = batch_index_io(batch);
-    return heap_from_pk(batch->heap, pk_tree_create(&io, batch->heap->table_id, &batch->index_root));
+    pk_status_t created = batch->heap->key_type == VALUE_INTEGER
+                              ? pk_tree_create(&io, batch->heap->table_id, &batch->index_root)
+                              : text_tree_create(&io, batch->heap->table_id, &batch->index_root);
+    return heap_from_pk(batch->heap, created);
 }
 
-static heap_status_t index_put(heap_batch_t *batch, int64_t key, heap_locator_t at)
+static heap_status_t index_put(heap_batch_t *batch, const value_view_t *key, heap_locator_t at)
 {
     pk_tree_io_t io = batch_index_io(batch);
-    return heap_from_pk(batch->heap, pk_tree_put(&io, batch->heap->table_id, &batch->index_root, key, at, false,
-                                                 NULL));
+    pk_status_t inserted = batch->heap->key_type == VALUE_INTEGER
+                               ? pk_tree_put(&io, batch->heap->table_id, &batch->index_root,
+                                             key->integer, at, false, NULL)
+                               : text_tree_put(&io, batch->heap->table_id, &batch->index_root,
+                                               key->bytes, key->size_bytes, at, false, NULL);
+    return heap_from_pk(batch->heap, inserted);
 }
 
 /* 색인에서 키를 지운다. 없거나 다른 행을 가리키면 색인이 heap과 어긋난 것이다. */
-static heap_status_t index_remove(heap_batch_t *batch, int64_t key, heap_locator_t at)
+static heap_status_t index_remove(heap_batch_t *batch, const row_key_t *key, heap_locator_t at)
 {
     pk_tree_io_t io = batch_index_io(batch);
     heap_locator_t removed;
-    pk_status_t status = pk_tree_remove(&io, batch->heap->table_id, &batch->index_root, key, &removed);
+    pk_status_t status = batch->heap->key_type == VALUE_INTEGER
+                             ? pk_tree_remove(&io, batch->heap->table_id, &batch->index_root,
+                                              key->integer, &removed)
+                             : text_tree_remove(&io, batch->heap->table_id, &batch->index_root,
+                                                key->bytes, key->size_bytes, &removed);
     if (status == PK_NOT_FOUND) return HEAP_CORRUPT;
     if (status == PK_OK && !same_locator(removed, at)) return HEAP_CORRUPT;
     return heap_from_pk(batch->heap, status);
@@ -1278,7 +1356,15 @@ static heap_status_t index_insert_row(heap_batch_t *batch, const value_view_t *v
     heap_status_t status = index_ensure_root(batch);
     if (status != HEAP_OK) return status;
     const value_view_t *cell = &values[batch->heap->key_column];
-    return cell->type == VALUE_NULL ? HEAP_OK : index_put(batch, cell->integer, at);
+    return cell->type == VALUE_NULL ? HEAP_OK : index_put(batch, cell, at);
+}
+
+static bool same_key(const heap_t *heap, const row_key_t *old, const value_view_t *current)
+{
+    if (!old->present || current->type == VALUE_NULL) return false;
+    if (heap->key_type == VALUE_INTEGER) return old->integer == current->integer;
+    return old->size_bytes == current->size_bytes &&
+           (old->size_bytes == 0 || memcmp(old->bytes, current->bytes, old->size_bytes) == 0);
 }
 
 /* 행이 옮겨졌거나 키가 바뀌었을 때만 색인을 바꾼다. */
@@ -1287,28 +1373,33 @@ static heap_status_t index_update_row(heap_batch_t *batch, row_key_t old, const 
 {
     const value_view_t *cell = &values[batch->heap->key_column];
     bool present = cell->type != VALUE_NULL;
-    if (old.present && present && old.key == cell->integer) {
+    if (same_key(batch->heap, &old, cell)) {
         if (same_locator(old_at, new_at)) return HEAP_OK;
         pk_tree_io_t io = batch_index_io(batch);
         heap_locator_t previous;
-        pk_status_t status = pk_tree_put(&io, batch->heap->table_id, &batch->index_root, old.key, new_at, true,
-                                         &previous);
+        pk_status_t status = batch->heap->key_type == VALUE_INTEGER
+                                 ? pk_tree_put(&io, batch->heap->table_id, &batch->index_root,
+                                               old.integer, new_at, true, &previous)
+                                 : text_tree_put(&io, batch->heap->table_id, &batch->index_root,
+                                                 old.bytes, old.size_bytes, new_at, true, &previous);
         if (status == PK_OK && !same_locator(previous, old_at)) return HEAP_CORRUPT;
         return heap_from_pk(batch->heap, status);
     }
     if (old.present) {
-        heap_status_t status = index_remove(batch, old.key, old_at);
+        heap_status_t status = index_remove(batch, &old, old_at);
         if (status != HEAP_OK) return status;
     }
-    return present ? index_put(batch, cell->integer, new_at) : HEAP_OK;
+    return present ? index_put(batch, cell, new_at) : HEAP_OK;
 }
 
 /* 게시할 heap root가 정해진 뒤 색인 root에 그 번호를 새긴다. */
 static heap_status_t index_restamp(heap_batch_t *batch, uint32_t heap_root_page)
 {
     pk_tree_io_t io = batch_index_io(batch);
-    return heap_from_pk(batch->heap, pk_tree_restamp(&io, batch->heap->table_id, &batch->index_root,
-                                                     heap_root_page));
+    pk_status_t stamped = batch->heap->key_type == VALUE_INTEGER
+                              ? pk_tree_restamp(&io, batch->heap->table_id, &batch->index_root, heap_root_page)
+                              : text_tree_restamp(&io, batch->heap->table_id, &batch->index_root, heap_root_page);
+    return heap_from_pk(batch->heap, stamped);
 }
 
 static heap_status_t load_page(heap_batch_t *batch, size_t index, uint8_t **page)
@@ -1713,7 +1804,7 @@ heap_status_t heap_batch_update(heap_batch_t *batch, heap_locator_t locator,
     record_page_status_t got = record_page_get(page, locator.slot, &old);
     if (got == RECORD_PAGE_NOT_FOUND) return HEAP_NOT_FOUND;
     if (got != RECORD_PAGE_OK) return fail(batch, HEAP_CORRUPT);
-    row_key_t old_key = {false, 0};
+    row_key_t old_key = {0};
     if (batch->heap->indexed) {
         status = slice_key(batch->heap, old, &old_key);
         if (status != HEAP_OK) return fail(batch, status);
@@ -1767,7 +1858,7 @@ heap_status_t heap_batch_delete(heap_batch_t *batch, heap_locator_t locator)
     record_page_status_t got = record_page_get(page, locator.slot, &old);
     if (got == RECORD_PAGE_NOT_FOUND) return HEAP_NOT_FOUND;
     if (got != RECORD_PAGE_OK) return fail(batch, HEAP_CORRUPT);
-    row_key_t old_key = {false, 0};
+    row_key_t old_key = {0};
     if (batch->heap->indexed) {
         status = slice_key(batch->heap, old, &old_key);
         if (status != HEAP_OK) return fail(batch, status);
@@ -1779,7 +1870,7 @@ heap_status_t heap_batch_delete(heap_batch_t *batch, heap_locator_t locator)
         if (removed == RECORD_PAGE_NOMEM) status = HEAP_NOMEM;
         else if (removed != RECORD_PAGE_OK) status = HEAP_CORRUPT;
     }
-    if (status == HEAP_OK && old_key.present) status = index_remove(batch, old_key.key, locator);
+    if (status == HEAP_OK && old_key.present) status = index_remove(batch, &old_key, locator);
     return fail(batch, status);
 }
 
