@@ -615,6 +615,20 @@ static heap_status_t open_heap(database_t *db, const catalog_table_view_t *view,
     return status;
 }
 
+static heap_status_t configure_secondary(heap_batch_t *batch, const catalog_t *catalog,
+                                         catalog_table_id_t table_id)
+{
+    size_t count = catalog_index_count(catalog, table_id);
+    if (count > CATALOG_MAX_INDEXES) return HEAP_CORRUPT;
+    heap_secondary_spec_t specs[CATALOG_MAX_INDEXES];
+    for (size_t i = 0; i < count; i++) {
+        catalog_index_view_t view;
+        if (catalog_index_at(catalog, table_id, i, &view) != CATALOG_OK) return HEAP_CORRUPT;
+        specs[i] = (heap_secondary_spec_t){view.column, view.unique, view.root};
+    }
+    return heap_batch_configure_secondary(batch, specs, count);
+}
+
 static catalog_status_t clone_catalog(const catalog_t *source, catalog_t **clone)
 {
     uint8_t *bytes = NULL;
@@ -882,7 +896,7 @@ static database_exec_status_t publish_inner(database_t *db, work_t *work, catalo
         return cancelled_result(db);
     }
     size_t new_pages = 0;
-    heap_batch_result_t finished = {0, NULL, 0, NULL, 0, 0};
+    heap_batch_result_t finished = {0};
     if (batch != NULL) {
         heap_status_t finish = heap_batch_finish(batch, &finished);
         if (finish != HEAP_OK) {
@@ -893,6 +907,20 @@ static database_exec_status_t publish_inner(database_t *db, work_t *work, catalo
         if (catalog_set_locators(work->cat, id, finished.new_root, finished.new_primary_root) != CATALOG_OK) {
             publish_discard(db, work, batch, &success);
             return fail_result(db, RESULT_E_INTERNAL, 3, "카탈로그 locator를 갱신하지 못했습니다");
+        }
+        size_t secondary_count = catalog_index_count(work->cat, id);
+        if (secondary_count != finished.secondary_count) {
+            publish_discard(db, work, batch, &success);
+            return fail_result(db, RESULT_E_INTERNAL, 3, "보조 색인 수가 맞지 않습니다");
+        }
+        for (size_t i = 0; i < secondary_count; i++) {
+            catalog_index_view_t index;
+            if (catalog_index_at(work->cat, id, i, &index) != CATALOG_OK ||
+                catalog_set_index_root(work->cat, index.name, index.name_bytes,
+                                       finished.new_secondary_roots[i]) != CATALOG_OK) {
+                publish_discard(db, work, batch, &success);
+                return fail_result(db, RESULT_E_INTERNAL, 3, "보조 색인 root를 갱신하지 못했습니다");
+            }
         }
     }
     if (db->work.inside) return stage_adopt(db, work, batch, &finished, drop_pages, drop_count, success, out);
@@ -1027,6 +1055,68 @@ done:
     return status;
 }
 
+static database_exec_status_t exec_create_index(database_t *db, const sqlstmt_index_t *index, result_t **out)
+{
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    catalog_table_id_t id;
+    catalog_table_view_t view;
+    if (!lookup_table(db, &index->table, &id, &view, &status)) return status;
+    size_t column = find_column(&view, &index->column);
+    if (column == SIZE_MAX) return unknown_column(db, &index->column);
+    work_t work = {NULL, 0};
+    heap_t *heap = NULL;
+    heap_batch_t *batch = NULL;
+    result_t *success = NULL;
+    if (!work_clone(db, &work)) return DATABASE_EXEC_NOMEM;
+    size_t peak = catalog_add_index_peak_bytes(work.cat, index->name.size);
+    if (!q_reserve(db, peak)) {
+        status = DATABASE_EXEC_NOMEM;
+        goto done;
+    }
+    catalog_status_t added = catalog_add_index(work.cat, id, (const char *)index->name.bytes,
+                                               index->name.size, (uint16_t)column, index->unique);
+    work_settle(db, &work, peak);
+    if (added != CATALOG_OK) {
+        if (added == CATALOG_NOMEM) status = DATABASE_EXEC_NOMEM;
+        else if (added == CATALOG_LIMIT) status = fail_result(db, RESULT_E_LIMIT, 5, "인덱스 한도를 넘습니다");
+        else status = fail_result(db, RESULT_E_SEMANTIC, 4, "인덱스 이름 또는 컬럼이 올바르지 않습니다");
+        goto done;
+    }
+    heap_status_t opened = open_heap(db, &view, id, &heap);
+    if (opened != HEAP_OK) {
+        status = heap_failure(db, opened, "open");
+        goto done;
+    }
+    heap_status_t began = heap_batch_begin(heap, &batch);
+    if (began == HEAP_OK) began = configure_secondary(batch, work.cat, id);
+    if (began != HEAP_OK) {
+        status = heap_failure(db, began, "index");
+        goto done;
+    }
+    size_t index_position = catalog_index_count(work.cat, id) - 1u;
+    heap_status_t built = heap_batch_secondary_build(batch, index_position, heap);
+    if (built != HEAP_OK) {
+        if (built == HEAP_KEY_EXISTS) status = fail_result(db, RESULT_E_CONSTRAINT, 11,
+                                                            "기존 행에 중복된 인덱스 값이 있습니다");
+        else status = heap_failure(db, built, "index build");
+        goto done;
+    }
+    if (open_command(db, "CREATE INDEX", 0, &success) != RESULT_OK) {
+        status = DATABASE_EXEC_NOMEM;
+        goto done;
+    }
+    status = publish(db, &work, id, batch, NULL, 0, success, out);
+    success = NULL;
+    batch = NULL;
+done:
+    if (batch != NULL) heap_batch_abort(batch);
+    heap_batch_free(batch);
+    heap_close(heap);
+    work_close(db, &work);
+    result_release(&success);
+    return status;
+}
+
 static database_exec_status_t exec_drop(database_t *db, const sqlstmt_drop_t *drop, result_t **out)
 {
     database_exec_status_t status = DATABASE_EXEC_OK;
@@ -1041,7 +1131,22 @@ static database_exec_status_t exec_drop(database_t *db, const sqlstmt_drop_t *dr
     result_t *success = NULL;
     heap_status_t opened = open_heap(db, &view, id, &heap);
     if (opened != HEAP_OK) return heap_failure(db, opened, "open");
-    heap_status_t collected = heap_collect_pages(heap, &pages, &page_count);
+    size_t index_count = catalog_index_count(base_catalog(db), id);
+    uint32_t roots[CATALOG_MAX_INDEXES];
+    if (index_count > CATALOG_MAX_INDEXES) {
+        status = heap_failure(db, HEAP_CORRUPT, "index count");
+        goto done;
+    }
+    for (size_t i = 0; i < index_count; i++) {
+        catalog_index_view_t index;
+        if (catalog_index_at(base_catalog(db), id, i, &index) != CATALOG_OK) {
+            status = heap_failure(db, HEAP_CORRUPT, "index catalog");
+            goto done;
+        }
+        roots[i] = index.root;
+    }
+    heap_status_t collected = heap_collect_pages_with_indexes(heap, roots, index_count,
+                                                                &pages, &page_count);
     if (collected != HEAP_OK) {
         status = heap_failure(db, collected, "collect");
         goto done;
@@ -1078,6 +1183,23 @@ static bool is_key_equality(const catalog_table_view_t *view, const heap_t *heap
            where->column == view->primary_key_column &&
            (where->literal.view.type != VALUE_TEXT ||
             where->literal.view.size_bytes <= TEXT_TREE_KEY_MAX_BYTES);
+}
+
+static bool find_secondary_equality(database_t *db, catalog_table_id_t table_id,
+                                    const where_t *where, heap_secondary_spec_t *spec)
+{
+    if (!where->present || where->never || where->op != SQLSTMT_OP_EQ ||
+        !heap_secondary_key_fits(&where->literal.view)) return false;
+    const catalog_t *catalog = base_catalog(db);
+    size_t count = catalog_index_count(catalog, table_id);
+    for (size_t i = 0; i < count; i++) {
+        catalog_index_view_t index;
+        if (catalog_index_at(catalog, table_id, i, &index) != CATALOG_OK) continue;
+        if (index.column != where->column) continue;
+        *spec = (heap_secondary_spec_t){index.column, index.unique, index.root};
+        return true;
+    }
+    return false;
 }
 
 static database_exec_status_t locate_key(database_t *db, heap_t *heap, const where_t *where, bool *is_hit,
@@ -1259,6 +1381,11 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
         status = heap_failure(db, began, "batch");
         goto done;
     }
+    began = configure_secondary(batch, work.cat, id);
+    if (began != HEAP_OK) {
+        status = heap_failure(db, began, "index");
+        goto done;
+    }
     views = q_malloc(db, views_bytes);
     if (views == NULL) {
         status = DATABASE_EXEC_NOMEM;
@@ -1269,6 +1396,11 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
     heap_status_t inserted = heap_batch_insert(batch, views, n, &placed);
     if (inserted != HEAP_OK) {
         status = heap_failure(db, inserted, "insert");
+        goto done;
+    }
+    inserted = heap_batch_secondary_insert(batch, views, n, placed);
+    if (inserted != HEAP_OK) {
+        status = heap_failure(db, inserted, "index");
         goto done;
     }
     if (catalog_set_row_count(work.cat, id, view.row_count + 1) != CATALOG_OK) {
@@ -1334,6 +1466,47 @@ static database_exec_status_t select_by_key(database_t *db, heap_t *heap, const 
     return status;
 }
 
+typedef struct {
+    database_t *db;
+    heap_t *heap;
+    const where_t *where;
+    value_t *row;
+    const bool *needed;
+    const projection_t *projection;
+    database_exec_status_t status;
+} secondary_select_t;
+
+static bool append_secondary_row(void *context, heap_locator_t locator)
+{
+    secondary_select_t *scan = context;
+    if (cancel_requested(scan->db)) {
+        scan->status = cancelled_result(scan->db);
+        return false;
+    }
+    heap_status_t got = heap_get_projected(scan->heap, locator, scan->needed, scan->row);
+    if (got != HEAP_OK) {
+        scan->status = heap_failure(scan->db, got, "index lookup");
+        return false;
+    }
+    if (!where_matches(scan->where, scan->row)) {
+        scan->status = heap_failure(scan->db, HEAP_CORRUPT, "index reference");
+    } else scan->status = append_result_row(scan->db, scan->projection, scan->row);
+    heap_release_row(scan->heap, scan->row);
+    return scan->status == DATABASE_EXEC_OK;
+}
+
+static database_exec_status_t select_by_secondary(database_t *db, heap_t *heap,
+                                                   heap_secondary_spec_t spec, const where_t *where,
+                                                   value_t *row, const bool *needed,
+                                                   const projection_t *projection)
+{
+    secondary_select_t scan = {db, heap, where, row, needed, projection, DATABASE_EXEC_OK};
+    heap_status_t visited = heap_secondary_visit_equal(heap, spec, &where->literal.view,
+                                                       append_secondary_row, &scan);
+    if (scan.status != DATABASE_EXEC_OK) return scan.status;
+    return visited == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, visited, "index lookup");
+}
+
 static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
 {
     database_exec_status_t status = DATABASE_EXEC_OK;
@@ -1381,7 +1554,9 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         goto done;
     }
     bool by_key = is_key_equality(&view, heap, &where);
-    heap_status_t made = by_key ? HEAP_OK : heap_cursor_open(heap, &cursor);
+    heap_secondary_spec_t secondary;
+    bool by_secondary = !by_key && find_secondary_equality(db, id, &where, &secondary);
+    heap_status_t made = (by_key || by_secondary) ? HEAP_OK : heap_cursor_open(heap, &cursor);
     if (made != HEAP_OK) {
         status = heap_failure(db, made, "cursor");
         goto done;
@@ -1400,8 +1575,11 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     if (by_key) {
         status = select_by_key(db, heap, &where, row, needed, &projection);
         if (status != DATABASE_EXEC_OK) goto done;
+    } else if (by_secondary) {
+        status = select_by_secondary(db, heap, secondary, &where, row, needed, &projection);
+        if (status != DATABASE_EXEC_OK) goto done;
     }
-    while (!by_key) {
+    while (!by_key && !by_secondary) {
         if (cancel_requested(db)) {
             status = cancelled_result(db);
             goto done;
@@ -1521,6 +1699,48 @@ static database_exec_status_t match_by_key(database_t *db, heap_t *heap, const w
     bool is_added = matches_add(db, matches, at, row, keep_values);
     if (keep_values) heap_release_row(heap, row);
     return is_added ? DATABASE_EXEC_OK : DATABASE_EXEC_NOMEM;
+}
+
+typedef struct {
+    database_t *db;
+    heap_t *heap;
+    const where_t *where;
+    value_t *row;
+    matches_t *matches;
+    bool keep_values;
+    database_exec_status_t status;
+} secondary_match_t;
+
+static bool collect_secondary_match(void *context, heap_locator_t locator)
+{
+    secondary_match_t *scan = context;
+    if (cancel_requested(scan->db)) {
+        scan->status = cancelled_result(scan->db);
+        return false;
+    }
+    heap_status_t got = heap_get(scan->heap, locator, scan->row);
+    if (got != HEAP_OK) {
+        scan->status = heap_failure(scan->db, got, "index lookup");
+        return false;
+    }
+    if (!where_matches(scan->where, scan->row)) {
+        scan->status = heap_failure(scan->db, HEAP_CORRUPT, "index reference");
+    } else if (!matches_add(scan->db, scan->matches, locator, scan->row, scan->keep_values)) {
+        scan->status = DATABASE_EXEC_NOMEM;
+    }
+    heap_release_row(scan->heap, scan->row);
+    return scan->status == DATABASE_EXEC_OK;
+}
+
+static database_exec_status_t match_by_secondary(database_t *db, heap_t *heap,
+                                                  heap_secondary_spec_t spec, const where_t *where,
+                                                  value_t *row, bool keep_values, matches_t *matches)
+{
+    secondary_match_t scan = {db, heap, where, row, matches, keep_values, DATABASE_EXEC_OK};
+    heap_status_t visited = heap_secondary_visit_equal(heap, spec, &where->literal.view,
+                                                       collect_secondary_match, &scan);
+    if (scan.status != DATABASE_EXEC_OK) return scan.status;
+    return visited == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, visited, "index lookup");
 }
 
 typedef struct {
@@ -1659,7 +1879,10 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
     }
     bool by_key = is_key_equality(&view, heap, &where);
     bool is_indexed = heap_is_indexed(heap);
-    heap_status_t made = by_key ? HEAP_OK : heap_cursor_open(heap, &cursor);
+    heap_secondary_spec_t secondary;
+    bool by_secondary = !by_key && (!pk_assigned || is_indexed) &&
+                        find_secondary_equality(db, id, &where, &secondary);
+    heap_status_t made = (by_key || by_secondary) ? HEAP_OK : heap_cursor_open(heap, &cursor);
     if (made != HEAP_OK) {
         status = heap_failure(db, made, "cursor");
         goto done;
@@ -1667,8 +1890,11 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
     if (by_key) {
         status = match_by_key(db, heap, &where, row, true, &matches);
         if (status != DATABASE_EXEC_OK) goto done;
+    } else if (by_secondary) {
+        status = match_by_secondary(db, heap, secondary, &where, row, true, &matches);
+        if (status != DATABASE_EXEC_OK) goto done;
     }
-    while (!by_key) {
+    while (!by_key && !by_secondary) {
         if (cancel_requested(db)) {
             status = cancelled_result(db);
             goto done;
@@ -1761,6 +1987,19 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
         status = heap_failure(db, began, "batch");
         goto done;
     }
+    began = configure_secondary(batch, work.cat, id);
+    if (began != HEAP_OK) {
+        status = heap_failure(db, began, "index");
+        goto done;
+    }
+    for (size_t m = 0; m < matches.count; m++) {
+        for (size_t i = 0; i < n; i++) views[i] = matches.items[m].cells[i].view;
+        heap_status_t removed = heap_batch_secondary_remove(batch, views, n, matches.items[m].locator);
+        if (removed != HEAP_OK) {
+            status = heap_failure(db, removed, "index");
+            goto done;
+        }
+    }
     for (size_t m = 0; m < matches.count; m++) {
         if (cancel_requested(db)) {
             status = cancelled_result(db);
@@ -1774,6 +2013,11 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
         heap_status_t changed = heap_batch_update(batch, matches.items[m].locator, views, n, &placed);
         if (changed != HEAP_OK) {
             status = heap_failure(db, changed, "update");
+            goto done;
+        }
+        changed = heap_batch_secondary_insert(batch, views, n, placed);
+        if (changed != HEAP_OK) {
+            status = heap_failure(db, changed, "index");
             goto done;
         }
     }
@@ -1816,6 +2060,9 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
 
     size_t row_bytes = n * sizeof(value_t);
     value_t *row = q_calloc(db, n, sizeof(*row));
+    bool keep_values = catalog_index_count(base_catalog(db), id) > 0;
+    size_t views_bytes = keep_values ? n * sizeof(value_view_t) : 0;
+    value_view_t *views = keep_values ? q_malloc(db, views_bytes) : NULL;
     heap_t *heap = NULL;
     heap_cursor_t *cursor = NULL;
     heap_batch_t *batch = NULL;
@@ -1824,7 +2071,7 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
     matches_t matches = {NULL, 0, 0, n};
     where_t where;
     memset(&where, 0, sizeof(where));
-    if (row == NULL) {
+    if (row == NULL || (keep_values && views == NULL)) {
         status = DATABASE_EXEC_NOMEM;
         goto done;
     }
@@ -1835,16 +2082,21 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
         goto done;
     }
     bool by_key = is_key_equality(&view, heap, &where);
-    heap_status_t made = by_key ? HEAP_OK : heap_cursor_open(heap, &cursor);
+    heap_secondary_spec_t secondary;
+    bool by_secondary = !by_key && find_secondary_equality(db, id, &where, &secondary);
+    heap_status_t made = (by_key || by_secondary) ? HEAP_OK : heap_cursor_open(heap, &cursor);
     if (made != HEAP_OK) {
         status = heap_failure(db, made, "cursor");
         goto done;
     }
     if (by_key) {
-        status = match_by_key(db, heap, &where, row, false, &matches);
+        status = match_by_key(db, heap, &where, row, keep_values, &matches);
+        if (status != DATABASE_EXEC_OK) goto done;
+    } else if (by_secondary) {
+        status = match_by_secondary(db, heap, secondary, &where, row, keep_values, &matches);
         if (status != DATABASE_EXEC_OK) goto done;
     }
-    while (!by_key) {
+    while (!by_key && !by_secondary) {
         if (cancel_requested(db)) {
             status = cancelled_result(db);
             goto done;
@@ -1856,7 +2108,7 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
             status = heap_failure(db, next, "scan");
             goto done;
         }
-        if (where_matches(&where, row) && !matches_add(db, &matches, at, row, false)) {
+        if (where_matches(&where, row) && !matches_add(db, &matches, at, row, keep_values)) {
             status = DATABASE_EXEC_NOMEM;
             goto done;
         }
@@ -1880,10 +2132,23 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
         status = heap_failure(db, began, "batch");
         goto done;
     }
+    began = configure_secondary(batch, work.cat, id);
+    if (began != HEAP_OK) {
+        status = heap_failure(db, began, "index");
+        goto done;
+    }
     for (size_t m = 0; m < matches.count; m++) {
         if (cancel_requested(db)) {
             status = cancelled_result(db);
             goto done;
+        }
+        if (keep_values) {
+            for (size_t i = 0; i < n; i++) views[i] = matches.items[m].cells[i].view;
+            heap_status_t unindexed = heap_batch_secondary_remove(batch, views, n, matches.items[m].locator);
+            if (unindexed != HEAP_OK) {
+                status = heap_failure(db, unindexed, "index");
+                goto done;
+            }
         }
         heap_status_t removed = heap_batch_delete(batch, matches.items[m].locator);
         if (removed != HEAP_OK) {
@@ -1912,6 +2177,7 @@ done:
     matches_free(db, &matches);
     if (row != NULL) clear_cells(row, n);
     q_free(db, row, row_bytes);
+    q_free(db, views, views_bytes);
     where_clear(db, &where);
     return status;
 }
@@ -2056,6 +2322,7 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
     db->cur_binding = bound;
     switch (statement->kind) {
         case SQLSTMT_CREATE_TABLE: status = exec_create(db, &statement->create, out); break;
+        case SQLSTMT_CREATE_INDEX: status = exec_create_index(db, &statement->index, out); break;
         case SQLSTMT_INSERT: status = exec_insert(db, &statement->insert, out); break;
         case SQLSTMT_SELECT: status = exec_select(db, &statement->select, out); break;
         case SQLSTMT_UPDATE: status = exec_update(db, &statement->update, out); break;

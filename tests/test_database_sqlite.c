@@ -404,6 +404,25 @@ static void build_steps(void)
     add_step(STEP_OK, "INSERT INTO text_keys VALUES ('', 'reused')");
     add_step(STEP_REOPEN, NULL);
     add_step(STEP_SELECT, "SELECT * FROM text_keys");
+
+    add_step(STEP_OK, "CREATE TABLE indexed (id INTEGER PRIMARY KEY, email TEXT, group_name TEXT)");
+    add_step(STEP_OK, "INSERT INTO indexed VALUES (1, 'a@x', 'same')");
+    add_step(STEP_OK, "INSERT INTO indexed VALUES (2, 'b@x', 'same')");
+    add_step(STEP_OK, "CREATE INDEX by_group ON indexed (group_name)");
+    add_step(STEP_OK, "CREATE UNIQUE INDEX by_email ON indexed (email)");
+    add_step(STEP_ERROR, "INSERT INTO indexed VALUES (3, 'a@x', 'other')");
+    add_step(STEP_SELECT, "SELECT id FROM indexed WHERE group_name = 'same'");
+    add_step(STEP_OK, "UPDATE indexed SET email = 'c@x' WHERE email = 'a@x'");
+    add_step(STEP_OK, "DELETE FROM indexed WHERE email = 'b@x'");
+    add_step(STEP_REOPEN, NULL);
+    add_step(STEP_SELECT, "SELECT * FROM indexed");
+    add_step(STEP_OK, "INSERT INTO indexed VALUES (3, 'b@x', 'same')");
+    add_step(STEP_SELECT, "SELECT id FROM indexed WHERE group_name = 'same'");
+    add_step(STEP_OK, "INSERT INTO indexed VALUES (4, NULL, NULL)");
+    add_step(STEP_OK, "INSERT INTO indexed VALUES (5, NULL, NULL)");
+    add_step(STEP_SELECT, "SELECT id FROM indexed WHERE email IS NULL");
+    add_step(STEP_OK, "DROP TABLE indexed");
+    add_step(STEP_ERROR, "SELECT * FROM indexed");
 }
 
 int main(void)

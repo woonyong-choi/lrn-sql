@@ -636,6 +636,87 @@ static void test_text_primary_key_index(void)
     clean_dir();
 }
 
+/* #65: 보조 색인을 만든 뒤 DML·재열기·고유 중복의 게시 경계를 확인한다. */
+static void test_secondary_index_crud(void)
+{
+    printf("\n[test_secondary_index_crud]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE t (id INTEGER PRIMARY KEY, email TEXT, group_name TEXT)");
+    exec_ok(db, "INSERT INTO t VALUES (1, 'a@x', 'same')");
+    exec_ok(db, "INSERT INTO t VALUES (2, 'b@x', 'same')");
+    exec_ok(db, "CREATE INDEX by_group ON t (group_name)");
+    exec_ok(db, "CREATE UNIQUE INDEX by_email ON t (email)");
+    for (unsigned i = 0; i < 4; i++) {
+        char sql[64];
+        snprintf(sql, sizeof(sql), "CREATE INDEX extra_%u ON t (group_name)", i);
+        exec_ok(db, sql);
+    }
+    expect_class(db, "INSERT INTO t VALUES (3, 'a@x', 'other')", RESULT_E_CONSTRAINT);
+    database_scan_stats_t before, after;
+    database_scan_stats(db, &before);
+    expect_text(db, "SELECT id FROM t WHERE group_name = 'same'", "[2] 1/ 2");
+    database_scan_stats(db, &after);
+    CHECK(after.index_lookups == before.index_lookups + 1 && after.rows_scanned == before.rows_scanned,
+          "보조 색인에서 중복 TEXT 값 두 행을 찾고 전체 스캔을 하지 않음");
+    expect_class(db, "UPDATE t SET email = 'duplicate' WHERE group_name = 'same'", RESULT_E_CONSTRAINT);
+    expect_text(db, "SELECT id FROM t WHERE email = 'a@x'", "[1] 1");
+    expect_text(db, "SELECT id FROM t WHERE email = 'b@x'", "[1] 2");
+    exec_ok(db, "UPDATE t SET email = 'c@x' WHERE email = 'a@x'");
+    exec_ok(db, "DELETE FROM t WHERE email = 'b@x'");
+    db = reopen(db, true);
+    expect_text(db, "SELECT id FROM t WHERE email = 'c@x'", "[1] 1");
+    expect_text(db, "SELECT id FROM t WHERE group_name = 'same'", "[1] 1");
+    exec_ok(db, "INSERT INTO t VALUES (3, 'b@x', 'same')");
+    expect_text(db, "SELECT id FROM t WHERE group_name = 'same'", "[2] 1/ 3");
+    exec_ok(db, "CREATE TABLE duplicates (id INTEGER PRIMARY KEY, email TEXT)");
+    exec_ok(db, "INSERT INTO duplicates VALUES (1, 'same')");
+    exec_ok(db, "INSERT INTO duplicates VALUES (2, 'same')");
+    expect_class(db, "CREATE UNIQUE INDEX duplicate_email ON duplicates (email)", RESULT_E_CONSTRAINT);
+    exec_ok(db, "CREATE INDEX duplicate_email ON duplicates (email)");
+    expect_text(db, "SELECT id FROM duplicates WHERE email = 'same'", "[2] 1/ 2");
+    db = reopen(db, true);
+    expect_text(db, "SELECT id FROM duplicates WHERE email = 'same'", "[2] 1/ 2");
+    exec_ok(db, "DROP TABLE duplicates");
+    expect_class(db, "SELECT id FROM duplicates WHERE email = 'same'", RESULT_E_SEMANTIC);
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+
+/* 같은 보조 키가 여러 잎에 걸쳐도 모든 locator를 한 번씩 반환한다. */
+static void test_secondary_index_many_duplicates(void)
+{
+    printf("\n[test_secondary_index_many_duplicates]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT)");
+    exec_ok(db, "CREATE INDEX by_label ON t (label)");
+    for (unsigned i = 1; i <= 480; i++) {
+        char sql[80];
+        snprintf(sql, sizeof(sql), "INSERT INTO t VALUES (%u, 'same')", i);
+        exec_ok(db, sql);
+    }
+    bool seen[481] = {false};
+    result_t *result = run_bound(db, "SELECT id FROM t WHERE label = 'same'", NULL, 0);
+    result_row_t row;
+    size_t count = 0;
+    while (result_next(result, &row) == RESULT_NEXT_ROW) {
+        CHECK(row.cell_count == 1 && row.cells[0].type == VALUE_INTEGER &&
+              row.cells[0].integer > 0 && row.cells[0].integer <= 480, "중복 색인 값의 행 범위");
+        if (row.cell_count == 1 && row.cells[0].type == VALUE_INTEGER &&
+            row.cells[0].integer > 0 && row.cells[0].integer <= 480) {
+            unsigned id = (unsigned)row.cells[0].integer;
+            CHECK(!seen[id], "중복 색인 값의 중복 반환 없음");
+            seen[id] = true;
+        }
+        count++;
+    }
+    CHECK(count == 480, "분할된 색인 잎에서 480개 행 반환");
+    result_release(&result);
+    db = reopen(db, true);
+    expect_text(db, "SELECT id FROM t WHERE label = 'missing'", "[0]");
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+
 static void test_open_rejects_other_files_without_change(void)
 {
     printf("\n[test_open_rejects_other_files_without_change]\n");
@@ -773,6 +854,8 @@ int main(void)
     test_many_rows_updates_and_deletes_across_pages();
     test_identity_and_primary_key_rules();
     test_text_primary_key_index();
+    test_secondary_index_crud();
+    test_secondary_index_many_duplicates();
     test_projected_overflow_reads();
     test_open_rejects_other_files_without_change();
     test_argument_errors();

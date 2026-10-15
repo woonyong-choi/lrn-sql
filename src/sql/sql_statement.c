@@ -21,7 +21,8 @@ typedef struct {
 /* 이름 자리에 쓸 수 없는 예약어. 따옴표로 감싸면 쓸 수 있다. */
 static const char *const RESERVED[] = {
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "UPDATE",
-    "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS", NULL};
+    "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
+    "INDEX", "UNIQUE", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
@@ -179,6 +180,11 @@ void sqlstmt_free(sqlstmt_t *statement)
             }
             free(statement->create.columns);
             name_clear(&statement->create.table);
+            break;
+        case SQLSTMT_CREATE_INDEX:
+            name_clear(&statement->index.name);
+            name_clear(&statement->index.table);
+            name_clear(&statement->index.column);
             break;
         case SQLSTMT_INSERT:
             names_clear(statement->insert.columns, statement->insert.column_count);
@@ -671,6 +677,21 @@ static bool parse_table_primary_key(parser_t *p, sqlstmt_name_t *name, size_t *o
 
 static bool parse_create(parser_t *p, sqlstmt_t *statement)
 {
+    if (word_is(current(p), "UNIQUE") || word_is(current(p), "INDEX")) {
+        sqlstmt_index_t *index = &statement->index;
+        statement->kind = SQLSTMT_CREATE_INDEX;
+        index->unique = take_word(p, "UNIQUE");
+        if (!expect_word(p, "INDEX")) return false;
+        if (!reject_if_exists(p)) return false;
+        if (!parse_name(p, &index->name, false) || !expect_word(p, "ON") ||
+            !parse_name(p, &index->table, false) || !expect_punct(p, "(")) return false;
+        if (!parse_name(p, &index->column, false)) return false;
+        if (punct_is(current(p), ",")) {
+            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CONSTRAINT,
+                        here_offset(p));
+        }
+        return expect_punct(p, ")");
+    }
     sqlstmt_create_t *create = &statement->create;
     statement->kind = SQLSTMT_CREATE_TABLE;
     create->primary_key_column = SQLSTMT_NO_COLUMN;

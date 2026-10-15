@@ -349,6 +349,10 @@ DATABASE_AUDIT_OBJS = $(patsubst $(BUILD_DIR)/%.o,$(BUILD_DIR)/audit/%.o,$(DATAB
 $(BUILD_DIR)/test_sql_statement: $(BUILD_DIR)/tests/test_sql_statement.o $(BUILD_DIR)/sql/sql_statement_fault.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/storage/value_statement_fault.o
 $(BUILD_DIR)/test_heap_store: $(BUILD_DIR)/tests/test_heap_store.o $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store_test.o
 $(BUILD_DIR)/test_database: $(BUILD_DIR)/tests/test_database.o $(DATABASE_OBJS)
+$(BUILD_DIR)/bench_secondary_index: $(BUILD_DIR)/tests/bench_secondary_index.o $(DATABASE_OBJS)
+$(BUILD_DIR)/bench_secondary_index: LDLIBS += -lsqlite3
+$(BUILD_DIR)/bench_secondary_index:
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 $(BUILD_DIR)/test_database_sqlite: $(BUILD_DIR)/tests/test_database_sqlite.o $(DATABASE_OBJS)
 $(BUILD_DIR)/test_primary_index: $(BUILD_DIR)/tests/test_primary_index.o $(DATABASE_OBJS)
 $(BUILD_DIR)/test_database_fault: $(BUILD_DIR)/tests/test_database_fault.o $(filter-out $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/storage/heap_store.o,$(DATABASE_OBJS)) $(BUILD_DIR)/sql/database_fault.o $(BUILD_DIR)/storage/heap_store_fault.o

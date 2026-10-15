@@ -180,6 +180,21 @@ static void create_all_types(void)
     free_clean(statement);
 }
 
+/* #65: 단일 컬럼 보조 색인과 unique 선언만 AST로 보존한다. */
+static void create_index_forms(void)
+{
+    sqlstmt_t *statement = parse_ok("CREATE INDEX by_name ON users (name)");
+    assert(statement->kind == SQLSTMT_CREATE_INDEX);
+    assert(!statement->index.unique && name_is(&statement->index.name, "by_name"));
+    assert(name_is(&statement->index.table, "users") && name_is(&statement->index.column, "name"));
+    free_clean(statement);
+
+    statement = parse_ok("CREATE UNIQUE INDEX unique_email ON users (email)");
+    assert(statement->kind == SQLSTMT_CREATE_INDEX && statement->index.unique);
+    free_clean(statement);
+    expect_unsupported("CREATE INDEX pair ON users (a, b)", SQLSTMT_REASON_UNSUPPORTED_CONSTRAINT, 29);
+}
+
 static void create_primary_key_forms(void)
 {
     sqlstmt_t *statement = parse_ok("create table t (a integer, b text, primary key (b))");
@@ -487,7 +502,6 @@ static void create_errors(void)
     expect_syntax("FROBNICATE x", SQLSTMT_REASON_UNKNOWN_STATEMENT, 0);
     expect_syntax("x", SQLSTMT_REASON_UNKNOWN_STATEMENT, 0);
     expect_syntax("\"select\" * FROM t", SQLSTMT_REASON_UNKNOWN_STATEMENT, 0);
-    expect_unsupported("CREATE INDEX i ON t (a)", SQLSTMT_REASON_UNSUPPORTED_CREATE, 7);
     expect_syntax("CREATE", SQLSTMT_REASON_UNEXPECTED_END, 6);
     expect_syntax("CREATE TABLE t (", SQLSTMT_REASON_UNEXPECTED_END, 16);
     expect_syntax("CREATE TABLE t (a INTEGER", SQLSTMT_REASON_UNEXPECTED_END, 25);
@@ -795,6 +809,7 @@ int main(void)
     free_clean(probe);
 
     create_all_types();
+    create_index_forms();
     create_primary_key_forms();
     identifiers_and_case();
     insert_values();

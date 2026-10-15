@@ -16,6 +16,7 @@
  *
  * 문법(키워드는 대소문자를 구분하지 않고 식별자는 바이트 단위로 대소문자를 구분한다):
  *   CREATE TABLE name ( item {, item} )
+ *   CREATE [UNIQUE] INDEX name ON table ( column_name )
  *     item       = column | PRIMARY KEY ( column_name )
  *     column     = column_name type {constraint}
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
@@ -49,7 +50,7 @@
  * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): ORDER BY·GROUP BY·HAVING·LIMIT·OFFSET·DISTINCT·
  * JOIN·UNION 같은 절, AND·OR로 이은 둘 이상의 조건, 별칭(AS), 함수 호출, 테이블.컬럼 형태의 이름,
  * IF [NOT] EXISTS, 여러 행 INSERT, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중
- * PRIMARY KEY 외의 것, 복합 기본 키, 위에 없는 타입 이름, CREATE TABLE이 아닌 CREATE.
+ * PRIMARY KEY 외의 것, 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE.
  *
  * 소유권: 성공한 sqlstmt_t의 모든 이름·값은 이 구조가 복사해 소유하며 입력 SQL과 binding이
  * 사라져도 유효하다. 해제는 sqlstmt_free 한 번이다. 실패하면 *out을 바꾸지 않고 할당을 남기지 않는다.
@@ -110,6 +111,7 @@ typedef struct {
 
 typedef enum {
     SQLSTMT_CREATE_TABLE,
+    SQLSTMT_CREATE_INDEX,
     SQLSTMT_INSERT,
     SQLSTMT_SELECT,
     SQLSTMT_UPDATE,
@@ -148,6 +150,13 @@ typedef struct {
     uint16_t primary_key_column; /* 없으면 SQLSTMT_NO_COLUMN */
     bool has_identity;
 } sqlstmt_create_t;
+
+typedef struct {
+    sqlstmt_name_t name;
+    sqlstmt_name_t table;
+    sqlstmt_name_t column;
+    bool unique;
+} sqlstmt_index_t;
 
 typedef struct {
     sqlstmt_name_t table;
@@ -209,6 +218,7 @@ typedef struct {
     sqlstmt_kind_t kind;
     union {
         sqlstmt_create_t create;
+        sqlstmt_index_t index;
         sqlstmt_insert_t insert;
         sqlstmt_select_t select;
         sqlstmt_update_t update;
