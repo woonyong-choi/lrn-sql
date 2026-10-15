@@ -1311,13 +1311,13 @@ static database_exec_status_t append_result_row(database_t *db, const projection
 }
 
 static database_exec_status_t select_by_key(database_t *db, heap_t *heap, const where_t *where, value_t *row,
-                                            const projection_t *projection)
+                                            const bool *needed, const projection_t *projection)
 {
     bool is_hit;
     heap_locator_t at;
     database_exec_status_t status = locate_key(db, heap, where, &is_hit, &at);
     if (status != DATABASE_EXEC_OK || !is_hit) return status;
-    heap_status_t got = heap_get(heap, at, row);
+    heap_status_t got = heap_get_projected(heap, at, needed, row);
     if (got != HEAP_OK) return heap_failure(db, got, "lookup");
     status = append_result_row(db, projection, row);
     heap_release_row(heap, row);
@@ -1337,6 +1337,7 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     size_t picks_bytes = slots * sizeof(size_t), columns_bytes = slots * sizeof(result_column_t);
     size_t cells_bytes = slots * sizeof(value_view_t), row_bytes = n * sizeof(value_t);
     size_t *picks = q_malloc(db, picks_bytes);
+    bool *needed = q_calloc(db, n, sizeof(*needed));
     result_column_t *columns = q_malloc(db, columns_bytes);
     value_view_t *cells = q_malloc(db, cells_bytes);
     value_t *row = q_calloc(db, n, sizeof(*row));
@@ -1345,7 +1346,7 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     result_builder_t *builder = NULL;
     where_t where;
     memset(&where, 0, sizeof(where));
-    if (picks == NULL || columns == NULL || cells == NULL || row == NULL) {
+    if (picks == NULL || needed == NULL || columns == NULL || cells == NULL || row == NULL) {
         status = DATABASE_EXEC_NOMEM;
         goto done;
     }
@@ -1356,11 +1357,13 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
             goto done;
         }
         picks[i] = column;
+        needed[column] = true;
         columns[i] = (result_column_t){(const uint8_t *)view.columns[column].name,
                                        view.columns[column].name_bytes, view.columns[column].type,
                                        !view.columns[column].not_null};
     }
     if (!compile_where(db, &view, &select->where, &where, &status)) goto done;
+    if (where.present) needed[where.column] = true;
 
     heap_status_t opened = open_heap(db, &view, id, &heap);
     if (opened != HEAP_OK) {
@@ -1385,7 +1388,7 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     }
     projection_t projection = {builder, picks, selected, cells};
     if (by_key) {
-        status = select_by_key(db, heap, &where, row, &projection);
+        status = select_by_key(db, heap, &where, row, needed, &projection);
         if (status != DATABASE_EXEC_OK) goto done;
     }
     while (!by_key) {
@@ -1394,7 +1397,7 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
             goto done;
         }
         heap_locator_t at;
-        heap_status_t next = heap_cursor_next(cursor, row, &at);
+        heap_status_t next = heap_cursor_next_projected(cursor, needed, row, &at);
         if (next == HEAP_DONE) break;
         if (next != HEAP_OK) {
             status = heap_failure(db, next, "scan");
@@ -1425,6 +1428,7 @@ done:
     q_free(db, row, row_bytes);
     where_clear(db, &where);
     q_free(db, picks, picks_bytes);
+    q_free(db, needed, n * sizeof(*needed));
     q_free(db, columns, columns_bytes);
     q_free(db, cells, cells_bytes);
     return status;
