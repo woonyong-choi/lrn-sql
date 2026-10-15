@@ -37,5 +37,7 @@ record_page_status_t record_page_insert(uint8_t *page, record_slice_t value,
 record_page_status_t record_page_update(uint8_t *page, uint16_t slot,
                                         record_slice_t value);
 record_page_status_t record_page_delete(uint8_t *page, uint16_t slot);
+/* 새 slot을 만들 때 쓸 수 있는 연속 바이트 수. 삭제된 slot 번호는 재사용하지 않는다. */
+record_page_status_t record_page_available(const uint8_t *page, size_t *bytes);
 
 #endif

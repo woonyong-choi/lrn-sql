@@ -68,6 +68,17 @@ record_page_status_t record_page_get(const uint8_t *page, uint16_t slot,
     return RECORD_PAGE_OK;
 }
 
+record_page_status_t record_page_available(const uint8_t *page, size_t *bytes)
+{
+    if (bytes == NULL || record_page_validate(page) != RECORD_PAGE_OK) return RECORD_PAGE_INVALID;
+    uint16_t count = read_u16(page + 4);
+    size_t used = PAGE_HEADER_BYTES + (size_t)count * SLOT_BYTES;
+    for (uint16_t i = 0; i < count; i++) used += read_u16(get_slot(page, i) + 2);
+    *bytes = count == (RECORD_PAGE_BYTES - PAGE_HEADER_BYTES) / SLOT_BYTES
+                 ? 0 : RECORD_PAGE_BYTES - used;
+    return RECORD_PAGE_OK;
+}
+
 typedef struct {
     uint16_t slot;
     uint16_t count;
