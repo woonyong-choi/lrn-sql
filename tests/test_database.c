@@ -11,6 +11,7 @@
 
 #include "sql/database.h"
 #include "sql/result.h"
+#include "storage/page_file.h"
 #include "storage/value.h"
 
 /*
@@ -23,6 +24,39 @@
 
 static int g_run = 0;
 static int g_fail = 0;
+static page_file_io_t g_page_io;
+static size_t g_page_reads;
+
+typedef struct {
+    size_t used;
+    size_t peak;
+} projection_memory_t;
+
+static bool reserve_projection_memory(void *ctx, mem_scope_t scope, size_t bytes)
+{
+    (void)scope;
+    projection_memory_t *memory = ctx;
+    memory->used += bytes;
+    if (memory->used > memory->peak) memory->peak = memory->used;
+    return true;
+}
+
+static void release_projection_memory(void *ctx, mem_scope_t scope, size_t bytes)
+{
+    (void)scope;
+    projection_memory_t *memory = ctx;
+    assert(bytes <= memory->used);
+    memory->used -= bytes;
+}
+
+static const mem_ledger_ops_t PROJECTION_MEMORY = {
+    reserve_projection_memory, release_projection_memory, NULL, NULL};
+
+static ssize_t count_page_read(int fd, void *buf, size_t size, off_t offset)
+{
+    g_page_reads++;
+    return g_page_io.pread(fd, buf, size, offset);
+}
 
 #define CHECK(cond, ...)                                  \
     do {                                                  \
@@ -568,6 +602,74 @@ static void test_open_rejects_other_files_without_change(void)
     clean_dir();
 }
 
+/* #181: SELECT 투영과 WHERE가 필요한 overflow 페이지만 읽는다. */
+static void test_projected_overflow_reads(void)
+{
+    printf("\n[test_projected_overflow_reads]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE items (id INTEGER PRIMARY KEY, payload TEXT)");
+    uint8_t payload[9000];
+    memset(payload, 'x', sizeof(payload));
+    value_view_t params[2] = {{VALUE_INTEGER, 1, 0, NULL, 0},
+                              {VALUE_TEXT, 0, 0, payload, sizeof(payload)}};
+    result_t *inserted = run_bound(db, "INSERT INTO items VALUES (?, ?)", params, 2);
+    result_release(&inserted);
+    assert(database_close(db) == DATABASE_OK);
+
+    g_page_io = page_file_default_io();
+    page_file_io_t counted = g_page_io;
+    counted.pread = count_page_read;
+    page_file_set_default_io(&counted);
+    assert(database_open(DB_PATH, true, &db) == DATABASE_OK);
+    g_page_reads = 0;
+    expect_text(db, "SELECT id FROM items WHERE id = 1", "[1] 1");
+    size_t id_reads = g_page_reads;
+    g_page_reads = 0;
+    result_t *payload_result = run_bound(db, "SELECT payload FROM items WHERE id = 1", NULL, 0);
+    result_row_t row;
+    assert(result_next(payload_result, &row) == RESULT_NEXT_ROW);
+    CHECK(row.cells[0].size_bytes == sizeof(payload), "선택한 payload 길이");
+    result_release(&payload_result);
+    size_t payload_reads = g_page_reads;
+    CHECK(payload_reads > id_reads, "비선택 overflow 읽기: id %zu, payload %zu", id_reads, payload_reads);
+    printf("  page reads: id %zu, payload %zu\n", id_reads, payload_reads);
+    g_page_reads = 0;
+    expect_text(db, "SELECT id FROM items", "[1] 1");
+    size_t scan_id_reads = g_page_reads;
+    g_page_reads = 0;
+    value_view_t needle = {VALUE_TEXT, 0, 0, payload, sizeof(payload)};
+    result_t *filtered = run_bound(db, "SELECT id FROM items WHERE payload = ?", &needle, 1);
+    assert(result_next(filtered, &row) == RESULT_NEXT_ROW);
+    CHECK(row.cells[0].integer == 1, "WHERE에 필요한 overflow 값 복원");
+    result_release(&filtered);
+    CHECK(g_page_reads > scan_id_reads, "WHERE payload 페이지 읽기: scan %zu, filter %zu", scan_id_reads,
+          g_page_reads);
+
+    projection_memory_t memory = {0};
+    mem_ledger_t ledger = {&PROJECTION_MEMORY, &memory};
+    database_exec_options_t options = {.ledger = &ledger};
+    const char *id_sql = "SELECT id FROM items WHERE id = 1";
+    result_t *measured = NULL;
+    CHECK(database_exec_ex(db, &options, (const uint8_t *)id_sql, strlen(id_sql), NULL,
+                           &measured) == DATABASE_EXEC_OK, "id 메모리 측정");
+    result_release(&measured);
+    CHECK(memory.used == 0, "id 결과 반환 뒤 메모리 장부 정리");
+    size_t id_peak = memory.peak;
+    memory.peak = 0;
+    const char *payload_sql = "SELECT payload FROM items WHERE id = 1";
+    CHECK(database_exec_ex(db, &options, (const uint8_t *)payload_sql, strlen(payload_sql), NULL,
+                           &measured) == DATABASE_EXEC_OK, "payload 메모리 측정");
+    result_release(&measured);
+    CHECK(memory.used == 0, "payload 결과 반환 뒤 메모리 장부 정리");
+    CHECK(memory.peak > id_peak, "투영별 요청 메모리: id %zu, payload %zu", id_peak,
+          memory.peak);
+    printf("  accounted peak bytes: id %zu, payload %zu\n", id_peak, memory.peak);
+
+    assert(database_close(db) == DATABASE_OK);
+    page_file_set_default_io(NULL);
+    clean_dir();
+}
+
 static void test_argument_errors(void)
 {
     printf("\n[test_argument_errors]\n");
@@ -589,6 +691,7 @@ int main(void)
     test_drop_removes_only_the_target();
     test_many_rows_updates_and_deletes_across_pages();
     test_identity_and_primary_key_rules();
+    test_projected_overflow_reads();
     test_open_rejects_other_files_without_change();
     test_argument_errors();
     clean_dir();

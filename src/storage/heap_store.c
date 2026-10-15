@@ -312,7 +312,8 @@ static size_t overflow_free_bound(size_t page_bytes, size_t size_bytes)
  * 필드를 value_t 배열로 옮긴다. 실패하면 out은 바꾸지 않는다. 성공하면 *charged에 행이 쥔 TEXT·BLOB
  * 바이트(ledger에 계상한 몫)를 돌려준다. 임시 배열과 overflow 읽기 buffer는 끝나기 전에 돌려준다.
  */
-static heap_status_t decode_row(heap_t *heap, const record_value_t *f, value_t *out, size_t *charged)
+static heap_status_t decode_row(heap_t *heap, const record_value_t *f, const bool *selected,
+                                value_t *out, size_t *charged)
 {
     size_t n = heap->column_count;
     const mem_ledger_t *ledger = &heap->ledger;
@@ -329,6 +330,7 @@ static heap_status_t decode_row(heap_t *heap, const record_value_t *f, value_t *
     page_file_overflow_ctx_t ctx;
     overflow_io_t io = page_file_overflow_io(&ctx, heap->file, heap->table_id);
     for (size_t i = 0; i < n && result == HEAP_OK; i++) {
+        if (selected != NULL && !selected[i]) continue;
         const record_value_t *kind = &f[1 + 2 * i];
         const record_value_t *payload = &f[2 + 2 * i];
         value_type_t type = heap->types[i];
@@ -696,7 +698,7 @@ static heap_status_t read_record_page(heap_t *heap, uint32_t page_id, uint8_t *p
 
 /* 성공하면 *charged가 행이 쥔 TEXT·BLOB 바이트다. 호출자가 value_clear한 뒤 그만큼을 돌려준다. */
 static heap_status_t row_from_slot(heap_t *heap, const uint8_t *page, uint16_t slot, value_t *row,
-                                   size_t *charged)
+                                   const bool *selected, size_t *charged)
 {
     *charged = 0;
     record_slice_t slice;
@@ -714,7 +716,7 @@ static heap_status_t row_from_slot(heap_t *heap, const uint8_t *page, uint16_t s
         return HEAP_NOMEM;
     }
     heap_status_t status = parse_fields(heap, slice, fields, ROW_FIELDS(heap->column_count));
-    if (status == HEAP_OK) status = decode_row(heap, fields, row, charged);
+    if (status == HEAP_OK) status = decode_row(heap, fields, selected, row, charged);
     free(fields);
     acct_release(&heap->ledger, field_bytes);
     return status;
@@ -744,7 +746,8 @@ void heap_free_pages(const heap_t *heap, uint32_t *pages, size_t count)
     if (heap != NULL) acct_release(&heap->ledger, count * sizeof(uint32_t));
 }
 
-heap_status_t heap_get(heap_t *heap, heap_locator_t locator, value_t *row)
+heap_status_t heap_get_projected(heap_t *heap, heap_locator_t locator, const bool *selected,
+                                 value_t *row)
 {
     if (heap == NULL || row == NULL) return HEAP_INVALID;
     if (locator.directory_index >= heap->entry_count) return HEAP_NOT_FOUND;
@@ -752,7 +755,12 @@ heap_status_t heap_get(heap_t *heap, heap_locator_t locator, value_t *row)
     heap_status_t status = read_record_page(heap, heap->entries[locator.directory_index], page);
     if (status != HEAP_OK) return status;
     size_t charged;
-    return row_from_slot(heap, page, locator.slot, row, &charged);
+    return row_from_slot(heap, page, locator.slot, row, selected, &charged);
+}
+
+heap_status_t heap_get(heap_t *heap, heap_locator_t locator, value_t *row)
+{
+    return heap_get_projected(heap, locator, NULL, row);
 }
 
 /* ── 키 색인: 조회 ── */
@@ -854,7 +862,8 @@ static void cursor_drop_page(heap_cursor_t *cursor)
     acct_release(&cursor->ledger, RECORD_PAGE_BYTES);
 }
 
-heap_status_t heap_cursor_next(heap_cursor_t *cursor, value_t *row, heap_locator_t *locator)
+heap_status_t heap_cursor_next_projected(heap_cursor_t *cursor, const bool *selected, value_t *row,
+                                         heap_locator_t *locator)
 {
     if (cursor == NULL || row == NULL || locator == NULL) return HEAP_INVALID;
     heap_t *heap = cursor->heap;
@@ -881,7 +890,7 @@ heap_status_t heap_cursor_next(heap_cursor_t *cursor, value_t *row, heap_locator
         while (cursor->next_slot < cursor->slot_count) {
             uint16_t slot = cursor->next_slot;
             size_t charged;
-            heap_status_t status = row_from_slot(heap, cursor->page, slot, row, &charged);
+            heap_status_t status = row_from_slot(heap, cursor->page, slot, row, selected, &charged);
             if (status == HEAP_NOT_FOUND) {
                 cursor->next_slot++;
                 continue;
@@ -897,6 +906,11 @@ heap_status_t heap_cursor_next(heap_cursor_t *cursor, value_t *row, heap_locator
         cursor_drop_page(cursor);
         cursor->index++;
     }
+}
+
+heap_status_t heap_cursor_next(heap_cursor_t *cursor, value_t *row, heap_locator_t *locator)
+{
+    return heap_cursor_next_projected(cursor, NULL, row, locator);
 }
 
 void heap_cursor_close(heap_cursor_t *cursor)
@@ -1680,7 +1694,7 @@ heap_status_t heap_batch_get(heap_batch_t *batch, heap_locator_t locator, value_
     heap_status_t status = load_page(batch, locator.directory_index, &page);
     if (status != HEAP_OK) return fail(batch, status);
     size_t charged;
-    status = row_from_slot(batch->heap, page, locator.slot, row, &charged);
+    status = row_from_slot(batch->heap, page, locator.slot, row, NULL, &charged);
     return fail(batch, status);
 }
 
