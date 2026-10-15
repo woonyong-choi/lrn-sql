@@ -353,6 +353,10 @@ $(BUILD_DIR)/bench_secondary_index: $(BUILD_DIR)/tests/bench_secondary_index.o $
 $(BUILD_DIR)/bench_secondary_index: LDLIBS += -lsqlite3
 $(BUILD_DIR)/bench_secondary_index:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+$(BUILD_DIR)/bench_free_space: $(BUILD_DIR)/tests/bench_free_space.o $(DATABASE_OBJS)
+$(BUILD_DIR)/bench_free_space: LDLIBS += -lsqlite3
+$(BUILD_DIR)/bench_free_space:
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 $(BUILD_DIR)/test_database_sqlite: $(BUILD_DIR)/tests/test_database_sqlite.o $(DATABASE_OBJS)
 $(BUILD_DIR)/test_primary_index: $(BUILD_DIR)/tests/test_primary_index.o $(DATABASE_OBJS)
 $(BUILD_DIR)/test_database_fault: $(BUILD_DIR)/tests/test_database_fault.o $(filter-out $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/storage/heap_store.o,$(DATABASE_OBJS)) $(BUILD_DIR)/sql/database_fault.o $(BUILD_DIR)/storage/heap_store_fault.o

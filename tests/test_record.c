@@ -92,6 +92,8 @@ static void record_page_changes_preserve_slot_identity(void)
     uint8_t large[8000];
     memset(large, 'z', sizeof(large));
     record_page_init(page);
+    size_t available;
+    assert(record_page_available(page, &available) == RECORD_PAGE_OK && available == RECORD_PAGE_BYTES - 8u);
     uint16_t first, second, third;
     record_slice_t value = {(const uint8_t *)"one", 3};
     assert(record_page_insert(page, value, &first) == RECORD_PAGE_OK);
@@ -107,6 +109,7 @@ static void record_page_changes_preserve_slot_identity(void)
     assert(record_page_update(page, second, value) == RECORD_PAGE_FULL);
     assert(memcmp(before, page, sizeof(page)) == 0);
     assert(record_page_delete(page, first) == RECORD_PAGE_OK);
+    assert(record_page_available(page, &available) == RECORD_PAGE_OK && available == RECORD_PAGE_BYTES - 19u);
     assert(record_page_get(page, first, &result) == RECORD_PAGE_NOT_FOUND);
     assert(record_page_insert(page, value, &third) == RECORD_PAGE_OK);
     assert(third != first && third != second);
