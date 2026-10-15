@@ -12,6 +12,7 @@
 #include "sql/database.h"
 #include "sql/result.h"
 #include "storage/page_file.h"
+#include "storage/text_tree.h"
 #include "storage/value.h"
 
 /*
@@ -590,6 +591,51 @@ static void test_identity_and_primary_key_rules(void)
     clean_dir();
 }
 
+/* #65: TEXT 기본키의 점 조회·행 이동·재시작이 스캔 없이 같은 행을 가리킨다. */
+static void test_text_primary_key_index(void)
+{
+    printf("\n[test_text_primary_key_index]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE t (k TEXT PRIMARY KEY, v TEXT)");
+    for (unsigned i = 0; i < 80; i++) {
+        char sql[100];
+        snprintf(sql, sizeof(sql), "INSERT INTO t VALUES ('k%03u', 'v%03u')", i, i);
+        exec_ok(db, sql);
+    }
+    database_scan_stats_t before, after;
+    database_scan_stats(db, &before);
+    expect_text(db, "SELECT v FROM t WHERE k = 'k060'", "[1] 'v060'");
+    database_scan_stats(db, &after);
+    CHECK(after.index_lookups == before.index_lookups + 1 && after.rows_scanned == before.rows_scanned,
+          "TEXT 기본키 점 조회는 색인을 쓰고 행 스캔을 늘리지 않음");
+
+    exec_ok(db, "UPDATE t SET v = 'relocated value after update' WHERE k = 'k060'");
+    expect_text(db, "SELECT v FROM t WHERE k = 'k060'", "[1] '28#7d1358b3ed32f3b8'");
+    exec_ok(db, "UPDATE t SET k = 'renamed' WHERE k = 'k060'");
+    expect_text(db, "SELECT v FROM t WHERE k = 'renamed'", "[1] '28#7d1358b3ed32f3b8'");
+    expect_text(db, "SELECT v FROM t WHERE k = 'k060'", "[0]");
+    expect_class(db, "INSERT INTO t VALUES ('renamed', 'duplicate')", RESULT_E_CONSTRAINT);
+    db = reopen(db, true);
+    database_scan_stats(db, &before);
+    expect_text(db, "SELECT v FROM t WHERE k = 'renamed'", "[1] '28#7d1358b3ed32f3b8'");
+    database_scan_stats(db, &after);
+    CHECK(after.index_lookups == before.index_lookups + 1 && after.rows_scanned == before.rows_scanned,
+          "재시작 뒤 TEXT 기본키 색인을 사용");
+    exec_ok(db, "DELETE FROM t WHERE k = 'renamed'");
+    expect_text(db, "SELECT v FROM t WHERE k = 'renamed'", "[0]");
+    char key[TEXT_TREE_KEY_MAX_BYTES + 2u];
+    memset(key, 'x', sizeof(key) - 1u);
+    key[sizeof(key) - 1u] = '\0';
+    char sql[TEXT_TREE_KEY_MAX_BYTES + 96u];
+    snprintf(sql, sizeof(sql), "INSERT INTO t VALUES ('%s', 'too long')", key);
+    expect_class(db, sql, RESULT_E_LIMIT);
+    expect_text(db, "SELECT v FROM t WHERE k = 'k001'", "[1] 'v001'");
+    db = reopen(db, true);
+    expect_text(db, "SELECT v FROM t WHERE k = 'k001'", "[1] 'v001'");
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+
 static void test_open_rejects_other_files_without_change(void)
 {
     printf("\n[test_open_rejects_other_files_without_change]\n");
@@ -726,6 +772,7 @@ int main(void)
     test_drop_removes_only_the_target();
     test_many_rows_updates_and_deletes_across_pages();
     test_identity_and_primary_key_rules();
+    test_text_primary_key_index();
     test_projected_overflow_reads();
     test_open_rejects_other_files_without_change();
     test_argument_errors();

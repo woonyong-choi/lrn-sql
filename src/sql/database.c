@@ -13,6 +13,7 @@
 #include "storage/heap_store.h"
 #include "storage/overflow.h"
 #include "storage/page_file.h"
+#include "storage/text_tree.h"
 
 /* 문장 수준 오류. 정리를 모두 마친 뒤 진입점이 결과로 만든다(그 결과를 만들 메모리를 먼저 돌려주기 위해). */
 #define EXEC_PENDING ((database_exec_status_t)100)
@@ -1074,24 +1075,32 @@ done:
 static bool is_key_equality(const catalog_table_view_t *view, const heap_t *heap, const where_t *where)
 {
     return heap_is_indexed(heap) && where->present && !where->never && where->op == SQLSTMT_OP_EQ &&
-           where->column == view->primary_key_column;
+           where->column == view->primary_key_column &&
+           (where->literal.view.type != VALUE_TEXT ||
+            where->literal.view.size_bytes <= TEXT_TREE_KEY_MAX_BYTES);
 }
 
 static database_exec_status_t locate_key(database_t *db, heap_t *heap, const where_t *where, bool *is_hit,
                                          heap_locator_t *at)
 {
-    heap_status_t found = heap_find_key(heap, where->literal.view.integer, at);
+    const value_view_t *key = &where->literal.view;
+    heap_status_t found = key->type == VALUE_TEXT
+                              ? heap_find_text_key(heap, key->bytes, key->size_bytes, at)
+                              : heap_find_key(heap, key->integer, at);
     *is_hit = found == HEAP_OK;
     return found == HEAP_OK || found == HEAP_NOT_FOUND ? DATABASE_EXEC_OK : heap_failure(db, found, "lookup");
 }
 
 /* INSERT의 중복 검사와 identity의 현재 최대 키를 전체 스캔 없이 색인에서 얻는다. */
 static database_exec_status_t probe_key_index(database_t *db, const catalog_table_view_t *view, heap_t *heap,
-                                              const value_t *key, bool check_pk, bool *any, int64_t *max_key)
+                                              const value_t *key, bool check_pk, bool need_max,
+                                              bool *any, int64_t *max_key)
 {
     if (check_pk) {
         heap_locator_t at;
-        heap_status_t found = heap_find_key(heap, key->view.integer, &at);
+        heap_status_t found = key->view.type == VALUE_TEXT
+                                  ? heap_find_text_key(heap, key->view.bytes, key->view.size_bytes, &at)
+                                  : heap_find_key(heap, key->view.integer, &at);
         if (found == HEAP_OK) {
             size_t pk = view->primary_key_column;
             return fail_result(db, RESULT_E_CONSTRAINT, 11, "기본 키가 중복됩니다: %.*s",
@@ -1099,6 +1108,7 @@ static database_exec_status_t probe_key_index(database_t *db, const catalog_tabl
         }
         if (found != HEAP_NOT_FOUND) return heap_failure(db, found, "lookup");
     }
+    if (!need_max) return DATABASE_EXEC_OK;
     heap_status_t maximum = heap_max_key(heap, any, max_key);
     return maximum == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, maximum, "max");
 }
@@ -1179,7 +1189,7 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
         int64_t max_key = INT64_MIN;
         bool any = false;
         if (heap_is_indexed(heap)) {
-            status = probe_key_index(db, &view, heap, &cells[pk], check_pk, &any, &max_key);
+            status = probe_key_index(db, &view, heap, &cells[pk], check_pk, auto_id, &any, &max_key);
             if (status != DATABASE_EXEC_OK) goto done;
         } else {
             scanned = q_calloc(db, n, sizeof(*scanned));
@@ -1568,7 +1578,10 @@ static database_exec_status_t check_new_keys(database_t *db, heap_t *heap, const
     for (size_t i = 0; i < assign_count; i++) {
         if (assigns[i].column != pk || assigns[i].value.view.type == VALUE_NULL) continue;
         heap_locator_t at;
-        heap_status_t found = heap_find_key(heap, assigns[i].value.view.integer, &at);
+        const value_view_t *key = &assigns[i].value.view;
+        heap_status_t found = key->type == VALUE_TEXT
+                                  ? heap_find_text_key(heap, key->bytes, key->size_bytes, &at)
+                                  : heap_find_key(heap, key->integer, &at);
         if (found != HEAP_OK && found != HEAP_NOT_FOUND) return heap_failure(db, found, "lookup");
         bool is_other = found == HEAP_OK && !(matches->count == 1 && matches->items[0].locator.slot == at.slot &&
                                               matches->items[0].locator.directory_index == at.directory_index);
