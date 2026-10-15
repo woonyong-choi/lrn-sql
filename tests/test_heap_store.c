@@ -1264,6 +1264,17 @@ static bool root_has_magic(fx_t *fx, const char *magic)
     return memcmp(body, magic, 4) == 0;
 }
 
+static uint32_t directory_u32(const uint8_t *bytes)
+{
+    return (uint32_t)bytes[0] | (uint32_t)bytes[1] << 8 |
+           (uint32_t)bytes[2] << 16 | (uint32_t)bytes[3] << 24;
+}
+
+static void directory_put_u32(uint8_t *bytes, uint32_t value)
+{
+    for (unsigned i = 0; i < 4; i++) bytes[i] = (uint8_t)(value >> (i * 8u));
+}
+
 /* #159: 한 행을 바꿔도 바뀐 record page가 속한 잎과 루트만 새로 쓴다. 나머지 잎 페이지 번호는 그대로다. */
 static void test_one_row_change_rewrites_only_its_leaf(void)
 {
@@ -1315,7 +1326,7 @@ static void test_one_row_change_rewrites_only_its_leaf(void)
     CHECK(heap_matches_model(fx.heap), "삭제 뒤 모델과 일치");
     memcpy(before, after, sizeof(before));
 
-    /* 행 삽입(끝에 붙임): 첫 잎은 그대로 */
+    /* best-fit은 끝이 아닌 페이지를 고를 수 있다. 바뀐 잎 하나만 다시 써야 한다. */
     assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
     model_put(TREE_ROWS, 2);
     value_view_t views[COLUMNS];
@@ -1325,7 +1336,9 @@ static void test_one_row_change_rewrites_only_its_leaf(void)
     assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
     heap_batch_free(batch);
     after_count = directory_pages(fx.heap, after, fx.file);
-    CHECK(after_count == 3 && after[0] != before[0] && after[1] == before[1], "삽입 뒤 첫 잎은 같은 페이지를 가리킴");
+    CHECK(after_count == 3 && after[0] != before[0] &&
+          ((after[1] != before[1]) != (after[2] != before[2])),
+          "삽입 뒤 바뀐 잎 하나만 다시 씀");
     fx_reopen(&fx);
     CHECK(heap_matches_model(fx.heap), "삽입 뒤 다시 열어도 일치");
     fx_close(&fx);
@@ -1344,18 +1357,38 @@ static void test_legacy_chain_directory_is_read_and_replaced(void)
     uint32_t tree[MAX_DIRS];
     assert(directory_pages(fx.heap, tree, fx.file) == 3);
 
-    /* 같은 record page를 LHD1 규칙(문서화된 형식)대로 체인 두 장에 다시 적는다 */
+    /* 현재 LHD3의 record page ID를 옛 LHD1 체인으로 다시 적는다. */
     uint32_t chain[2];
-    uint8_t leaf_body[2][PAGE_BODY_BYTES];
+    size_t record_count = heap_record_page_count(fx.heap);
+    uint32_t *record_ids = malloc(record_count * sizeof(*record_ids));
+    assert(record_ids != NULL);
+    size_t copied = 0;
     for (int i = 0; i < 2; i++) {
-        assert(page_file_read(fx.file, tree[1 + i], PAGE_KIND_DIRECTORY, fx.tid, leaf_body[i]) == PAGE_FILE_OK);
+        uint8_t body[PAGE_BODY_BYTES];
+        assert(page_file_read(fx.file, tree[1 + i], PAGE_KIND_DIRECTORY, fx.tid, body) == PAGE_FILE_OK);
+        assert(memcmp(body, HEAP_HINT_DIRECTORY_MAGIC, 4) == 0);
+        uint32_t count = directory_u32(body + 16);
+        for (uint32_t j = 0; j < count; j++)
+            record_ids[copied++] = directory_u32(body + HEAP_DIRECTORY_HEADER_BYTES + (size_t)j * 6u);
         assert(page_file_alloc(fx.file, &chain[i]) == PAGE_FILE_OK);
     }
+    assert(copied == record_count && record_count > HEAP_DIRECTORY_ENTRIES &&
+           record_count <= HEAP_DIRECTORY_ENTRIES * 2u);
     for (int i = 0; i < 2; i++) {
-        uint32_t next = i == 0 ? chain[1] : 0;
-        for (unsigned b = 0; b < 4; b++) leaf_body[i][12 + b] = (uint8_t)(next >> (8 * b));
-        assert(page_file_write(fx.file, chain[i], PAGE_KIND_DIRECTORY, fx.tid, leaf_body[i]) == PAGE_FILE_OK);
+        uint8_t body[PAGE_BODY_BYTES] = {0};
+        size_t first = (size_t)i * HEAP_DIRECTORY_ENTRIES;
+        size_t count = record_count - first;
+        if (count > HEAP_DIRECTORY_ENTRIES) count = HEAP_DIRECTORY_ENTRIES;
+        memcpy(body, HEAP_DIRECTORY_MAGIC, 4);
+        body[4] = HEAP_DIRECTORY_VERSION;
+        directory_put_u32(body + 8, fx.tid);
+        directory_put_u32(body + 12, i == 0 ? chain[1] : 0);
+        directory_put_u32(body + 16, (uint32_t)count);
+        for (size_t j = 0; j < count; j++)
+            directory_put_u32(body + HEAP_DIRECTORY_HEADER_BYTES + j * 4u, record_ids[first + j]);
+        assert(page_file_write(fx.file, chain[i], PAGE_KIND_DIRECTORY, fx.tid, body) == PAGE_FILE_OK);
     }
+    free(record_ids);
     assert(catalog_set_locators(fx.catalog, fx.tid, chain[0], 0) == CATALOG_OK);
     assert(catalog_store_save(fx.file, fx.catalog) == CATALOG_STORE_OK);
     fx_reopen(&fx);
@@ -1385,17 +1418,172 @@ static void test_legacy_chain_directory_is_read_and_replaced(void)
     clean_dir();
 }
 
-/* 잎이 한 장일 때는 옛 형식 그대로 쓴다(트리로 올리지 않음). */
-static void test_single_leaf_heap_keeps_legacy_format(void)
+static void test_legacy_tree_directory_is_read_and_replaced(void)
 {
-    printf("\n[test_single_leaf_heap_keeps_legacy_format]\n");
+    printf("\n[test_legacy_tree_directory_is_read_and_replaced]\n");
+    fx_t fx;
+    fx_create(&fx);
+    model_reset();
+    load_many_pages(&fx, TREE_ROWS);
+    uint32_t current[MAX_DIRS];
+    assert(directory_pages(fx.heap, current, fx.file) == 3);
+    size_t record_count = heap_record_page_count(fx.heap);
+    uint32_t *record_ids = malloc(record_count * sizeof(*record_ids));
+    assert(record_ids != NULL);
+    size_t copied = 0;
+    for (int leaf = 0; leaf < 2; leaf++) {
+        uint8_t body[PAGE_BODY_BYTES];
+        assert(page_file_read(fx.file, current[leaf + 1], PAGE_KIND_DIRECTORY, fx.tid, body) == PAGE_FILE_OK);
+        assert(memcmp(body, HEAP_HINT_DIRECTORY_MAGIC, 4) == 0);
+        uint32_t count = directory_u32(body + 16);
+        for (uint32_t i = 0; i < count; i++)
+            record_ids[copied++] = directory_u32(body + HEAP_DIRECTORY_HEADER_BYTES + (size_t)i * 6u);
+    }
+    assert(copied == record_count && record_count > HEAP_DIRECTORY_ENTRIES &&
+           record_count <= HEAP_DIRECTORY_ENTRIES * 2u);
+    uint32_t legacy_leaves[2], legacy_root;
+    for (int leaf = 0; leaf < 2; leaf++) {
+        uint8_t body[PAGE_BODY_BYTES] = {0};
+        size_t first = (size_t)leaf * HEAP_DIRECTORY_ENTRIES;
+        size_t count = record_count - first;
+        if (count > HEAP_DIRECTORY_ENTRIES) count = HEAP_DIRECTORY_ENTRIES;
+        memcpy(body, HEAP_DIRECTORY_MAGIC, 4);
+        body[4] = HEAP_DIRECTORY_VERSION;
+        directory_put_u32(body + 8, fx.tid);
+        directory_put_u32(body + 16, (uint32_t)count);
+        for (size_t i = 0; i < count; i++)
+            directory_put_u32(body + HEAP_DIRECTORY_HEADER_BYTES + i * 4u, record_ids[first + i]);
+        assert(page_file_alloc(fx.file, &legacy_leaves[leaf]) == PAGE_FILE_OK);
+        assert(page_file_write(fx.file, legacy_leaves[leaf], PAGE_KIND_DIRECTORY, fx.tid, body) == PAGE_FILE_OK);
+    }
+    free(record_ids);
+    uint8_t root_body[PAGE_BODY_BYTES] = {0};
+    memcpy(root_body, HEAP_TREE_ROOT_MAGIC, 4);
+    root_body[4] = HEAP_TREE_ROOT_VERSION;
+    directory_put_u32(root_body + 8, fx.tid);
+    directory_put_u32(root_body + 16, 2);
+    directory_put_u32(root_body + HEAP_DIRECTORY_HEADER_BYTES, legacy_leaves[0]);
+    directory_put_u32(root_body + HEAP_DIRECTORY_HEADER_BYTES + 4u, legacy_leaves[1]);
+    assert(page_file_alloc(fx.file, &legacy_root) == PAGE_FILE_OK);
+    assert(page_file_write(fx.file, legacy_root, PAGE_KIND_DIRECTORY, fx.tid, root_body) == PAGE_FILE_OK);
+    assert(catalog_set_locators(fx.catalog, fx.tid, legacy_root, 0) == CATALOG_OK);
+    assert(catalog_store_save(fx.file, fx.catalog) == CATALOG_STORE_OK);
+    fx_reopen(&fx);
+    CHECK(heap_matches_model(fx.heap), "옛 LHD2/LHD1 트리를 읽음");
+    target_t first[TARGETS], last;
+    find_targets(fx.heap, first, &last);
+    set_targets_model(first, true);
+    heap_batch_t *batch;
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    CHECK(update_targets(batch, first) == HEAP_OK, "옛 트리에서 새 공간 힌트 트리로 변환");
+    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    fx_reopen(&fx);
+    CHECK(heap_matches_model(fx.heap), "옛 트리 변환 뒤 재열기와 모든 행이 일치");
+    fx_close(&fx);
+    model_reset();
+    clean_dir();
+}
+
+/* 잎이 한 장이면 여유 바이트가 저장된 LHD3 페이지 한 장만 쓴다. */
+static void test_single_leaf_heap_keeps_hint_format(void)
+{
+    printf("\n[test_single_leaf_heap_keeps_hint_format]\n");
     fx_t fx;
     fx_create(&fx);
     model_reset();
     load_many_pages(&fx, 400);
     uint32_t dirs[MAX_DIRS];
-    CHECK(directory_pages(fx.heap, dirs, fx.file) == 1 && root_has_magic(&fx, HEAP_DIRECTORY_MAGIC),
-          "항목이 한 장 안이면 LHD1 한 장");
+    CHECK(directory_pages(fx.heap, dirs, fx.file) == 1 && root_has_magic(&fx, HEAP_HINT_DIRECTORY_MAGIC),
+          "항목이 한 장 안이면 LHD3 한 장");
+    fx_close(&fx);
+    model_reset();
+    clean_dir();
+}
+
+static void test_deleted_space_reused_after_reopen(void)
+{
+    printf("\n[test_deleted_space_reused_after_reopen]\n");
+    fx_t fx;
+    fx_create(&fx);
+    model_reset();
+    heap_locator_t old[6];
+    heap_batch_t *batch;
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    for (int id = 0; id < 6; id++) {
+        model_put(id, 4);
+        value_view_t views[COLUMNS];
+        to_views(g_model[id].cells, views);
+        assert(heap_batch_insert(batch, views, COLUMNS, &old[id]) == HEAP_OK);
+    }
+    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    size_t original_pages = heap_record_page_count(fx.heap);
+    CHECK(original_pages >= 3 && old[0].directory_index == 0,
+          "여러 record page에 행을 분산해 빈 공간 재사용 조건 마련");
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    assert(heap_batch_delete(batch, old[0]) == HEAP_OK);
+    clear_row(g_model[0].cells);
+    g_model[0].present = false;
+    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    fx_reopen(&fx);
+    CHECK(root_has_magic(&fx, HEAP_HINT_DIRECTORY_MAGIC), "재시작 뒤에도 LHD3 공간 힌트가 남음");
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    model_put(6, 4);
+    value_view_t views[COLUMNS];
+    to_views(g_model[6].cells, views);
+    heap_locator_t inserted;
+    assert(heap_batch_insert(batch, views, COLUMNS, &inserted) == HEAP_OK);
+    CHECK(inserted.directory_index == old[0].directory_index && inserted.slot != old[0].slot,
+          "앞쪽 페이지의 빈 바이트를 쓰되 삭제된 slot 번호는 재사용하지 않음");
+    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    CHECK(heap_record_page_count(fx.heap) == original_pages, "삭제 뒤 재삽입이 record page를 늘리지 않음");
+    fx_reopen(&fx);
+    CHECK(heap_matches_model(fx.heap), "재열기 뒤 기존 행과 새 행이 일치");
+    fx_close(&fx);
+    model_reset();
+    clean_dir();
+}
+
+static void test_stale_space_hint_is_rechecked(void)
+{
+    printf("\n[test_stale_space_hint_is_rechecked]\n");
+    fx_t fx;
+    fx_create(&fx);
+    model_reset();
+    heap_batch_t *batch;
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    for (int id = 0; id < 6; id++) {
+        model_put(id, 4);
+        value_view_t views[COLUMNS];
+        to_views(g_model[id].cells, views);
+        heap_locator_t locator;
+        assert(heap_batch_insert(batch, views, COLUMNS, &locator) == HEAP_OK);
+    }
+    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    uint32_t root = catalog_heap_root(fx.catalog, fx.tid);
+    uint8_t body[PAGE_BODY_BYTES];
+    assert(page_file_read(fx.file, root, PAGE_KIND_DIRECTORY, fx.tid, body) == PAGE_FILE_OK);
+    assert(memcmp(body, HEAP_HINT_DIRECTORY_MAGIC, 4) == 0);
+    body[HEAP_DIRECTORY_HEADER_BYTES + 4u] = 0xff;
+    body[HEAP_DIRECTORY_HEADER_BYTES + 5u] = 0xff;
+    assert(page_file_write(fx.file, root, PAGE_KIND_DIRECTORY, fx.tid, body) == PAGE_FILE_OK);
+    fx_reopen(&fx);
+    assert(heap_batch_begin(fx.heap, &batch) == HEAP_OK);
+    model_put(6, 4);
+    value_view_t views[COLUMNS];
+    to_views(g_model[6].cells, views);
+    heap_locator_t placed;
+    CHECK(heap_batch_insert(batch, views, COLUMNS, &placed) == HEAP_OK,
+          "실제 페이지가 가득 찼으면 과대한 힌트를 무시하고 다른 페이지를 고름");
+    CHECK(placed.directory_index != 0, "과대한 첫 페이지 힌트를 그대로 믿지 않음");
+    assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
+    heap_batch_free(batch);
+    fx_reopen(&fx);
+    CHECK(heap_matches_model(fx.heap), "낡은 힌트 뒤 재시작에서도 모든 행이 일치");
     fx_close(&fx);
     model_reset();
     clean_dir();
@@ -1530,7 +1718,10 @@ int main(void)
     test_failures_never_change_published_state();
     test_one_row_change_rewrites_only_its_leaf();
     test_legacy_chain_directory_is_read_and_replaced();
-    test_single_leaf_heap_keeps_legacy_format();
+    test_legacy_tree_directory_is_read_and_replaced();
+    test_single_leaf_heap_keeps_hint_format();
+    test_deleted_space_reused_after_reopen();
+    test_stale_space_hint_is_rechecked();
     test_tree_failures_keep_every_leaf_reachable();
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
