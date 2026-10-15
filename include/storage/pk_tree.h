@@ -46,7 +46,8 @@ typedef enum {
     PK_EXISTS,
     PK_CORRUPT,
     PK_IO,    /* io 호출이 실패했다. 원인은 io를 준 쪽이 안다 */
-    PK_NOMEM  /* io 호출이 메모리 부족으로 실패했다 */
+    PK_NOMEM, /* io 호출이 메모리 부족으로 실패했다 */
+    PK_LIMIT  /* 키 또는 트리 깊이의 형식 한계 */
 } pk_status_t;
 
 /* 쓰기 연산이 아닌 조회·순회에는 allocate·release·is_fresh·write가 NULL이어도 된다. */

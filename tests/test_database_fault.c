@@ -292,7 +292,7 @@ static char *select_dump(database_t *db, const char *sql)
 /* 모든 테이블 + 테이블 목록(존재 여부) */
 static char *snapshot(database_t *db)
 {
-    static const char *tables[] = {"users", "logs", "extra"};
+    static const char *tables[] = {"users", "logs", "extra", "text_keys"};
     buffer_t out = {NULL, 0, 0};
     put(&out, "%s", "");
     for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
@@ -309,6 +309,14 @@ static char *snapshot(database_t *db)
         snprintf(sql, sizeof(sql), "SELECT id, name, bio FROM users WHERE id = %d", probes[i]);
         char *dump = select_dump(db, sql);
         put(&out, "k%d=%s;", probes[i], dump);
+        free(dump);
+    }
+    static const char *text_probes[] = {"a", "b", "c", "renamed"};
+    for (size_t i = 0; i < sizeof(text_probes) / sizeof(text_probes[0]); i++) {
+        char sql[96];
+        snprintf(sql, sizeof(sql), "SELECT k, v FROM text_keys WHERE k = '%s'", text_probes[i]);
+        char *dump = select_dump(db, sql);
+        put(&out, "t%s=%s;", text_probes[i], dump);
         free(dump);
     }
     put(&out, "n=%zu", database_table_count(db));
@@ -331,6 +339,9 @@ static void build_baseline(void)
     assert(database_create(DB_PATH, &db) == DATABASE_OK);
     exec_sql(db, "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, bio TEXT)");
     exec_sql(db, "CREATE TABLE logs (ts INTEGER, msg TEXT NOT NULL)");
+    exec_sql(db, "CREATE TABLE text_keys (k TEXT PRIMARY KEY, v TEXT)");
+    exec_sql(db, "INSERT INTO text_keys VALUES ('a', 'first')");
+    exec_sql(db, "INSERT INTO text_keys VALUES ('b', 'second')");
     for (int i = 0; i < 6; i++) {
         char sql[256];
         snprintf(sql, sizeof(sql), "INSERT INTO users (name, bio) VALUES ('user%d', 'bio %d')", i, i);
@@ -361,6 +372,10 @@ static const statement_case_t CASES[] = {
     {"update key", "UPDATE users SET id = 40 WHERE id = 2", false},
     {"update by key big", "UPDATE users SET bio = ? WHERE id = 3", true},
     {"delete last key", "DELETE FROM users WHERE id = 6", false},
+    {"insert text key", "INSERT INTO text_keys VALUES ('c', 'third')", false},
+    {"update text key", "UPDATE text_keys SET k = 'renamed' WHERE k = 'a'", false},
+    {"update text value", "UPDATE text_keys SET v = 'changed' WHERE k = 'a'", false},
+    {"delete text key", "DELETE FROM text_keys WHERE k = 'b'", false},
     {"drop indexed", "DROP TABLE users", false},
 };
 
