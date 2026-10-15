@@ -143,6 +143,12 @@ typedef struct {
     heap_stats_t *stats;  /* NULL이면 세지 않는다 */
 } heap_index_spec_t;
 
+typedef struct {
+    uint16_t column;
+    bool unique;
+    uint32_t root;
+} heap_secondary_spec_t;
+
 /*
  * 커밋된 상태를 연다. 디렉터리 페이지를 모두 읽어 검증한다(record page 자체는 읽을 때 종류와
  * table ID를 검증한다). 실패하면 *out은 NULL이고 파일은 바뀌지 않는다. 호출자는 file을
@@ -179,6 +185,10 @@ bool heap_is_indexed(const heap_t *heap);
 heap_status_t heap_find_key(heap_t *heap, int64_t key, heap_locator_t *locator);
 heap_status_t heap_find_text_key(heap_t *heap, const uint8_t *key, size_t key_bytes,
                                  heap_locator_t *locator);
+bool heap_secondary_key_fits(const value_view_t *value);
+heap_status_t heap_secondary_visit_equal(heap_t *heap, heap_secondary_spec_t spec,
+                                         const value_view_t *value,
+                                         bool (*visit)(void *context, heap_locator_t locator), void *context);
 /* 색인에 있는 가장 큰 키. 비어 있으면 *present가 false다. */
 heap_status_t heap_max_key(heap_t *heap, bool *present, int64_t *key);
 void heap_release_row(const heap_t *heap, value_t *row);
@@ -210,9 +220,18 @@ void heap_cursor_close(heap_cursor_t *cursor);
  * 성공한 *pages는 호출자가 free하며, 게시 성공 뒤에 page_file_release한다.
  */
 heap_status_t heap_collect_pages(heap_t *heap, uint32_t **pages, size_t *count);
+heap_status_t heap_collect_pages_with_indexes(heap_t *heap, const uint32_t *roots, size_t root_count,
+                                              uint32_t **pages, size_t *count);
 
 /* batch. heap_t가 batch보다 오래 살아야 한다. */
 heap_status_t heap_batch_begin(heap_t *heap, heap_batch_t **out);
+heap_status_t heap_batch_configure_secondary(heap_batch_t *batch, const heap_secondary_spec_t *specs,
+                                             size_t count);
+heap_status_t heap_batch_secondary_insert(heap_batch_t *batch, const value_view_t *values,
+                                          size_t count, heap_locator_t locator);
+heap_status_t heap_batch_secondary_remove(heap_batch_t *batch, const value_view_t *values,
+                                          size_t count, heap_locator_t locator);
+heap_status_t heap_batch_secondary_build(heap_batch_t *batch, size_t index, heap_t *source);
 /* 실패한 연산 뒤 batch는 HEAP_BATCH_FAILED를 돌려주고 abort·free만 한다(INVALID·NOT_FOUND 제외). */
 heap_status_t heap_batch_insert(heap_batch_t *batch, const value_view_t *values, size_t count,
                                 heap_locator_t *locator);
@@ -235,6 +254,8 @@ typedef struct {
     const uint32_t *new_pages;   /* 이번 batch가 할당해 살아 있는 페이지(색인 페이지 포함) */
     size_t new_count;
     uint32_t new_primary_root;   /* 새 색인 root. 색인을 쓰지 않으면 열 때의 index_root 그대로 */
+    const uint32_t *new_secondary_roots; /* batch가 소유하는 array. free 전까지 유효 */
+    size_t secondary_count;
 } heap_batch_result_t;
 
 /*

@@ -319,6 +319,21 @@ static char *snapshot(database_t *db)
         put(&out, "t%s=%s;", text_probes[i], dump);
         free(dump);
     }
+    static const char *name_probes[] = {"user0", "user2", "user5", "zed"};
+    for (size_t i = 0; i < sizeof(name_probes) / sizeof(name_probes[0]); i++) {
+        char sql[96];
+        snprintf(sql, sizeof(sql), "SELECT id, name FROM users WHERE name = '%s'", name_probes[i]);
+        char *dump = select_dump(db, sql);
+        put(&out, "s%s=%s;", name_probes[i], dump);
+        free(dump);
+    }
+    database_scan_stats_t scan_before, scan_after;
+    database_scan_stats(db, &scan_before);
+    char *log_lookup = select_dump(db, "SELECT ts FROM logs WHERE msg = 'log 0'");
+    database_scan_stats(db, &scan_after);
+    put(&out, "log_index=%u:%s;", scan_after.index_lookups > scan_before.index_lookups,
+        log_lookup);
+    free(log_lookup);
     put(&out, "n=%zu", database_table_count(db));
     return out.text;
 }
@@ -349,6 +364,7 @@ static void build_baseline(void)
         snprintf(sql, sizeof(sql), "INSERT INTO logs VALUES (%d, 'log %d')", i, i);
         exec_sql(db, sql);
     }
+    exec_sql(db, "CREATE INDEX by_user_name ON users (name)");
     assert(database_close(db) == DATABASE_OK);
 }
 
@@ -376,6 +392,7 @@ static const statement_case_t CASES[] = {
     {"update text key", "UPDATE text_keys SET k = 'renamed' WHERE k = 'a'", false},
     {"update text value", "UPDATE text_keys SET v = 'changed' WHERE k = 'a'", false},
     {"delete text key", "DELETE FROM text_keys WHERE k = 'b'", false},
+    {"build secondary index", "CREATE INDEX by_log_msg ON logs (msg)", false},
     {"drop indexed", "DROP TABLE users", false},
 };
 

@@ -4,10 +4,12 @@
 #include "storage/catalog.h"
 
 #define FORMAT_VERSION 1u
+#define INDEX_FORMAT_VERSION 2u
 #define HEADER_BYTES 28u
 #define CHECKSUM_BYTES 4u
 #define TABLE_FIXED_BYTES 35u
 #define COLUMN_FIXED_BYTES 4u
+#define INDEX_FIXED_BYTES 13u
 #define MIN_TABLE_BYTES (TABLE_FIXED_BYTES + 1u + COLUMN_FIXED_BYTES + 1u)
 #define IDENTITY_END ((uint64_t)INT64_MAX + 1u)
 #define FLAG_IDENTITY 1u
@@ -28,10 +30,22 @@ typedef struct {
     size_t encoded_bytes;
 } table_t;
 
+typedef struct {
+    char *name;
+    size_t name_bytes;
+    catalog_table_id_t table_id;
+    uint16_t column;
+    bool unique;
+    uint32_t root;
+} index_t;
+
 struct catalog {
     table_t *tables;
     size_t count;
     size_t capacity;
+    index_t *indexes;
+    size_t index_count;
+    size_t index_capacity;
     uint32_t next_table_id;
     uint64_t generation;
     size_t encoded_bytes;  /* 지금 encode하면 나올 바이트 수 */
@@ -180,6 +194,8 @@ void catalog_close(catalog_t *catalog)
 {
     if (catalog == NULL) return;
     for (size_t i = 0; i < catalog->count; i++) release_table(&catalog->tables[i]);
+    for (size_t i = 0; i < catalog->index_count; i++) free(catalog->indexes[i].name);
+    free(catalog->indexes);
     free(catalog->tables);
     free(catalog);
 }
@@ -294,6 +310,19 @@ catalog_status_t catalog_drop_table(catalog_t *catalog, catalog_table_id_t id)
     if (status != CATALOG_OK) return status;
     size_t index = (size_t)(table - catalog->tables);
     catalog->encoded_bytes -= table->encoded_bytes;
+    bool had_indexes = catalog->index_count > 0;
+    for (size_t i = 0; i < catalog->index_count;) {
+        if (catalog->indexes[i].table_id != id) {
+            i++;
+            continue;
+        }
+        catalog->encoded_bytes -= INDEX_FIXED_BYTES + catalog->indexes[i].name_bytes;
+        free(catalog->indexes[i].name);
+        memmove(&catalog->indexes[i], &catalog->indexes[i + 1],
+                (catalog->index_count - i - 1) * sizeof(*catalog->indexes));
+        catalog->index_count--;
+    }
+    if (had_indexes && catalog->index_count == 0) catalog->encoded_bytes -= 4u;
     release_table(table);
     memmove(table, table + 1, (catalog->count - index - 1) * sizeof(*table));
     catalog->count--;
@@ -360,6 +389,87 @@ catalog_status_t catalog_set_locators(catalog_t *catalog, catalog_table_id_t id,
     table->primary_root = primary_root;
     catalog->generation++;
     return CATALOG_OK;
+}
+
+static index_t *find_index(catalog_t *catalog, const char *name, size_t name_bytes)
+{
+    for (size_t i = 0; i < catalog->index_count; i++) {
+        index_t *index = &catalog->indexes[i];
+        if (index->name_bytes == name_bytes && memcmp(index->name, name, name_bytes) == 0) return index;
+    }
+    return NULL;
+}
+
+catalog_status_t catalog_add_index(catalog_t *catalog, catalog_table_id_t table_id,
+                                   const char *name, size_t name_bytes, uint16_t column,
+                                   bool unique)
+{
+    if (catalog == NULL || !name_valid(name, name_bytes)) return CATALOG_INVALID;
+    const table_t *table = find_by_id(catalog, table_id);
+    if (table == NULL) return CATALOG_NOT_FOUND;
+    if (column >= table->column_count) return CATALOG_INVALID;
+    if (find_index(catalog, name, name_bytes) != NULL || find_by_name(catalog, name, name_bytes) != NULL) {
+        return CATALOG_EXISTS;
+    }
+    if (catalog->index_count == CATALOG_MAX_INDEXES) return CATALOG_LIMIT;
+    size_t extra = INDEX_FIXED_BYTES + name_bytes + (catalog->index_count == 0 ? 4u : 0u);
+    if (extra > CATALOG_MAX_ENCODED_BYTES - catalog->encoded_bytes) return CATALOG_LIMIT;
+    catalog_status_t status = check_can_mutate(catalog);
+    if (status != CATALOG_OK) return status;
+    char *copied = malloc(name_bytes);
+    if (copied == NULL) return CATALOG_NOMEM;
+    if (catalog->index_count == catalog->index_capacity) {
+        size_t capacity = catalog->index_capacity == 0 ? 4 : catalog->index_capacity * 2;
+        index_t *grown = realloc(catalog->indexes, capacity * sizeof(*grown));
+        if (grown == NULL) {
+            free(copied);
+            return CATALOG_NOMEM;
+        }
+        catalog->indexes = grown;
+        catalog->index_capacity = capacity;
+    }
+    memcpy(copied, name, name_bytes);
+    catalog->indexes[catalog->index_count++] =
+        (index_t){copied, name_bytes, table_id, column, unique, CATALOG_NO_PAGE};
+    catalog->encoded_bytes += extra;
+    catalog->generation++;
+    return CATALOG_OK;
+}
+
+catalog_status_t catalog_set_index_root(catalog_t *catalog, const char *name, size_t name_bytes,
+                                        uint32_t root)
+{
+    if (catalog == NULL || name == NULL) return CATALOG_INVALID;
+    index_t *index = find_index(catalog, name, name_bytes);
+    if (index == NULL) return CATALOG_NOT_FOUND;
+    catalog_status_t status = check_can_mutate(catalog);
+    if (status != CATALOG_OK) return status;
+    index->root = root;
+    catalog->generation++;
+    return CATALOG_OK;
+}
+
+size_t catalog_index_count(const catalog_t *catalog, catalog_table_id_t table_id)
+{
+    if (catalog == NULL) return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < catalog->index_count; i++) count += catalog->indexes[i].table_id == table_id;
+    return count;
+}
+
+catalog_status_t catalog_index_at(const catalog_t *catalog, catalog_table_id_t table_id,
+                                  size_t position, catalog_index_view_t *view)
+{
+    if (catalog == NULL || view == NULL) return CATALOG_INVALID;
+    for (size_t i = 0; i < catalog->index_count; i++) {
+        const index_t *index = &catalog->indexes[i];
+        if (index->table_id != table_id) continue;
+        if (position-- > 0) continue;
+        *view = (catalog_index_view_t){index->name, index->name_bytes, index->table_id,
+                                       index->column, index->unique, index->root};
+        return CATALOG_OK;
+    }
+    return CATALOG_NOT_FOUND;
 }
 
 catalog_status_t catalog_reserve_identity(catalog_t *catalog, catalog_table_id_t id,
@@ -436,7 +546,7 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
     uint8_t *buffer = malloc(total);
     if (buffer == NULL) return CATALOG_NOMEM;
     memcpy(buffer, "LRCT", 4);
-    put_u16(buffer + 4, FORMAT_VERSION);
+    put_u16(buffer + 4, catalog->index_count > 0 ? INDEX_FORMAT_VERSION : FORMAT_VERSION);
     put_u16(buffer + 6, 0);
     put_u32(buffer + 8, (uint32_t)total);
     put_u64(buffer + 12, catalog->generation);
@@ -444,6 +554,20 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
     put_u32(buffer + 24, (uint32_t)catalog->count);
     uint8_t *at = buffer + HEADER_BYTES;
     for (size_t i = 0; i < catalog->count; i++) at = encode_table(at, &catalog->tables[i]);
+    if (catalog->index_count > 0) {
+        put_u32(at, (uint32_t)catalog->index_count);
+        at += 4;
+        for (size_t i = 0; i < catalog->index_count; i++) {
+            const index_t *index = &catalog->indexes[i];
+            put_u32(at, index->table_id);
+            put_u16(at + 4, index->column);
+            put_u16(at + 6, (uint16_t)index->name_bytes);
+            at[8] = index->unique ? 1 : 0;
+            put_u32(at + 9, index->root);
+            memcpy(at + INDEX_FIXED_BYTES, index->name, index->name_bytes);
+            at += INDEX_FIXED_BYTES + index->name_bytes;
+        }
+    }
     put_u32(at, checksum(buffer, (size_t)(at - buffer)));
     *bytes = buffer;
     *size = total;
@@ -556,7 +680,8 @@ static catalog_status_t check_envelope(const uint8_t *bytes, size_t size)
     if (size < HEADER_BYTES + CHECKSUM_BYTES) return CATALOG_CORRUPT;
     if (size > CATALOG_MAX_ENCODED_BYTES) return CATALOG_LIMIT;
     if (memcmp(bytes, "LRCT", 4) != 0) return CATALOG_CORRUPT;
-    if (get_le(bytes + 4, 2) != FORMAT_VERSION) return CATALOG_UNSUPPORTED;
+    uint64_t version = get_le(bytes + 4, 2);
+    if (version != FORMAT_VERSION && version != INDEX_FORMAT_VERSION) return CATALOG_UNSUPPORTED;
     if (get_le(bytes + 6, 2) != 0) return CATALOG_CORRUPT;
     if (get_le(bytes + 8, 4) != size) return CATALOG_CORRUPT;
     if (get_le(bytes + size - CHECKSUM_BYTES, 4) != checksum(bytes, size - CHECKSUM_BYTES)) {
@@ -576,7 +701,7 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
     catalog_t *catalog;
     status = catalog_open_empty(&catalog);
     if (status != CATALOG_OK) return status;
-    catalog->generation = get_le(bytes + 12, 8);
+    catalog->generation = 0;
     catalog->next_table_id = (uint32_t)get_le(bytes + 20, 4);
     if (catalog->next_table_id == CATALOG_NO_TABLE) status = CATALOG_CORRUPT;
     if (status == CATALOG_OK && table_count > 0) {
@@ -588,9 +713,37 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
     for (size_t i = 0; i < table_count && status == CATALOG_OK; i++) {
         status = read_table(&reader, catalog);
     }
+    if (status == CATALOG_OK && get_le(bytes + 4, 2) == INDEX_FORMAT_VERSION) {
+        const uint8_t *count_bytes;
+        if (!take(&reader, 4u, &count_bytes)) status = CATALOG_CORRUPT;
+        else {
+            size_t index_count = (size_t)get_le(count_bytes, 4);
+            if (index_count == 0 || index_count > CATALOG_MAX_INDEXES ||
+                index_count > reader.left / (INDEX_FIXED_BYTES + 1u)) status = CATALOG_CORRUPT;
+            for (size_t i = 0; i < index_count && status == CATALOG_OK; i++) {
+                const uint8_t *fixed, *name;
+                if (!take(&reader, INDEX_FIXED_BYTES, &fixed)) {
+                    status = CATALOG_CORRUPT;
+                    break;
+                }
+                size_t name_bytes = (size_t)get_le(fixed + 6, 2);
+                if (fixed[8] > 1 || !take(&reader, name_bytes, &name)) {
+                    status = CATALOG_CORRUPT;
+                    break;
+                }
+                status = catalog_add_index(catalog, (catalog_table_id_t)get_le(fixed, 4),
+                                           (const char *)name, name_bytes,
+                                           (uint16_t)get_le(fixed + 4, 2), fixed[8] == 1);
+                if (status == CATALOG_OK) {
+                    catalog->indexes[catalog->index_count - 1].root = (uint32_t)get_le(fixed + 9, 4);
+                } else if (status != CATALOG_NOMEM) status = CATALOG_CORRUPT;
+            }
+        }
+    }
     if (status == CATALOG_OK && (reader.left != 0 || catalog->encoded_bytes != size)) {
         status = CATALOG_CORRUPT;
     }
+    if (status == CATALOG_OK) catalog->generation = get_le(bytes + 12, 8);
     if (status == CATALOG_OK) status = check_table_names_unique(catalog);
     if (status != CATALOG_OK) {
         catalog_close(catalog);
@@ -612,6 +765,8 @@ size_t catalog_memory_bytes(const catalog_t *catalog)
     if (catalog == NULL) return 0;
     size_t total = sizeof(*catalog) + catalog->capacity * sizeof(table_t);
     for (size_t i = 0; i < catalog->count; i++) total += table_memory_bytes(&catalog->tables[i]);
+    total += catalog->index_capacity * sizeof(index_t);
+    for (size_t i = 0; i < catalog->index_count; i++) total += catalog->indexes[i].name_bytes;
     return total;
 }
 
@@ -624,6 +779,10 @@ size_t catalog_clone_peak_bytes(const catalog_t *catalog)
         decoded += table_memory_bytes(&catalog->tables[i]);
         if (catalog->tables[i].column_count > widest) widest = catalog->tables[i].column_count;
     }
+    decoded += catalog->index_capacity * sizeof(index_t);
+    /* 복제 중 realloc은 이전 배열과 새 배열이 동시에 살아 있을 수 있다. */
+    if (catalog->index_capacity > 4) decoded += (catalog->index_capacity / 2u) * sizeof(index_t);
+    for (size_t i = 0; i < catalog->index_count; i++) decoded += catalog->indexes[i].name_bytes;
     /* read_table의 임시 spec 배열과 이름 검사 refs, 마지막의 테이블 이름 refs */
     size_t per_table = widest * (sizeof(catalog_column_spec_t) + sizeof(name_ref_t));
     size_t names = catalog->count * sizeof(name_ref_t);
@@ -644,6 +803,17 @@ size_t catalog_create_peak_bytes(const catalog_t *catalog, size_t column_count, 
     return refs + built + grow;
 }
 
+size_t catalog_add_index_peak_bytes(const catalog_t *catalog, size_t name_bytes)
+{
+    if (catalog == NULL) return 0;
+    size_t grow = 0;
+    if (catalog->index_count == catalog->index_capacity) {
+        size_t next = catalog->index_capacity == 0 ? 4 : catalog->index_capacity * 2;
+        grow = (catalog->index_capacity + next) * sizeof(index_t);
+    }
+    return name_bytes + grow;
+}
+
 size_t catalog_encoded_bytes(const catalog_t *catalog)
 {
     return catalog == NULL ? 0 : catalog->encoded_bytes;
@@ -655,6 +825,9 @@ size_t catalog_decode_peak_bytes(size_t encoded_bytes)
     size_t columns = encoded_bytes / (COLUMN_FIXED_BYTES + 1u);
     size_t memory = sizeof(catalog_t) + tables * sizeof(table_t) + encoded_bytes +
                     columns * sizeof(catalog_column_t);
+    size_t indexes = encoded_bytes / (INDEX_FIXED_BYTES + 1u);
+    if (indexes > CATALOG_MAX_INDEXES) indexes = CATALOG_MAX_INDEXES;
+    memory += indexes * sizeof(index_t) * 3u + encoded_bytes;
     size_t scratch = columns * (sizeof(catalog_column_spec_t) + sizeof(name_ref_t)) +
                      tables * sizeof(name_ref_t);
     return memory + scratch;

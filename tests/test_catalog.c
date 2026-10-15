@@ -451,7 +451,8 @@ static void semantic_corruption_is_rejected(void)
     snapshot_t shot = snapshot(catalog);
     assert(shot.size == 79);
     const tamper_t cases[] = {
-        {4, 2, 2, CATALOG_UNSUPPORTED}, {4, 2, 0, CATALOG_UNSUPPORTED}, {6, 2, 1, CATALOG_CORRUPT},
+        {4, 2, 2, CATALOG_CORRUPT}, {4, 2, 3, CATALOG_UNSUPPORTED},
+        {4, 2, 0, CATALOG_UNSUPPORTED}, {6, 2, 1, CATALOG_CORRUPT},
         {0, 1, 'X', CATALOG_CORRUPT}, {8, 4, 78, CATALOG_CORRUPT}, {8, 4, 80, CATALOG_CORRUPT},
         {20, 4, 0, CATALOG_CORRUPT}, {20, 4, 1, CATALOG_CORRUPT},
         {24, 4, 0, CATALOG_CORRUPT}, {24, 4, 2, CATALOG_CORRUPT}, {24, 4, 0xffffffffu, CATALOG_CORRUPT},
@@ -551,6 +552,47 @@ static void encoded_size_cap_is_enforced(void)
     catalog_close(catalog);
 }
 
+/* #65: v1 테이블 파일을 읽은 뒤 보조 색인 메타데이터를 v2로 게시하고 다시 읽는다. */
+static void index_metadata_survives_restart(void)
+{
+    catalog_t *catalog;
+    assert(catalog_open_empty(&catalog) == CATALOG_OK);
+    catalog_table_id_t users = create_users(catalog);
+    catalog_table_id_t orders = create_orders(catalog);
+    snapshot_t legacy = snapshot(catalog);
+    catalog_t *upgraded;
+    assert(catalog_decode(legacy.bytes, legacy.size, &upgraded) == CATALOG_OK);
+    free(legacy.bytes);
+    catalog_close(catalog);
+
+    assert(catalog_add_index(upgraded, users, "by_name", 7, 1, false) == CATALOG_OK);
+    assert(catalog_add_index(upgraded, orders, "order_name", 10, 1, true) == CATALOG_OK);
+    assert(catalog_add_index(upgraded, users, "by_name", 7, 1, false) == CATALOG_EXISTS);
+    assert(catalog_set_index_root(upgraded, "by_name", 7, 123) == CATALOG_OK);
+    assert(catalog_set_index_root(upgraded, "order_name", 10, 456) == CATALOG_OK);
+    snapshot_t indexed = snapshot(upgraded);
+    assert(indexed.bytes[4] == 2 && catalog_encoded_bytes(upgraded) == indexed.size);
+    catalog_t *reopened;
+    assert(catalog_decode(indexed.bytes, indexed.size, &reopened) == CATALOG_OK);
+    assert(catalog_index_count(reopened, users) == 1);
+    assert(catalog_index_count(reopened, orders) == 1);
+    catalog_index_view_t view;
+    assert(catalog_index_at(reopened, users, 0, &view) == CATALOG_OK);
+    assert(view.column == 1 && !view.unique && view.root == 123);
+    assert(catalog_index_at(reopened, orders, 0, &view) == CATALOG_OK);
+    assert(view.unique && view.root == 456);
+    assert_same(reopened, &indexed);
+    assert(catalog_drop_table(reopened, users) == CATALOG_OK);
+    assert(catalog_index_count(reopened, users) == 0);
+    assert(catalog_drop_table(reopened, orders) == CATALOG_OK);
+    snapshot_t empty = snapshot(reopened);
+    assert(empty.bytes[4] == 1 && empty.size == 32);
+    free(empty.bytes);
+    free(indexed.bytes);
+    catalog_close(reopened);
+    catalog_close(upgraded);
+}
+
 int main(void)
 {
     tables_are_independent();
@@ -564,6 +606,7 @@ int main(void)
     semantic_corruption_is_rejected();
     decode_argument_and_size_limits();
     encoded_size_cap_is_enforced();
+    index_metadata_survives_restart();
     puts("catalog: independent tables, stable IDs, preserved failures, strict encode/decode");
     return 0;
 }

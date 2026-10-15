@@ -25,6 +25,7 @@ typedef uint32_t catalog_table_id_t;
 #define CATALOG_NAME_MAX_BYTES 255u
 /* record codec의 필드 수 한계와 같은 값이다. */
 #define CATALOG_MAX_COLUMNS 1024u
+#define CATALOG_MAX_INDEXES 64u
 /* encode 결과와 decode 입력의 최대 바이트. 이를 넘는 카탈로그는 만들 수 없다. */
 #define CATALOG_MAX_ENCODED_BYTES (16u * 1024u * 1024u)
 
@@ -71,6 +72,16 @@ typedef struct {
     value_type_t type;
     bool not_null;
 } catalog_column_t;
+
+/* 이름은 catalog가 소유하며 다음 변경 전까지만 유효하다. */
+typedef struct {
+    const char *name;
+    size_t name_bytes;
+    catalog_table_id_t table_id;
+    uint16_t column;
+    bool unique;
+    uint32_t root;
+} catalog_index_view_t;
 
 /* describe 결과. 다음 변경 전까지만 유효한 빌림 값이다. */
 typedef struct {
@@ -126,6 +137,14 @@ catalog_status_t catalog_set_row_count(catalog_t *catalog, catalog_table_id_t id
                                        uint64_t row_count);
 catalog_status_t catalog_set_locators(catalog_t *catalog, catalog_table_id_t id,
                                       uint32_t heap_root, uint32_t primary_root);
+catalog_status_t catalog_add_index(catalog_t *catalog, catalog_table_id_t table_id,
+                                   const char *name, size_t name_bytes, uint16_t column,
+                                   bool unique);
+catalog_status_t catalog_set_index_root(catalog_t *catalog, const char *name, size_t name_bytes,
+                                        uint32_t root);
+size_t catalog_index_count(const catalog_t *catalog, catalog_table_id_t table_id);
+catalog_status_t catalog_index_at(const catalog_t *catalog, catalog_table_id_t table_id,
+                                  size_t index, catalog_index_view_t *view);
 /* identity가 있는 테이블의 다음 값을 돌려주고 카운터를 올린다. INT64_MAX를 넘으면 CATALOG_LIMIT. */
 catalog_status_t catalog_reserve_identity(catalog_t *catalog, catalog_table_id_t id,
                                           uint64_t *value);
@@ -161,5 +180,6 @@ size_t catalog_encoded_bytes(const catalog_t *catalog);
 size_t catalog_decode_peak_bytes(size_t encoded_bytes);
 size_t catalog_clone_peak_bytes(const catalog_t *catalog);
 size_t catalog_create_peak_bytes(const catalog_t *catalog, size_t column_count, size_t names_bytes);
+size_t catalog_add_index_peak_bytes(const catalog_t *catalog, size_t name_bytes);
 
 #endif
