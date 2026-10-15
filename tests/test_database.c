@@ -26,16 +26,19 @@ static int g_run = 0;
 static int g_fail = 0;
 static page_file_io_t g_page_io;
 static size_t g_page_reads;
+static bool g_fail_overflow_read;
 
 typedef struct {
     size_t used;
     size_t peak;
+    size_t limit;
 } projection_memory_t;
 
 static bool reserve_projection_memory(void *ctx, mem_scope_t scope, size_t bytes)
 {
     (void)scope;
     projection_memory_t *memory = ctx;
+    if (memory->limit != 0 && bytes > memory->limit - memory->used) return false;
     memory->used += bytes;
     if (memory->used > memory->peak) memory->peak = memory->used;
     return true;
@@ -55,7 +58,15 @@ static const mem_ledger_ops_t PROJECTION_MEMORY = {
 static ssize_t count_page_read(int fd, void *buf, size_t size, off_t offset)
 {
     g_page_reads++;
-    return g_page_io.pread(fd, buf, size, offset);
+    ssize_t read = g_page_io.pread(fd, buf, size, offset);
+    if (g_fail_overflow_read && read == PAGE_FILE_PAGE_BYTES && offset >= 2 * PAGE_FILE_PAGE_BYTES) {
+        const uint8_t *page = buf;
+        if (page[6] == PAGE_KIND_OVERFLOW && page[7] == 0) {
+            errno = EIO;
+            return -1;
+        }
+    }
+    return read;
 }
 
 #define CHECK(cond, ...)                                  \
@@ -664,6 +675,30 @@ static void test_projected_overflow_reads(void)
     CHECK(memory.peak > id_peak, "투영별 요청 메모리: id %zu, payload %zu", id_peak,
           memory.peak);
     printf("  accounted peak bytes: id %zu, payload %zu\n", id_peak, memory.peak);
+    memory.limit = id_peak + (memory.peak - id_peak) / 2;
+    measured = NULL;
+    CHECK(database_exec_ex(db, &options, (const uint8_t *)id_sql, strlen(id_sql), NULL,
+                           &measured) == DATABASE_EXEC_OK && measured != NULL &&
+              result_kind(measured) == RESULT_KIND_ROWS, "중간 예산의 id 조회 성공");
+    result_release(&measured);
+    database_exec_status_t limited = database_exec_ex(db, &options, (const uint8_t *)payload_sql,
+                                                       strlen(payload_sql), NULL, &measured);
+    CHECK(limited == DATABASE_EXEC_NOMEM ||
+          (limited == DATABASE_EXEC_OK && measured != NULL && result_kind(measured) == RESULT_KIND_ERROR),
+          "중간 예산의 payload 조회 거절");
+    result_release(&measured);
+    CHECK(memory.used == 0, "예산 거절 뒤 메모리 장부 정리");
+    CHECK(database_exec_ex(db, &options, (const uint8_t *)id_sql, strlen(id_sql), NULL,
+                           &measured) == DATABASE_EXEC_OK && measured != NULL &&
+              result_kind(measured) == RESULT_KIND_ROWS, "예산 거절 뒤 다음 질의 성공");
+    result_release(&measured);
+    memory.limit = 0;
+
+    g_fail_overflow_read = true;
+    expect_text(db, "SELECT id FROM items WHERE id = 1", "[1] 1");
+    expect_class(db, "SELECT payload FROM items WHERE id = 1", RESULT_E_IO);
+    g_fail_overflow_read = false;
+    expect_text(db, "SELECT id FROM items WHERE id = 1", "[1] 1");
 
     assert(database_close(db) == DATABASE_OK);
     page_file_set_default_io(NULL);
