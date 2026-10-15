@@ -593,6 +593,8 @@ def main() -> int:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--analyze", action="store_true")
+    parser.add_argument("--sizes", type=int, nargs="+")
+    parser.add_argument("--load-timeout-seconds", type=float)
     args = parser.parse_args()
     if args.analyze:
         print(
@@ -602,6 +604,14 @@ def main() -> int:
         )
         return 0
     config = json.loads(CONFIG.read_text())
+    if args.sizes is not None:
+        if any(size <= 0 for size in args.sizes):
+            parser.error("--sizes requires positive row counts")
+        config["sizes"] = args.sizes
+    if args.load_timeout_seconds is not None:
+        if args.load_timeout_seconds <= 0:
+            parser.error("--load-timeout-seconds requires a positive value")
+        config["load_timeout_seconds"] = args.load_timeout_seconds
     config["run_id"] = time.time_ns()
     _self_check()
     _build(config)
