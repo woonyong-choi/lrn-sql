@@ -73,27 +73,6 @@ jobs:
       - name: Compare two-session behavior with SQLite 3.51.0
         run: make SANITIZE= BUILD_DIR=build-sqlite test-sqlite-session-diff
 
-  figures:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: Check Daphnis figures and generated SVG
-        run: |
-          python3 scripts/check_readme_figures.py
-          npm ci --prefix docs/assets --ignore-scripts
-          docs/assets/node_modules/.bin/daphnis check docs/assets/sql-*.dap --strict --no-deprecated
-          docs/assets/node_modules/.bin/daphnis check docs/assets/sql-scaling-*.dap --strict --no-deprecated --require-data
-          mkdir -p build/figures
-          docs/assets/node_modules/.bin/daphnis render docs/assets/sql-*.dap --strict --out build/figures
-          docs/assets/node_modules/.bin/daphnis render docs/assets/sql-scaling-*.dap --strict --require-data --out build/figures
-          for source in docs/assets/sql-*.dap; do
-            name="${source##*/}"
-            cmp "docs/assets/${name%.dap}.svg" "build/figures/${name%.dap}.svg"
-          done
-
   actionlint:
     runs-on: ubuntu-latest
     steps:

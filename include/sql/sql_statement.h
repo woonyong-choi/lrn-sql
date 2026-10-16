@@ -10,8 +10,7 @@
 
 /*
  * lexer 토큰 위에서 동작하는 SQL 문 parser. lexer_statement_t 하나를 받아 문 구조(sqlstmt_t)를
- * 만든다. 기존 legacy parser(parser.h)와 statement_t는 건드리지 않으며 이 모듈은 그것들과
- * 이름도 상태도 공유하지 않는다. 한 번의 호출은 문장 하나만 다루며 입력에 문장이 몇 개인지,
+ * 만든다. 한 번의 호출은 문장 하나만 다루며 입력에 문장이 몇 개인지,
  * 어느 문장을 실행할지는 호출자(database)가 정한다.
  *
  * 문법(키워드는 대소문자를 구분하지 않고 식별자는 바이트 단위로 대소문자를 구분한다):
@@ -67,7 +66,7 @@
  * INTERSECT와 UNION·EXCEPT를 괄호 없이 섞기, EXCEPT ALL·INTERSECT ALL, 집합 연산 자리의 괄호 SELECT,
  * WITH RECURSIVE, SELECT가 아닌 문장 앞의 WITH, 창 함수, INSERT ... SELECT,
  * CREATE TABLE ... AS,
- * IF [NOT] EXISTS, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중 PRIMARY KEY 외의 것,
+ * IF [NOT] EXISTS, 컬럼 제약 UNIQUE·CHECK·REFERENCES 등, 테이블 제약 중 PRIMARY KEY 외의 것,
  * 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE, 테이블 이름의 한정(schema.table).
  *
  * 소유권: 성공한 sqlstmt_t의 모든 이름·값은 이 구조가 복사해 소유하며 입력 SQL과 binding이

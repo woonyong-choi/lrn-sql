@@ -5,8 +5,8 @@
  * 문자 수가 다른 한글(3바이트)·이모지(4바이트)·내장 NUL·빈 문자열·잘못된 UTF-8을 함께 본다. 검사 함수는
  * 값을 바꾸지 않고 할당하지 않는다.
  *
- * 범위: value 계층의 독립 계약이다. 실제 DB 저장 경로(parser·executor·schema·database)는 이 파일이 검사하지
- * 않는다. 그 경로의 현재 동작과 수정 위치는 PR 본문에 따로 기록했다.
+ * 범위: value 계층의 독립 계약이다. 실제 DB 저장 경로(sql_statement·database·heap_store)는 이 파일이
+ * 검사하지 않는다.
  *
  * 빌드(value.c만 malloc을 훅으로 바꿔 컴파일한다. 훅이 적용되지 않으면 무할당 검사가 처음에 실패한다):
  *   cc -Wall -Wextra -Werror -g -std=c11 -Iinclude -Dmalloc=value_test_malloc -c src/storage/value.c -o build/value_hooked.o
@@ -190,7 +190,7 @@ static void test_no_mutation_no_allocation(void)
 
 /*
  * 저장 왕복: 경계 값의 바이트를 길이와 함께 파일에 쓰고 처음부터 다시 읽어 같은 판정이 나오는지 본다.
- * 같은 프로세스의 파일 왕복이며 실제 DB 재시작(pager 재열기)이 아니다.
+ * 같은 프로세스의 파일 왕복이며 실제 DB 재시작(page_file 재열기)이 아니다.
  */
 static void test_file_round_trip(void)
 {

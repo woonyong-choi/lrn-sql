@@ -108,14 +108,14 @@ def test_seed_site_and_call_are_reproducible_inputs(tmp_path: Path) -> None:
         "print(json.dumps([os.environ['FAULT_SITE'],os.environ['FAULT_CALL'],"
         "random.randrange(1000000)]))"
     )
-    options = ["--seed", "9281", "--site", "pager.read", "--call", "2"]
+    options = ["--seed", "9281", "--site", "page_file.read", "--call", "2"]
     status, first = _run(tmp_path / "first", source, options)
     assert status == 0
     status, second = _run(tmp_path / "second", source, options)
     assert status == 0
     assert Path(first["stdout"]).read_bytes() == Path(second["stdout"]).read_bytes()
     assert first["seed"] == second["seed"] == 9281
-    assert first["site"] == "pager.read" and first["call"] == 2
+    assert first["site"] == "page_file.read" and first["call"] == 2
 
 
 # cost: time O(n), heap O(n), stack O(1), io O(1)

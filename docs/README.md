@@ -1,50 +1,28 @@
-# Docs
+# 문서
 
-프로젝트 문서를 정리하는 디렉터리입니다.
+lrn-sql의 설계·개발 문서다. 문서는 한국어로 쓴다. 처음이면 아키텍처부터 읽는다.
 
-- `design.md`: **설계 노트** — 자료구조 선택 근거, 버린 대안과 이유, 정확성 검증 방법과 그 한계, 알려진 한계와 다음 병목
-- `build-and-test.md`: 빌드 옵션(sanitizer·재현용 컴파일 가드), macOS ASan 플랫폼 문제, 테스트 스위트별 검증 대상과 회귀 검사
-- `attribution.md`: 팀 과제 출처와 기여 경계, 개인 확장 커밋 목록
-- `benchmark-postgres.md`: PostgreSQL 대조 실험 전문 — 측정 조건, 결함 진단, 정직한 평가
-- `convention/`: 프로젝트 규칙과 문서 작성 기준
-- `csapp-11/`: CSAPP 11장 네트워크 학습 계획, 키워드 트리, 자료 정리, SQL API 구현 연결 가이드
-- `sql/`: 지난 주 MiniDB와 이번 주 SQL API 서버 구현을 연결하는 문서
-- `question/`: 질문 예시 문서
-- `team/`: 팀원별 개인 문서
+## 시작
 
-## convention/
+- [아키텍처](architecture.md): 구성 요소, 처리 흐름, 지켜야 할 규칙
+- [빌드와 시험](build-and-test.md): 빌드 변수, 시험 대상, 다른 엔진과 비교
+- [C 코딩 규칙](convention/c-style.md): C 코드 작성 기준
+- [Python 코딩 규칙](convention/python-style.md): Python 코드 작성 기준
+- [폴더 구조 규칙](convention/project-structure.md): 파일과 폴더를 두는 자리
+- [커밋 규칙](convention/commit-convention.md): 커밋·브랜치·PR 형식
 
-- `c-style.md`: C 코딩 스타일 컨벤션
-- `python-style.md`: Python 코딩 스타일 컨벤션
-- `project-structure.md`: 프로젝트 폴더 구조 컨벤션
-- `commit-convention.md`: Git 커밋/브랜치/PR 컨벤션
+## 기록
 
-## csapp-11/
-
-CSAPP 11장 네트워크 프로그래밍 학습과 수요 코딩회 구현을 한 흐름으로 연결한 문서 묶음입니다.
-
-- `README.md`: 문서 묶음 소개와 전체 목표
-- `00-roadmap-overview.md`: 세로 키워드 트리 기반 한 장 로드맵, 학습 체크, 화이트보드 설명용
-- `01-week-plan.md`: 2026-04-17 ~ 2026-04-22 일별 실행 계획
-- `02-keyword-tree.md`: 모든 개념을 하나의 종속 관계 트리로 정리한 통합 키워드 트리
-- `03-completion-rubric.md`: 학습 완료 판단 기준 (4단계 기준표 + 일별 체크리스트)
-- `04-sql-api-implementation-bridge.md`: CSAPP 11장에서 SQL API 서버 구현으로 연결하는 가이드
-- `05-ch11-sequential-numeric-walkthrough.md`: 초보자도 11장 전체를 실제 숫자와 흐름으로 끝까지 따라가는 기준 문서
-- `06-resources.md`: 학습 자료, 참고 링크, 숙제 문제 가이드, 디버깅 도구 정리
-- `07-ch11-code-reference.md`: 11장의 모든 구조체, 함수 원형, 전체 소스 코드, Aside 박스, 연습문제 풀이, 숙제 전문
-
-## sql/
-
-- `README.md`: SQL 관련 문서 묶음 소개
-- `08-wk07-minidb-to-wk08-sql-api-server.md`: 지난 주 MiniDB를 이번 주 SQL API 서버 과제로 연결하는 팀 설명용 문서와 AI 협업 운영안
-
-## question/
-
-- `q11-page-table-pipeline-example.md`: 페이지 테이블 주소 번역 파이프라인 질문/답변 예시
-
-## team/
-
-- `yoonkii1207/`: `yoonkii1207` 개인 문서
-- `w00jinLee/`: `w00jinLee` 개인 문서
-- `iamnuked/`: `iamnuked` 개인 문서
-- `woonyong-kr/`: `woonyong-kr` 개인 문서
+- [출처와 기여 경계](attribution.md): 팀 과제 출처와 개인 확장 범위
+- [CSAPP 11장 학습 묶음](csapp-11/README.md): 팀 과제 기간의 네트워크 학습 계획과 자료
+- [팀 질문 트리](question/00-team-question-list.md): CSAPP 11장 질문의 계층 정리
+- [파트별 토의 질문](question/01-team-question-parts.md): 질문 트리를 네 파트로 나눈 토의 질문지
+- [페이지 테이블 질문 예시](question/q11-page-table-pipeline-example.md): 질문·답변 형식의 예
+- [소켓 연결 질문](question/q12-socket-connection-lifecycle.md): 소켓 연결 수립·종료와 포트 식별
+- [최우녕 질문 정리](team/woonyong-kr/README.md): CSAPP 11장 질문과 답변
+- [이호준 질문](team/hojun-lee99/questions.md): CSAPP 11장 질문
+- [최현진 후속 질문](team/choihyunjin1/06_choihyunjin1_followup_questions.md): CSAPP 11장 후속 질문
+- [huiugim8-wq 질문](team/huiugim8-wq/q01-write-kernel-send-path.md): write 호출의 커널 전송 경로
+- [iamnuked 질문](team/iamnuked/Q.md): CSAPP 11장 질문
+- [w00jinLee 질문](team/w00jinLee/questions.md): CSAPP 11장 질문
+- [yoonkii1207 답변](team/yoonkii1207/part-d-answers.md): 파트 D의 FD·프로세스·메모리 답변
