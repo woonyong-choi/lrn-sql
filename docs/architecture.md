@@ -1,6 +1,6 @@
 # 아키텍처
 
-lrn-sql은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데이터베이스다. 응용 프로그램은 C API(`database`·`database_txn`)나 공유 라이브러리 `liblrnackq`를 거친 Python 패키지 `lrn_ackq`로 부르며, 선택형 ACK 큐는 같은 DB 위에 테이블 하나로 설치된다.
+lrn-sql은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데이터베이스다. 응용 프로그램은 C API(`session`·`database`)나 공유 라이브러리 `liblrnackq`를 거친 Python 패키지 `lrn_ackq`로 부르며, 선택형 ACK 큐는 같은 DB 위에 테이블 하나로 설치된다.
 
 ## 외부 연결
 
@@ -27,9 +27,9 @@ lrn-sql은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데�
 | `database` | 문장 실행기. 테이블 스캔·색인 조회·JOIN·GROUP BY·서브쿼리·집합 연산·ON CONFLICT·RETURNING | C11 | `src/sql/database.c` |
 | `database_txn` | 여러 문장을 한 게시로 확정하는 트랜잭션 핸들 | C11 | `src/sql/database_txn.c` |
 | `result` | 결과 집합과 오류를 바이트 버퍼로 인코딩 | C11 | `src/sql/result.c` |
-| `session` | 세션별 메모리 예산과 결과 수명 | C11, pthread | `src/sql/session.c` |
-| `ack_queue` | 선택형 ACK 큐. 큐 하나가 테이블 `ackq_<name>` 하나다 | C11, 공개 SQL·트랜잭션 API | `src/queue/ack_queue.c`, `src/queue/ack_queue_sql.c` |
-| `ack_queue_capi` | 다른 언어용 평탄한 C 인터페이스 `lrndb_*`·`lrnq_*` | C11, 공유 라이브러리 | `src/queue/ack_queue_capi.c` |
+| `session` | 연결 하나. 문장 실행, 트랜잭션, 예산 세 단계(문장·세션·풀), 결과 수명, 취소 | C11, pthread | `src/sql/session.c` |
+| `ack_queue` | 선택형 ACK 큐. 큐 하나가 테이블 `ackq_<name>` 하나다 | C11, `session`의 SQL·트랜잭션 API | `src/queue/ack_queue.c`, `src/queue/ack_queue_sql.c` |
+| `ack_queue_capi` | 다른 언어용 평탄한 C 인터페이스 `lrndb_*`·`lrnq_*`. 연결마다 자동 commit 세션 하나, 트랜잭션마다 세션 하나 | C11, 공유 라이브러리 | `src/queue/ack_queue_capi.c` |
 | `lrn_ackq` | Python 바인딩. `Database`·`Transaction`·`AckQueue` | Python 3, ctypes | `python/lrn_ackq` |
 
 ## 처리 흐름
@@ -54,7 +54,7 @@ lrn-sql은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데�
 
 ### 큐 작업
 
-1. `ack_queue`가 `put`을 테이블 `ackq_<name>`의 INSERT로 실행한다. 호출자가 트랜잭션을 주면 그 안에서 실행하고 commit은 호출자가 한다.
+1. `ack_queue`가 `put`을 호출자가 준 세션의 INSERT로 실행한다. 세션에 트랜잭션이 열려 있으면 그 안에서 실행하고 commit은 호출자가 한다. 없으면 그 세션에 자기 트랜잭션을 열고 commit한다.
 2. `get`이 READY 작업이나 lease가 끝난 LEASED 작업을 골라 LEASED로 바꾸고 fence 값을 1 올려 돌려준다.
 3. `ack`·`nack`·`fail`은 작업 id와 fence가 지금 값과 같을 때만 적용한다.
 
@@ -67,7 +67,8 @@ lrn-sql은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데�
 - commit 성공은 제어 쓰기 뒤의 `fsync`가 끝난 뒤에만 돌려준다. 성공을 받은 변경이 프로세스나 OS가 끝난 뒤에도 남게 하기 위해서다.
 - 제어 페이지 쓰기를 시도한 뒤 실패하면 결과는 불확실이고 핸들은 poison 상태가 된다. 성공인지 실패인지 모르는 상태에서 다음 쓰기를 쌓지 않기 위해서다.
 - DB 코어(`database`·`storage`)는 큐 모듈을 참조하지 않는다. 큐를 설치하지 않은 DB에 큐 객체나 테이블이 생기지 않게 하기 위해서다.
-- 큐는 공개 SQL과 트랜잭션 API만 쓴다. 업무 갱신과 큐 변경을 한 commit으로 확정하기 위해서다.
+- 큐는 `session`의 SQL과 트랜잭션 API만 쓴다. 업무 갱신과 큐 변경을 한 commit으로 확정하고, DB 단독 사용과 같은 예산·결과 계상·취소 계약을 받기 위해서다.
+- 한 세션은 한 번에 한 스레드만 쓴다. 트랜잭션은 세션에 속하므로 여러 스레드가 한 세션을 나눠 쓰면 다른 스레드의 문장이 남의 트랜잭션에 섞이기 때문이다.
 - 한 DB 파일은 한 프로세스의 한 핸들만 쓰기로 연다. 같은 파일에 두 writer가 세대를 따로 게시하지 않게 하기 위해서다.
 - 매개변수 값은 SQL 문자열에 이어 붙이지 않고 binding으로만 받는다. 값이 문법으로 해석되지 않게 하기 위해서다.
 

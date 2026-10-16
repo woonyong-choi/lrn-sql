@@ -8,6 +8,7 @@ from lrn_ackq.ack_queue import AckQueue, Claim, ClaimToken, ItemInfo, ItemState,
 from lrn_ackq.database import Database, Result, SqlValue, Transaction
 from lrn_ackq.errors import (
     BusyError,
+    CancelledError,
     ConflictError,
     DatabaseOpenError,
     InternalError,
@@ -29,6 +30,7 @@ from lrn_ackq.errors import (
 __all__ = [
     "AckQueue",
     "BusyError",
+    "CancelledError",
     "Claim",
     "ClaimToken",
     "ConflictError",

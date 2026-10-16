@@ -386,6 +386,8 @@ session_status_t session_pool_close_database(session_db_t *wrapper, database_sta
 
 database_t *session_db_handle(session_db_t *db) { return db != NULL ? db->db : NULL; }
 
+session_db_t *session_database(const session_t *session) { return session != NULL ? session->db : NULL; }
+
 /* ── 세션 ── */
 
 session_status_t session_open(session_db_t *db, session_t **out)
@@ -629,18 +631,21 @@ txn_status_t session_txn_begin(session_t *session, const session_txn_options_t *
     txn_begin_options_t begin = {TXN_ACCESS_READ_WRITE, TXN_ISOLATION_SNAPSHOT, use->guarantee, 0, NULL};
     uint64_t deadline = use->timeout_ms > 0 ? now_ms() + use->timeout_ms : 0;
     txn_status_t st;
+    bool stopped_by_cancel = false;
     for (;;) {
         pthread_mutex_lock(&session->db->run);
         st = database_conn_begin(session->conn, &begin);
         pthread_mutex_unlock(&session->db->run);
-        if ((st != TXN_BUSY && st != TXN_TIMEOUT) || use->timeout_ms == 0 || now_ms() >= deadline ||
-            atomic_load(&session->cancel)) {
+        if ((st != TXN_BUSY && st != TXN_TIMEOUT) || use->timeout_ms == 0 || now_ms() >= deadline) break;
+        if (atomic_load(&session->cancel)) {
+            stopped_by_cancel = true;
             break;
         }
         sleep_ms(1);
     }
     if (st == TXN_BUSY && use->timeout_ms > 0 && now_ms() >= deadline) st = TXN_TIMEOUT;
-    atomic_store(&session->cancel, false);
+    /* 기다림을 멈추는 데 쓴 취소만 지운다. 아니면 다음 문장 하나를 취소하도록 남긴다(session_cancel 계약) */
+    if (stopped_by_cancel) atomic_store(&session->cancel, false);
     leave(session);
     return st;
 }

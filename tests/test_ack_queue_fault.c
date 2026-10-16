@@ -134,19 +134,19 @@ static void snap_free(snap_t *s)
 typedef struct {
     const char *name;
     void (*prepare)(void);
-    ackq_status_t (*run)(ackq_t *queue);
+    ackq_status_t (*run)(session_t *db, ackq_t *queue);
     /* 재시작 뒤(주입 없음) 상태 검사. acknowledged는 호출자에게 성공으로 알렸다는 뜻이다 */
-    void (*verify)(database_t *db, ackq_t *queue, ackq_status_t status, bool acknowledged);
+    void (*verify)(session_t *db, ackq_t *queue, ackq_status_t status, bool acknowledged);
 } scenario_t;
 
 static uint64_t g_id, g_fence;
 
-static ackq_state_t job_state(ackq_t *q, uint64_t id, uint64_t *fence, bool *found)
+static ackq_state_t job_state(ackq_t *q, session_t *db, uint64_t id, uint64_t *fence, bool *found)
 {
     ackq_item_t items[16];
     size_t count = 0;
     *found = false;
-    if (ackq_list(q, NULL, 0, 16, false, items, &count) != ACKQ_OK) return ACKQ_STATE_FAILED;
+    if (ackq_list(q, db, 0, 16, false, items, &count) != ACKQ_OK) return ACKQ_STATE_FAILED;
     ackq_state_t state = ACKQ_STATE_READY;
     for (size_t i = 0; i < count; i++) {
         if (items[i].id == id) {
@@ -159,7 +159,7 @@ static ackq_state_t job_state(ackq_t *q, uint64_t id, uint64_t *fence, bool *fou
     return state;
 }
 
-static ackq_t *open_queue(database_t *db)
+static ackq_t *open_queue(session_t *db)
 {
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q = NULL;
@@ -171,115 +171,115 @@ static ackq_t *open_queue(database_t *db)
 static void prepare_ack(void)
 {
     make_db();
-    database_t *db = open_db();
+    session_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
     g_now = 100;
-    assert(enq(q, NULL, "job", NULL, &g_id, NULL) == ACKQ_OK);
+    assert(enq(q, db, "job", NULL, &g_id, NULL) == ACKQ_OK);
     ackq_claim_t item[1];
     size_t n = 0;
-    assert(ackq_claim(q, NULL, 1, 100000, item, &n) == ACKQ_OK && n == 1);
+    assert(ackq_claim(q, db, 1, 100000, item, &n) == ACKQ_OK && n == 1);
     g_fence = item[0].fence;
     ackq_claims_release(item, n);
     ackq_close(&q);
-    assert(database_close(db) == DATABASE_OK);
+    assert(close_db(db));
 }
 
-static ackq_status_t run_ack(ackq_t *q)
+static ackq_status_t run_ack(session_t *db, ackq_t *q)
 {
-    return ackq_ack(q, NULL, g_id, g_fence);
+    return ackq_ack(q, db, g_id, g_fence);
 }
 
-static void verify_ack(database_t *db, ackq_t *q, ackq_status_t st, bool acknowledged)
+static void verify_ack(session_t *db, ackq_t *q, ackq_status_t st, bool acknowledged)
 {
     (void)db;
     bool found;
     uint64_t fence = 0;
-    ackq_state_t state = job_state(q, g_id, &fence, &found);
+    ackq_state_t state = job_state(q, db, g_id, &fence, &found);
     CHECK(found, "작업이 사라지지 않았다");
     CHECK(state == ACKQ_STATE_ACKED || (state == ACKQ_STATE_LEASED && fence == g_fence),
           "중간 상태 없음: ACKED 또는 원래 lease (state=%d fence=%llu)", (int)state, (unsigned long long)fence);
     if (acknowledged) CHECK(state == ACKQ_STATE_ACKED, "성공으로 알린 ack는 재시작 뒤에도 남는다");
     if (st == ACKQ_NOT_APPLIED) CHECK(state == ACKQ_STATE_LEASED, "확정 미적용이면 이전 상태다");
-    CHECK(ackq_ack(q, NULL, g_id, g_fence) == ACKQ_OK, "재시작 뒤 같은 ack를 다시 해도 결과가 같다");
-    CHECK(job_state(q, g_id, NULL, &found) == ACKQ_STATE_ACKED, "다시 한 ack 뒤 ACKED");
+    CHECK(ackq_ack(q, db, g_id, g_fence) == ACKQ_OK, "재시작 뒤 같은 ack를 다시 해도 결과가 같다");
+    CHECK(job_state(q, db, g_id, NULL, &found) == ACKQ_STATE_ACKED, "다시 한 ack 뒤 ACKED");
 }
 
 /* 장면 2: enqueue(idempotency key) */
 static void prepare_enqueue(void)
 {
     make_db();
-    database_t *db = open_db();
+    session_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
     g_now = 100;
     ackq_close(&q);
-    assert(database_close(db) == DATABASE_OK);
+    assert(close_db(db));
 }
 
-static ackq_status_t run_enqueue(ackq_t *q)
+static ackq_status_t run_enqueue(session_t *db, ackq_t *q)
 {
     uint64_t id = 99;
-    ackq_status_t st = ackq_enqueue(q, NULL, (const uint8_t *)"payload", 7, "key-1", &id, NULL);
+    ackq_status_t st = ackq_enqueue(q, db, (const uint8_t *)"payload", 7, "key-1", &id, NULL);
     CHECK(st == ACKQ_OK ? id != 0 : id == 0, "성공이 아니면 id를 주지 않는다 (st=%s)", ackq_status_name(st));
     return st;
 }
 
-static void verify_enqueue(database_t *db, ackq_t *q, ackq_status_t st, bool acknowledged)
+static void verify_enqueue(session_t *db, ackq_t *q, ackq_status_t st, bool acknowledged)
 {
     (void)db;
     (void)st;
     ackq_stats_t stats;
-    CHECK(ackq_stats(q, NULL, &stats) == ACKQ_OK, "stats");
+    CHECK(ackq_stats(q, db, &stats) == ACKQ_OK, "stats");
     uint64_t total = stats.ready + stats.leased + stats.acked + stats.failed;
     CHECK(total <= 1, "작업은 0개 또는 1개 (total=%llu)", (unsigned long long)total);
     if (acknowledged) CHECK(total == 1, "성공으로 알린 enqueue는 재시작 뒤에도 남는다");
     uint64_t id = 0;
     bool dup = false;
-    CHECK(ackq_enqueue(q, NULL, (const uint8_t *)"payload", 7, "key-1", &id, &dup) == ACKQ_OK, "같은 key로 재시도");
+    CHECK(ackq_enqueue(q, db, (const uint8_t *)"payload", 7, "key-1", &id, &dup) == ACKQ_OK, "같은 key로 재시도");
     CHECK(dup == (total == 1), "불확실했던 enqueue는 재시도가 같은 작업으로 풀어 준다");
-    CHECK(ackq_stats(q, NULL, &stats) == ACKQ_OK && stats.ready == 1, "결국 작업은 정확히 하나");
+    CHECK(ackq_stats(q, db, &stats) == ACKQ_OK && stats.ready == 1, "결국 작업은 정확히 하나");
 }
 
 /* 장면 3: claim 2개(배치는 원자적) */
 static void prepare_claim(void)
 {
     prepare_enqueue();
-    database_t *db = open_db();
+    session_t *db = open_db();
     ackq_t *q = open_queue(db);
     for (int i = 0; i < 3; i++) {
         uint64_t id;
-        assert(enq(q, NULL, "p", NULL, &id, NULL) == ACKQ_OK);
+        assert(enq(q, db, "p", NULL, &id, NULL) == ACKQ_OK);
     }
     ackq_close(&q);
-    assert(database_close(db) == DATABASE_OK);
+    assert(close_db(db));
 }
 
-static ackq_status_t run_claim(ackq_t *q)
+static ackq_status_t run_claim(session_t *db, ackq_t *q)
 {
     ackq_claim_t items[2];
     size_t n = 0;
-    ackq_status_t st = ackq_claim(q, NULL, 2, 1000, items, &n);
+    ackq_status_t st = ackq_claim(q, db, 2, 1000, items, &n);
     CHECK(st == ACKQ_OK ? n == 2 : n == 0, "성공이 아니면 claim한 항목을 주지 않는다 (st=%s n=%zu)", ackq_status_name(st), n);
     ackq_claims_release(items, n);
     return st;
 }
 
-static void verify_claim(database_t *db, ackq_t *q, ackq_status_t st, bool acknowledged)
+static void verify_claim(session_t *db, ackq_t *q, ackq_status_t st, bool acknowledged)
 {
     (void)db;
     (void)st;
     ackq_stats_t stats;
-    CHECK(ackq_stats(q, NULL, &stats) == ACKQ_OK, "stats");
+    CHECK(ackq_stats(q, db, &stats) == ACKQ_OK, "stats");
     CHECK(stats.leased == 0 || stats.leased == 2, "배치는 전부 또는 전혀 (leased=%llu)", (unsigned long long)stats.leased);
     CHECK(stats.ready + stats.leased == 3, "작업이 사라지지 않았다");
     if (acknowledged) CHECK(stats.leased == 2, "성공으로 알린 claim은 재시작 뒤에도 lease다");
     g_now = 100000;   /* 모든 lease가 만료된 뒤 */
     ackq_claim_t items[3];
     size_t n = 0;
-    CHECK(ackq_claim(q, NULL, 3, 1000, items, &n) == ACKQ_OK && n == 3, "만료 뒤 셋 모두 다시 전달된다 (n=%zu)", n);
+    CHECK(ackq_claim(q, db, 3, 1000, items, &n) == ACKQ_OK && n == 3, "만료 뒤 셋 모두 다시 전달된다 (n=%zu)", n);
     ackq_claims_release(items, n);
     g_now = 100;
 }
@@ -295,31 +295,31 @@ static long count_points(const scenario_t *sc, const snap_t *base)
 {
     snap_restore(base);
     hooks_on();
-    database_t *db = open_db();
+    session_t *db = open_db();
     ackq_t *q = open_queue(db);
     g_fail_mode = true;
     g_fail_at = 0;
     g_points_seen = 0;
     g_active = true;
-    ackq_status_t st = sc->run(q);
+    ackq_status_t st = sc->run(db, q);
     g_active = false;
     CHECK(st == ACKQ_OK, "%s: 주입 없는 실행은 성공", sc->name);
     ackq_close(&q);
-    database_close(db);
+    close_db(db);
     hooks_off();
     return g_points_seen;
 }
 
 static void reopen_and_verify(const scenario_t *sc, ackq_status_t st, bool acknowledged)
 {
-    database_t *db = open_db();
+    session_t *db = open_db();
     CHECK(db != NULL, "%s: 재시작 열기", sc->name);
     if (db == NULL) return;
     ackq_t *q = open_queue(db);
     CHECK(q != NULL, "%s: 재시작 뒤 큐 열기", sc->name);
     if (q != NULL) sc->verify(db, q, st, acknowledged);
     ackq_close(&q);
-    database_close(db);
+    close_db(db);
 }
 
 /* I/O 실패 주입: k번째 지점이 실패한다 */
@@ -334,12 +334,12 @@ static void sweep_io_failures(const scenario_t *sc)
     for (long k = 1; k <= points; k++) {
         snap_restore(&base);
         hooks_on();
-        database_t *db = open_db();
+        session_t *db = open_db();
         ackq_t *q = db != NULL ? open_queue(db) : NULL;
         if (q == NULL) {
             CHECK(false, "%s k=%ld: 열기 실패", sc->name, k);
             hooks_off();
-            if (db != NULL) database_close(db);
+            if (db != NULL) close_db(db);
             continue;
         }
         g_fail_mode = true;
@@ -347,10 +347,12 @@ static void sweep_io_failures(const scenario_t *sc)
         g_fail_seen = 0;
         g_points_seen = 0;
         g_active = true;
-        ackq_status_t st = sc->run(q);
+        ackq_status_t st = sc->run(db, q);
         g_active = false;
+        /* #79: 어느 지점에서 실패해도 세션의 작업 메모리와 결과 몫이 돌아온다 */
+        CHECK(conn_settled(db), "%s k=%ld: 실패 뒤 세션 계상 0", sc->name, k);
         ackq_close(&q);
-        database_close(db);
+        close_db(db);
         hooks_off();
         if (st == ACKQ_OK) ok++;
         else if (st == ACKQ_UNCERTAIN || st == ACKQ_POISONED) uncertain++;
@@ -381,13 +383,13 @@ static void sweep_kills(const scenario_t *sc)
         if (pid == 0) {
             close(pipefd[0]);
             hooks_on();
-            database_t *db = open_db();
+            session_t *db = open_db();
             ackq_t *q = db != NULL ? open_queue(db) : NULL;
             if (q == NULL) _exit(4);
             g_fail_mode = false;
             g_points_left = k - 1;
             g_active = true;
-            ackq_status_t st = sc->run(q);
+            ackq_status_t st = sc->run(db, q);
             g_active = false;
             char tag = st == ACKQ_OK ? 'O' : 'E';
             if (write(pipefd[1], &tag, 1) != 1) _exit(5);

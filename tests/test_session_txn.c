@@ -5,9 +5,7 @@
  *
  * 합성 데이터만 쓴다. 다루지 않는 것: 전원 장애, 큐 ACK(#140), 여러 스레드가 같은 세션을 쓰는 경우(세션은 한 번에 한 스레드).
  *
- * 빌드(저장소 루트): tests/test_session_txn.c src/sql/{session,database,database_txn,sql_statement,lexer,result}.c
- *   src/storage/{heap_store,record,record_page,overflow,value,catalog,page_file,page_cache,catalog_store,legacy_migrate,
- *   transaction}.c -lpthread -lm
+ * 빌드와 실행: make test-transaction
  */
 
 #define _GNU_SOURCE

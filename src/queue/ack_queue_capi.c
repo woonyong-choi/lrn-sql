@@ -1,9 +1,12 @@
 /*
  * ack_queue_capi.c — 다른 언어에서 부르는 평탄한 C 인터페이스(#140). 설명은 include/queue/ack_queue_capi.h.
  *
- * 불변 조건: 핸들을 쓰는 모든 호출은 lrndb_t의 mutex 안에서 database를 건드린다. 결과(result_t)는 읽는 동안 database의
+ * 불변 조건: 핸들을 쓰는 모든 호출은 lrndb_t의 mutex 안에서 세션을 쓴다. 결과(result_t)는 읽는 동안 database의
  * 상태를 참조하므로 실행부터 인코딩·해제까지 같은 잠금 구간에서 끝낸다. 다른 database의 트랜잭션은 잠그거나 실행하기
  * 전에 거절한다. db가 살아 있는 큐·트랜잭션 핸들을 세어 두고 하나라도 있으면 닫지 않는다.
+ * 세션: 트랜잭션 밖의 호출은 연결의 자동 commit 세션을, 트랜잭션 안의 호출은 그 트랜잭션의 세션을 쓴다. 그래서 한
+ * 스레드가 트랜잭션을 연 동안 다른 스레드의 자동 commit 문장이 그 트랜잭션에 섞이지 않는다. 지금 실행 중인 세션은
+ * cancel_lock 아래 running에 둔다. 세션을 닫기 전에 running을 지우므로 lrndb_cancel이 닫힌 세션을 건드리지 않는다.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -16,13 +19,17 @@
 #include <unistd.h>
 
 #include "queue/ack_queue.h"
-#include "sql/database_txn.h"
 #include "sql/result.h"
+#include "sql/session.h"
 
 struct lrndb {
-    database_t *db;
+    session_pool_t *pool;
+    session_db_t *db;
+    session_t *autocommit;        /* 트랜잭션 밖의 문장과 큐 연산 */
     pthread_mutex_t mutex;
-    size_t live_queues;   /* mutex 안에서만 바꾼다 */
+    pthread_mutex_t cancel_lock;
+    session_t *running;           /* cancel_lock 안에서만 읽고 쓴다 */
+    size_t live_queues;           /* mutex 안에서만 바꾼다 */
     size_t live_txns;
 };
 
@@ -33,7 +40,7 @@ struct lrnq {
 
 struct lrntxn {
     lrndb_t *db;
-    database_txn_t *txn;
+    session_t *session;           /* 이 트랜잭션만 쓰는 세션 */
 };
 
 static _Atomic size_t g_max_result_bytes = LRN_DEFAULT_MAX_RESULT_BYTES;
@@ -82,6 +89,26 @@ static int map_database_status(database_status_t status)
     }
 }
 
+static int map_session_status(session_status_t status)
+{
+    switch (status) {
+        case SESSION_OK: return LRN_OK;
+        case SESSION_BUSY: return ACKQ_BUSY;
+        case SESSION_NOMEM: return LRN_DB_NOMEM;
+        default: return LRN_DB_INVALID;
+    }
+}
+
+/* 연결의 세션 풀은 한도가 없다. 예산이 필요한 호출자는 session.h를 직접 쓴다. */
+static const session_limits_t UNLIMITED = {SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX, 0};
+
+static void close_parts(lrndb_t *handle)
+{
+    if (handle->autocommit != NULL) session_close(handle->autocommit);
+    if (handle->db != NULL) session_pool_close_database(handle->db, NULL);
+    if (handle->pool != NULL) session_pool_close(handle->pool);
+}
+
 int lrndb_open(const char *path, int create, lrndb_t **out)
 {
     if (out == NULL) return LRN_DB_INVALID;
@@ -96,12 +123,20 @@ int lrndb_open(const char *path, int create, lrndb_t **out)
     }
     lrndb_t *handle = calloc(1, sizeof(*handle));
     if (handle == NULL) return LRN_DB_NOMEM;
-    database_status_t status = database_open_transactional(path, NULL, &handle->db);
-    if (status != DATABASE_OK) {
+    int status = map_session_status(session_pool_open(&UNLIMITED, &handle->pool));
+    database_status_t opened = DATABASE_OK;
+    if (status == LRN_OK) {
+        session_status_t made = session_pool_open_transactional(handle->pool, path, NULL, &handle->db, &opened);
+        status = opened != DATABASE_OK ? map_database_status(opened) : map_session_status(made);
+    }
+    if (status == LRN_OK) status = map_session_status(session_open(handle->db, &handle->autocommit));
+    if (status != LRN_OK) {
+        close_parts(handle);
         free(handle);
-        return map_database_status(status);
+        return status;
     }
     pthread_mutex_init(&handle->mutex, NULL);
+    pthread_mutex_init(&handle->cancel_lock, NULL);
     *out = handle;
     return LRN_OK;
 }
@@ -115,13 +150,38 @@ int lrndb_close(lrndb_t **db)
         pthread_mutex_unlock(&handle->mutex);
         return ACKQ_BUSY;   /* 큐나 트랜잭션이 이 database를 쥐고 있다. 핸들은 그대로다 */
     }
-    database_status_t status = database_close(handle->db);
+    session_close(handle->autocommit);
+    handle->autocommit = NULL;
+    database_status_t closed = DATABASE_OK;
+    session_status_t status = session_pool_close_database(handle->db, &closed);
+    session_pool_close(handle->pool);
     pthread_mutex_unlock(&handle->mutex);
-    if (status == DATABASE_BUSY) return ACKQ_BUSY;
     pthread_mutex_destroy(&handle->mutex);
+    pthread_mutex_destroy(&handle->cancel_lock);
     free(handle);
     *db = NULL;
-    return map_database_status(status);
+    return status != SESSION_OK ? map_session_status(status) : map_database_status(closed);
+}
+
+void lrndb_cancel(lrndb_t *db)
+{
+    if (db == NULL) return;
+    pthread_mutex_lock(&db->cancel_lock);
+    if (db->running != NULL) session_cancel(db->running);
+    pthread_mutex_unlock(&db->cancel_lock);
+}
+
+/* mutex 안에서 부른다. 실행하는 동안 lrndb_cancel이 이 세션을 취소할 수 있다. */
+static void set_running(lrndb_t *db, session_t *session)
+{
+    pthread_mutex_lock(&db->cancel_lock);
+    db->running = session;
+    pthread_mutex_unlock(&db->cancel_lock);
+}
+
+static session_t *session_for(lrndb_t *db, lrntxn_t *txn)
+{
+    return txn != NULL ? txn->session : db->autocommit;
 }
 
 /* ── 결과 인코딩: 상한을 넘거나 할당이 실패하면 error를 남기고 부분 결과를 주지 않는다 ── */
@@ -304,14 +364,11 @@ int lrndb_exec(lrndb_t *db, lrntxn_t *txn, const char *sql, const lrn_param_t *p
     buffer_t buffer = {0};
     /* 실행, 인코딩, 해제를 한 잠금 구간에서 끝낸다. 행은 result_next가 database 상태를 읽어 만든다. */
     pthread_mutex_lock(&db->mutex);
-    database_exec_status_t exec_status;
-    if (txn != NULL) {
-        exec_status = database_txn_exec(txn->txn, NULL, (const uint8_t *)sql, strlen(sql),
-                                        param_count > 0 ? &binding : NULL, &result);
-    } else {
-        exec_status = database_exec(db->db, (const uint8_t *)sql, strlen(sql), param_count > 0 ? &binding : NULL,
-                                    &result);
-    }
+    session_t *session = session_for(db, txn);
+    set_running(db, session);
+    database_exec_status_t exec_status = session_exec(session, NULL, (const uint8_t *)sql, strlen(sql),
+                                                      param_count > 0 ? &binding : NULL, &result);
+    set_running(db, NULL);
     if (exec_status == DATABASE_EXEC_OK && result != NULL) {
         encode_result(&buffer, result);
         result_release(&result);
@@ -353,26 +410,30 @@ int lrndb_begin(lrndb_t *db, lrntxn_t **out)
     *out = NULL;
     lrntxn_t *handle = calloc(1, sizeof(*handle));
     if (handle == NULL) return ACKQ_NOMEM;
-    txn_begin_options_t options = {.access = TXN_ACCESS_READ_WRITE,
-                                   .isolation = TXN_ISOLATION_SNAPSHOT,
-                                   .guarantee = TXN_GUARANTEE_DURABLE,
-                                   .timeout_ms = 0};
+    session_txn_options_t options = {TXN_GUARANTEE_DURABLE, 0};
     pthread_mutex_lock(&db->mutex);
-    txn_status_t status = database_txn_begin(db->db, &options, &handle->txn);
-    if (status == TXN_OK) db->live_txns++;
+    int status = session_open(db->db, &handle->session) == SESSION_OK ? LRN_OK : ACKQ_NOMEM;
+    if (status == LRN_OK) {
+        txn_status_t begun = session_txn_begin(handle->session, &options);
+        status = map_txn(begun);
+        if (begun != TXN_OK) session_close(handle->session);
+    }
+    if (status == LRN_OK) db->live_txns++;
     pthread_mutex_unlock(&db->mutex);
-    if (status != TXN_OK) {
+    if (status != LRN_OK) {
         free(handle);
-        return status == TXN_INVALID ? ACKQ_UNSUPPORTED : map_txn(status);
+        return status;
     }
     handle->db = db;
     *out = handle;
     return LRN_OK;
 }
 
+/* mutex 안에서 부른다. 트랜잭션 세션을 닫고 핸들을 해제한다. */
 static void forget_txn(lrntxn_t **txn)
 {
     lrntxn_t *handle = *txn;
+    session_close(handle->session);
     handle->db->live_txns--;
     free(handle);
     *txn = NULL;
@@ -383,10 +444,9 @@ int lrndb_commit(lrntxn_t **txn)
     if (txn == NULL || *txn == NULL) return ACKQ_INVALID;
     lrndb_t *db = (*txn)->db;
     pthread_mutex_lock(&db->mutex);
-    txn_status_t status = database_txn_commit((*txn)->txn, NULL);
+    txn_status_t status = session_txn_commit((*txn)->session, NULL);
     /* 실패 상태(INVALID)이면 트랜잭션이 남으므로 rollback으로 정리한다 */
-    if (status == TXN_INVALID) database_txn_rollback((*txn)->txn);
-    database_txn_release(&(*txn)->txn);
+    if (session_txn_active((*txn)->session)) session_txn_rollback((*txn)->session);
     forget_txn(txn);
     pthread_mutex_unlock(&db->mutex);
     return map_txn(status);
@@ -397,8 +457,7 @@ int lrndb_rollback(lrntxn_t **txn)
     if (txn == NULL || *txn == NULL) return ACKQ_INVALID;
     lrndb_t *db = (*txn)->db;
     pthread_mutex_lock(&db->mutex);
-    txn_status_t status = database_txn_rollback((*txn)->txn);
-    database_txn_release(&(*txn)->txn);
+    txn_status_t status = session_txn_rollback((*txn)->session);
     forget_txn(txn);
     pthread_mutex_unlock(&db->mutex);
     return map_txn(status);
@@ -406,7 +465,7 @@ int lrndb_rollback(lrntxn_t **txn)
 
 int lrndb_txn_failed(const lrntxn_t *txn)
 {
-    return txn != NULL && database_txn_failed(txn->txn) ? 1 : 0;
+    return txn != NULL && session_txn_failed(txn->session) ? 1 : 0;
 }
 
 /* ── 큐 ── */
@@ -425,7 +484,8 @@ int lrnq_open(lrndb_t *db, const char *name, int install, uint32_t max_attempts,
     options.now_ms = clock;
     options.clock_ctx = clock_ctx;
     pthread_mutex_lock(&db->mutex);
-    int status = install ? ackq_install(db->db, &options, &handle->queue) : ackq_open(db->db, &options, &handle->queue);
+    int status = install ? ackq_install(db->autocommit, &options, &handle->queue)
+                         : ackq_open(db->autocommit, &options, &handle->queue);
     if (status == ACKQ_OK) db->live_queues++;
     pthread_mutex_unlock(&db->mutex);
     if (status != ACKQ_OK) {
@@ -449,26 +509,27 @@ void lrnq_close(lrnq_t **queue)
     *queue = NULL;
 }
 
-/* 큐 연산 공통: txn이 이 큐의 database 것이 아니면 잠그기 전에 거절하고, 아니면 mutex 안에서 call을 실행한다. */
+/*
+ * 큐 연산 공통: txn이 이 큐의 database 것이 아니면 잠그기 전에 거절하고, 아니면 mutex 안에서 call을 실행한다.
+ * call 안의 session은 트랜잭션의 세션이거나 연결의 자동 commit 세션이다.
+ */
 #define QUEUE_CALL(q, txn, call)                                              \
     do {                                                                      \
         if ((q) == NULL || ((txn) != NULL && (txn)->db != (q)->db)) return ACKQ_INVALID; \
         pthread_mutex_lock(&(q)->db->mutex);                                  \
+        session_t *session = session_for((q)->db, (txn));                    \
+        set_running((q)->db, session);                                        \
         status = (call);                                                      \
+        set_running((q)->db, NULL);                                           \
         pthread_mutex_unlock(&(q)->db->mutex);                                \
     } while (0)
-
-static database_txn_t *raw(lrntxn_t *txn)
-{
-    return txn != NULL ? txn->txn : NULL;
-}
 
 int lrnq_put(lrnq_t *q, lrntxn_t *txn, const uint8_t *payload, size_t size, const char *idem_key, uint64_t *id,
              int *duplicate)
 {
     int status;
     bool dup = false;
-    QUEUE_CALL(q, txn, ackq_enqueue(q->queue, raw(txn), payload, size, idem_key, id, &dup));
+    QUEUE_CALL(q, txn, ackq_enqueue(q->queue, session, payload, size, idem_key, id, &dup));
     if (duplicate != NULL) *duplicate = dup ? 1 : 0;
     return status;
 }
@@ -481,10 +542,10 @@ int lrnq_get(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t lease_ms, lrnq_item
     if (item == NULL) return ACKQ_INVALID;
     *item = (lrnq_item_t){0};
     if (id == 0) {
-        QUEUE_CALL(q, txn, ackq_claim(q->queue, raw(txn), 1, lease_ms, &claim, &count));
+        QUEUE_CALL(q, txn, ackq_claim(q->queue, session, 1, lease_ms, &claim, &count));
         if (status == ACKQ_OK && count == 0) return LRN_EMPTY;
     } else {
-        QUEUE_CALL(q, txn, ackq_claim_id(q->queue, raw(txn), id, lease_ms, &claim));
+        QUEUE_CALL(q, txn, ackq_claim_id(q->queue, session, id, lease_ms, &claim));
     }
     if (status != ACKQ_OK) return status;
     *item = (lrnq_item_t){claim.id, claim.fence, claim.attempts, claim.lease_until_ms, claim.payload, claim.payload_size};
@@ -501,14 +562,14 @@ void lrnq_item_free(lrnq_item_t *item)
 int lrnq_ack(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence)
 {
     int status;
-    QUEUE_CALL(q, txn, ackq_ack(q->queue, raw(txn), id, fence));
+    QUEUE_CALL(q, txn, ackq_ack(q->queue, session, id, fence));
     return status;
 }
 
 int lrnq_fail(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence, const char *reason)
 {
     int status;
-    QUEUE_CALL(q, txn, ackq_fail(q->queue, raw(txn), id, fence, reason));
+    QUEUE_CALL(q, txn, ackq_fail(q->queue, session, id, fence, reason));
     return status;
 }
 
@@ -517,7 +578,7 @@ int lrnq_nack(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence, uint64_t re
 {
     int status;
     bool end = false;
-    QUEUE_CALL(q, txn, ackq_nack(q->queue, raw(txn), id, fence, retry_delay_ms, reason, &end));
+    QUEUE_CALL(q, txn, ackq_nack(q->queue, session, id, fence, retry_delay_ms, reason, &end));
     if (terminal != NULL) *terminal = end ? 1 : 0;
     return status;
 }
@@ -525,28 +586,28 @@ int lrnq_nack(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence, uint64_t re
 int lrnq_update(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence, const uint8_t *payload, size_t size)
 {
     int status;
-    QUEUE_CALL(q, txn, ackq_update(q->queue, raw(txn), id, fence, payload, size));
+    QUEUE_CALL(q, txn, ackq_update(q->queue, session, id, fence, payload, size));
     return status;
 }
 
 int lrnq_recover(lrnq_t *q, lrntxn_t *txn, size_t limit, size_t *recovered)
 {
     int status;
-    QUEUE_CALL(q, txn, ackq_recover(q->queue, raw(txn), limit, recovered));
+    QUEUE_CALL(q, txn, ackq_recover(q->queue, session, limit, recovered));
     return status;
 }
 
 int lrnq_release_leases(lrnq_t *q, lrntxn_t *txn, size_t limit, size_t *released)
 {
     int status;
-    QUEUE_CALL(q, txn, ackq_release_leases(q->queue, raw(txn), limit, released));
+    QUEUE_CALL(q, txn, ackq_release_leases(q->queue, session, limit, released));
     return status;
 }
 
 int lrnq_purge(lrnq_t *q, lrntxn_t *txn, int include_failed, size_t limit, size_t *purged)
 {
     int status;
-    QUEUE_CALL(q, txn, ackq_purge(q->queue, raw(txn), include_failed != 0, limit, purged));
+    QUEUE_CALL(q, txn, ackq_purge(q->queue, session, include_failed != 0, limit, purged));
     return status;
 }
 
@@ -555,7 +616,7 @@ int lrnq_stats(lrnq_t *q, lrntxn_t *txn, uint64_t counts[4])
     int status;
     ackq_stats_t stats = {0};
     if (counts == NULL) return ACKQ_INVALID;
-    QUEUE_CALL(q, txn, ackq_stats(q->queue, raw(txn), &stats));
+    QUEUE_CALL(q, txn, ackq_stats(q->queue, session, &stats));
     counts[0] = stats.ready;
     counts[1] = stats.leased;
     counts[2] = stats.acked;
@@ -576,9 +637,7 @@ int lrnq_list(lrnq_t *q, lrntxn_t *txn, uint64_t after_id, size_t limit, int wit
         free(raw_items);
         return ACKQ_INVALID;
     }
-    pthread_mutex_lock(&q->db->mutex);
-    status = ackq_list(q->queue, raw(txn), after_id, limit, with_payload != 0, raw_items, &n);
-    pthread_mutex_unlock(&q->db->mutex);
+    QUEUE_CALL(q, txn, ackq_list(q->queue, session, after_id, limit, with_payload != 0, raw_items, &n));
     if (status == ACKQ_OK) {
         for (size_t i = 0; i < n; i++) {
             const ackq_item_t *src = &raw_items[i];

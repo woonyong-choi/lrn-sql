@@ -29,6 +29,7 @@ _PARAM_NULL, _PARAM_INTEGER, _PARAM_REAL, _PARAM_TEXT, _PARAM_BLOB = 0, 1, 2, 3,
 _KIND_ROWS, _KIND_COMMAND, _KIND_ERROR = 0, 1, 2
 _INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
 _RESULT_E_BUSY = 7  # result.h의 오류 분류: 다른 트랜잭션이 쓰는 중이라 실행 전에 거절됨
+RESULT_E_CANCELLED = 8  # result.h의 오류 분류: 취소된 문장
 
 _lib = load_library()
 
@@ -230,6 +231,15 @@ class Database:
             raise BusyError("another writer holds the database", status=status)
         check(status)
         return Transaction(self, out)
+
+    def cancel(self) -> None:
+        """다른 스레드에서 지금 실행 중인 문장이나 큐 연산 하나를 취소한다.
+
+        취소된 문장은 SqlError(error_class=RESULT_E_CANCELLED)이고, 큐 연산은 CancelledError이며 자기 트랜잭션을
+        반영하지 않는다. 게시를 시작한 문장은 취소와 무관하게 끝난다. 끝나는 순간과 겹친 요청은 같은 세션의
+        다음 문장 하나에 적용될 수 있다.
+        """
+        _lib.lrndb_cancel(self.handle)
 
     def register_queue(self, queue: Closable) -> None:
         """이 DB를 쓰는 큐를 등록한다. DB를 닫을 때 먼저 닫힌다(큐는 DB보다 오래 살 수 없다)."""

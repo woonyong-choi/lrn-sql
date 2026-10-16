@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -144,4 +145,39 @@ def test_function_signature_errors_are_distinct(tmp_path: Path, sql: str, code: 
     with pytest.raises(SqlError) as raised:
         db.execute(sql)
     assert raised.value.error_code == code
+    db.close()
+
+
+# #79·#64: 다른 스레드의 취소는 실행 중인 문장을 성공과 구별되는 오류로 끝내고, 다음 문장은 정상 실행된다
+def test_cancel_from_another_thread_is_distinct_from_success(tmp_path: Path) -> None:
+    from lrn_ackq.database import RESULT_E_CANCELLED
+
+    db = Database(tmp_path / "cancel.lrdb")
+    db.execute("CREATE TABLE n (id INTEGER PRIMARY KEY)")
+    with db.begin() as tx:
+        for start in range(1, 3001, 500):
+            tx.execute("INSERT INTO n VALUES " + ", ".join(f"({i})" for i in range(start, start + 500)))
+        tx.commit()
+    slow = "SELECT COUNT(*) FROM n a, n b, n c WHERE a.id + b.id + c.id = -1"
+    caught: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            db.execute(slow)
+        except BaseException as err:  # noqa: BLE001 - 주 스레드에서 판정한다
+            caught.append(err)
+
+    # 고장 난 취소에서도 시험 프로세스가 끝나도록 daemon 스레드로 돌린다
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    time.sleep(0.2)
+    # 실행 중이 아닐 때 건 취소는 다음 문장에 남을 수 있으므로 끝나지 않았을 때만 다시 건다
+    for _ in range(10):
+        db.cancel()
+        worker.join(timeout=1)
+        if not worker.is_alive():
+            break
+    assert not worker.is_alive()
+    assert len(caught) == 1 and isinstance(caught[0], SqlError) and caught[0].error_class == RESULT_E_CANCELLED
+    assert db.execute("SELECT COUNT(*) FROM n").rows == ((3000,),)
     db.close()
