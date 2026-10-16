@@ -25,7 +25,8 @@ static void record_roundtrip_preserves_values(void)
     size_t count = 0;
 
     assert(record_encode(input, 6, &buffer) == RECORD_OK);
-    assert(buffer.size_bytes == 8 + 6 * 5 + 16 + sizeof(text) - 1 + sizeof(large));
+    /* 형식 판 1 + 필드 수 1 + 코드(1·1·1·1·1·3) + 정수 8·8 + 값 바이트 */
+    assert(buffer.size_bytes == 1 + 1 + 8 + 16 + sizeof(text) - 1 + sizeof(large));
     assert(record_decode(&buffer, output, 6, &count) == RECORD_OK);
 
     assert(count == 6);
@@ -43,19 +44,64 @@ static void record_roundtrip_preserves_values(void)
     free(buffer.bytes);
 }
 
-/* #81: 고정 golden bytes로 endian·길이 형식을 검사한다. */
+static void expect_bytes(const record_value_t *input, size_t count, const uint8_t *expected, size_t size)
+{
+    record_buffer_t buffer = {0};
+    assert(record_encode(input, count, &buffer) == RECORD_OK);
+    assert(buffer.size_bytes == size);
+    assert(memcmp(buffer.bytes, expected, size) == 0);
+    record_value_t output[8];
+    size_t got = 0;
+    assert(record_decode(&buffer, output, 8, &got) == RECORD_OK && got == count);
+    free(buffer.bytes);
+}
+
+/* #192: 고정 golden bytes로 형식 판·varint·정수 최소 폭·TEXT/BLOB 코드를 검사한다. */
 static void record_golden_format_matches_contract(void)
 {
-    const uint8_t expected[] = {
-        'L','R','C','1', 2,0,0,0, 0,0,0,0,0,
-        1,8,0,0,0, 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff
+    record_value_t pair[] = {{.type=RECORD_NULL}, {.type=RECORD_INTEGER, .integer=-1}};
+    const uint8_t pair_bytes[] = {0x02, 2, 0, 3, 0xff};
+    expect_bytes(pair, 2, pair_bytes, sizeof(pair_bytes));
+
+    record_value_t small[] = {{.type=RECORD_INTEGER, .integer=0}, {.type=RECORD_INTEGER, .integer=1},
+                              {.type=RECORD_INTEGER, .integer=2}, {.type=RECORD_INTEGER, .integer=-129},
+                              {.type=RECORD_INTEGER, .integer=INT64_MIN}};
+    const uint8_t small_bytes[] = {0x02, 5, 1, 2, 3, 4, 10,
+                                   2, 0x7f, 0xff, 0, 0, 0, 0, 0, 0, 0, 0x80};
+    expect_bytes(small, 5, small_bytes, sizeof(small_bytes));
+
+    uint8_t long_text[70];
+    memset(long_text, 'a', sizeof(long_text));
+    record_value_t bytes[] = {{.type=RECORD_TEXT, .bytes=(const uint8_t *)"hi", .size_bytes=2},
+                              {.type=RECORD_BLOB, .bytes=(const uint8_t *)"\x00", .size_bytes=1},
+                              {.type=RECORD_TEXT, .bytes=long_text, .size_bytes=sizeof(long_text)}};
+    /* 12+2*2=16, 11+2*1=13, 12+2*70=152 -> varint 0x98 0x01 */
+    uint8_t long_bytes[1 + 1 + 4 + 2 + 1 + sizeof(long_text)] = {0x02, 3, 16, 13, 0x98, 0x01, 'h', 'i', 0};
+    memcpy(long_bytes + 9, long_text, sizeof(long_text));
+    expect_bytes(bytes, 3, long_bytes, sizeof(long_bytes));
+}
+
+/* #192: 한 값의 인코딩은 하나다. 최소가 아닌 정수·varint, 옛 형식, 남거나 모자란 바이트는 거절한다. */
+static void record_rejects_non_canonical_input(void)
+{
+    const uint8_t cases[][6] = {
+        {0x02, 1, 4, 42, 0},        /* 42를 2바이트로 */
+        {0x02, 1, 3, 0},            /* 0은 코드 1 */
+        {0x02, 1, 3, 1},            /* 1은 코드 2 */
+        {0x02, 0x81, 0x00, 1},      /* 필드 수 varint가 최소가 아님 */
+        {0x02, 1, 0x8d, 0x00, 0},   /* 코드 varint가 최소가 아님(13) */
+        {'L', 'R', 'C', '1', 0, 0}, /* 옛 형식 */
+        {0x02, 1, 1, 0},            /* 남는 바이트 */
+        {0x02, 1, 16, 'h'},         /* 모자란 바이트 */
     };
-    record_value_t input[] = {{.type=RECORD_NULL}, {.type=RECORD_INTEGER, .integer=-1}};
-    record_buffer_t buffer = {0};
-    assert(record_encode(input, 2, &buffer) == RECORD_OK);
-    assert(buffer.size_bytes == sizeof(expected));
-    assert(memcmp(buffer.bytes, expected, sizeof(expected)) == 0);
-    free(buffer.bytes);
+    const size_t sizes[] = {5, 4, 4, 4, 5, 6, 4, 4};
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        record_buffer_t input = {(uint8_t *)cases[i], sizes[i]};
+        record_value_t output = {.type = RECORD_TEXT, .integer = 77};
+        size_t count = 55;
+        assert(record_decode(&input, &output, 1, &count) == RECORD_INVALID);
+        assert(output.type == RECORD_TEXT && output.integer == 77 && count == 55);
+    }
 }
 
 /* #81: 손상·잘린 입력은 부분 decode를 게시하지 않는다. */
@@ -71,7 +117,7 @@ static void record_invalid_input_preserves_output(void)
         assert(record_decode(&cut, &output, 1, &count) == RECORD_INVALID);
         assert(output.integer == 123 && count == 99);
     }
-    buffer.bytes[9] = 0xff;
+    buffer.bytes[2] = 0x7f;  /* 58바이트 BLOB 코드인데 값이 1바이트뿐 */
     assert(record_decode(&buffer, &output, 1, &count) == RECORD_INVALID);
     assert(output.integer == 123 && count == 99);
     free(buffer.bytes);
@@ -212,6 +258,7 @@ int main(void)
 {
     record_roundtrip_preserves_values();
     record_golden_format_matches_contract();
+    record_rejects_non_canonical_input();
     record_invalid_input_preserves_output();
     record_page_changes_preserve_slot_identity();
     record_page_bounds_preserve_original();
