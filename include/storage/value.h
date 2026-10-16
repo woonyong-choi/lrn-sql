@@ -119,7 +119,7 @@ value_status_t value_compare(const value_view_t *left, const value_view_t *right
  * 출력 문자열. 같은 값은 항상 같은 바이트를 만들며 로캘과 무관하다. 문자열 길이는 *needed 바이트
  * (NUL 제외)이고 capacity가 *needed보다 크면 끝에 종료 NUL을 하나 덧붙인다.
  *   NULL "NULL" / INTEGER 10진 / TEXT 원문 바이트 그대로(내장 NUL 포함)
- *   REAL "%.17g" 형식: 유한값을 왕복할 수 있는 17자리 표현이며 최단 표현은 약속하지 않는다.
+ *   REAL "%.Ng" 형식: N은 15·16·17 가운데 다시 읽어 같은 값이 되는 가장 작은 수다(0.1은 "0.1").
  *        소수점과 지수가 없는 결과에는 ".0"을 붙인다(예 "1.0", "-0.0")
  *   BLOB "X'ab01'" 소문자 16진
  * buffer가 모자라면 VALUE_LIMIT이며 *needed만 채우고 buffer는 변경하지 않는다.

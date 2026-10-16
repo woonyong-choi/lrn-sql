@@ -264,7 +264,7 @@ static size_t known_differences(sqlite3 *db)
     differences++;
     sqlite3_finalize(echo);
 
-    /* REAL 텍스트: SQLite는 15자리 표현이라 왕복이 보장되지 않고 이 모듈은 17자리를 쓴다. */
+    /* REAL 텍스트: 15자리로 왕복하는 값은 SQLite와 같은 글자다. SQLite는 15자리에서 멈춰 왕복하지 않는 값이 있다. */
     sqlite3_stmt *to_text = prepare(db, "SELECT CAST(?1 AS TEXT)");
     value_view_t tenth = real_view(0.1);
     sqlite3_reset(to_text);
@@ -275,8 +275,10 @@ static size_t known_differences(sqlite3 *db)
     char buffer[40];
     size_t needed = 0;
     assert(value_format(&tenth, buffer, sizeof(buffer), &needed) == VALUE_OK);
-    assert(strcmp(buffer, "0.10000000000000001") == 0);
-    differences++;
+    assert(strcmp(buffer, "0.1") == 0);
+    value_view_t third = real_view(0.1 + 0.2);
+    assert(value_format(&third, buffer, sizeof(buffer), &needed) == VALUE_OK);
+    assert(strcmp(buffer, "0.30000000000000004") == 0 && strtod(buffer, NULL) == 0.1 + 0.2);
     sqlite3_finalize(to_text);
 
     /*
