@@ -15,3 +15,9 @@ tmp*
 notes/ai-*
 *.bak
 *-staging/
+
+# Python 패키지 빌드 산출물
+dist/
+*.egg-info/
+python/totedb/libtotedb.*
+wheelhouse/

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "totedb"
+dynamic = ["version"]
+description = "Embedded SQL database with a job queue that commits in the same transaction (Transactional Outbox Table Engine)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "woonyong-choi" }]
+keywords = ["database", "embedded", "sql", "queue", "outbox", "transaction"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database :: Database Engines/Servers",
+]
+
+[project.urls]
+Homepage = "https://github.com/woonyong-choi/totedb"
+Changelog = "https://github.com/woonyong-choi/totedb/blob/main/CHANGELOG.md"
+Issues = "https://github.com/woonyong-choi/totedb/issues"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+packages = ["totedb"]
+
+[tool.setuptools.dynamic]
+version = { attr = "totedb.__version__" }
+
+[tool.cibuildwheel]
+# ctypes로 여는 일반 공유 라이브러리라 Python 버전과 무관한 py3-none wheel 하나만 만든다
+build = "cp312-*"
+skip = "*-musllinux_*"
+test-command = "python {project}/tests/package_smoke.py"
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }

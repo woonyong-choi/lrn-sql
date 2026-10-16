@@ -12,16 +12,14 @@
 </p>
 
 > [!NOTE]
-> 첫 공개판 0.1.0입니다. 소스에서 빌드해 실행합니다. 1.0 전에는 파일 형식과 API가 바뀔 수 있습니다.
+> 첫 공개판 0.1.0입니다. 1.0 전에는 파일 형식과 API가 바뀔 수 있습니다.
 
 ## 빠른 시작
 
-GCC, GNU Make, Python 3이 필요합니다. 저장소를 받아 공유 라이브러리를 빌드하세요.
+Python 3.9 이상에서 설치하세요. Linux(x86_64·aarch64)와 macOS(arm64)는 빌드된 wheel을 받고, 그 밖의 POSIX 환경은 GCC와 GNU Make로 소스를 빌드해 설치합니다.
 
 ```sh
-git clone https://github.com/woonyong-choi/totedb.git
-cd totedb
-make all
+pip install totedb
 ```
 
 아래 내용을 `demo.py`로 저장하세요. 테이블을 만들고, 행 갱신과 큐 작업 추가를 한 트랜잭션으로 확정한 뒤 작업을 꺼내 처리합니다.
@@ -45,7 +43,7 @@ with Database("demo.db") as db:
 ```
 
 ```sh
-PYTHONPATH=python python3 demo.py
+python3 demo.py
 ```
 
 ```text
@@ -103,7 +101,7 @@ make example-outbox
 ## 문서
 
 - [아키텍처](docs/architecture.md): 구성 요소, 처리 흐름, 지켜야 할 규칙
-- [빌드와 시험](docs/build-and-test.md): 빌드 변수, 시험 대상, 다른 엔진과 비교
+- [빌드와 시험](docs/build-and-test.md): 빌드 변수, 시험 대상, 다른 엔진과 비교, 패키지 배포
 - [안전성 시험 결과](docs/safety.md): 강제 종료·I/O 실패·여러 프로세스 시험과 결과, 확인하지 않은 범위
 - [C 코딩 규칙](docs/convention/c-style.md): C 코드 작성 기준
 - [Python 코딩 규칙](docs/convention/python-style.md): Python 코드 작성 기준
@@ -113,7 +111,11 @@ make example-outbox
 
 ## 개발
 
+저장소에서 직접 쓰려면 공유 라이브러리를 빌드하고 `PYTHONPATH=python`을 지정하세요.
+
 ```sh
+git clone https://github.com/woonyong-choi/totedb.git
+cd totedb
 make all
 make test-all test-runner test-fault test-result
 make SANITIZE=thread BUILD_DIR=build-tsan test-transaction test-session test-ack-queue

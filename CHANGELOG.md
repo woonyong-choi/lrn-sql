@@ -2,12 +2,13 @@
 
 버전별 주요 변경을 적는다. 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전: [유의적 버전](https://semver.org/lang/ko/). 1.0 전에는 파일 형식과 API가 호환 없이 바뀔 수 있다.
 
-## 0.1.0 - 2026-10-16
+## 0.1.0 - 2026-10-17
 
 첫 공개판이다.
 
 ### 추가
 
+- PyPI 패키지 배포와 태그 기반 릴리스 워크플로 추가 (#205)
 - 여러 프로세스의 같은 파일 쓰기 적용 ([0d8ed17](https://github.com/woonyong-choi/totedb/commit/0d8ed17))
 - 쓰는 동안 다른 프로세스의 조회 비차단 적용 ([6e2b94c](https://github.com/woonyong-choi/totedb/commit/6e2b94c))
 - Python 생산자와 C worker의 같은 큐 공유 예제 추가 ([58c1e40](https://github.com/woonyong-choi/totedb/commit/58c1e40))

@@ -89,6 +89,38 @@ python3 bench/sqlite_workload.py --output build/bench/sqlite_workload.json --ana
 | `pg-compat` | PostgreSQL 18 서비스에 `make test-sql-diff`를 실행한 뒤 `make test-sqlite-session-diff` |
 | `actionlint` | 워크플로 파일 검사 |
 
+태그 push와 패키징 파일을 바꾼 PR에서는 `.github/workflows/release.yml`이 실행된다([패키지 배포](#패키지-배포)).
+
+## 패키지 배포
+
+Python 패키지 `totedb`는 PyPI에 올린다. 공유 라이브러리를 ctypes로 열기 때문에 Python 버전과 무관한 `py3-none-{플랫폼}` wheel을 플랫폼마다 하나씩 만든다.
+
+| 파일 | 역할 |
+|---|---|
+| `pyproject.toml` | 패키지 정보, 버전 출처(`python/totedb/__init__.py`), cibuildwheel 설정 |
+| `setup.py` | `make SANITIZE= all`로 만든 `libtotedb`를 패키지 폴더에 넣고 wheel 태그를 정함 |
+| `MANIFEST.in` | sdist에 C 소스와 `Makefile`을 넣어 설치 때 다시 빌드 |
+| `tests/package_smoke.py` | 설치한 패키지가 자기 안의 라이브러리로 DB·큐를 쓰는지 저장소 밖에서 확인 |
+
+Python 바인딩은 `TOTEDB_LIB`, 설치한 패키지 폴더, 저장소의 `build/lib/` 순서로 라이브러리를 찾는다.
+
+로컬에서 확인하려면 아래처럼 빌드해 설치한다.
+
+```sh
+python3 -m build
+python3 -m venv /tmp/totedb-env && /tmp/totedb-env/bin/pip install dist/*.whl
+cd /tmp && /tmp/totedb-env/bin/python ~/totedb/tests/package_smoke.py
+```
+
+### 릴리스 순서
+
+1. `python/totedb/__init__.py`의 `__version__`, `include/totedb.h`의 `TOTE_VERSION`, `CHANGELOG.md`의 `## {버전} - {날짜}` 절을 같은 버전으로 맞춘다
+2. 기본 브랜치에 머지한 뒤 `v{버전}` 태그를 push한다
+3. `.github/workflows/release.yml`이 버전 일치를 검사하고 sdist와 wheel(Linux x86_64·aarch64 manylinux_2_28, macOS arm64 11.0 이상)을 빌드·설치·검사한다
+4. PyPI Trusted Publishing(`pypi` 환경)으로 게시한 뒤 변경 기록 절을 본문으로 GitHub Release를 만들고 배포 파일을 첨부한다
+
+패키징 파일을 바꾼 PR에서는 같은 워크플로가 3단계까지만 실행한다. Windows와 macOS x86_64 wheel은 만들지 않는다. macOS x86_64는 sdist로 설치한다.
+
 ## macOS에서 ASan 바이너리가 멈추는 문제
 
 macOS 26(Darwin 25)과 Apple clang 17에서는 ASan 바이너리가 `main()`에 닿기 전에 멈춘다. ASan 런타임 초기화가 자기 자신을 다시 부르는 문제이며 빈 `main()`을 `cc -fsanitize=address`로 빌드해도 같은 증상이 나온다. 스택은 `AsanInitInternal`, `InitializeShadowMemory`, `get_dyld_hdr`, `dyld_shared_cache_iterate_text_swift`, `malloc`, `__sanitizer_mz_malloc`를 거쳐 다시 `AsanInitFromRtl`로 들어가 spin lock에서 멈춘다. UBSan만 켠 빌드는 정상 동작한다.
