@@ -671,6 +671,17 @@ static void test_large_values_across_sessions(void)
     expect_value(b, 3, v3, "commit 뒤 b");
     expect_pages(&env, "첫 commit 뒤");
 
+    /* rollback한 큰 값의 새 체인은 버려지고 옛 체인은 그대로 읽힌다 */
+    expect(a, "BEGIN", "CMD BEGIN 0");
+    ok_with(a, "UPDATE big SET v = '%s' WHERE k = 1", v0);
+    ok(a, "DELETE FROM big WHERE k = 3");
+    ok_with(a, "INSERT INTO big VALUES (5, '%s')", w0);
+    expect(a, "ROLLBACK", "CMD ROLLBACK 0");
+    expect_value(b, 1, v1, "rollback 뒤 b");
+    expect_value(b, 3, v3, "rollback 뒤 b");
+    expect_value(b, 5, NULL, "rollback 뒤 b");
+    expect_pages(&env, "rollback 뒤");
+
     /* 놓은 페이지가 두 commit 뒤 재사용된다. 매 commit 뒤 값과 회계가 맞아야 한다 */
     for (int round = 0; round < 6; round++) {
         char *next = big_text(9000 + (size_t)round * 4000, 10 + (unsigned)round);
