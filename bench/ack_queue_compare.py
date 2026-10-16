@@ -10,9 +10,8 @@
 보존 정책(ack된 작업을 끝에서 모두 지움)을 쓴다. 한 측정은 따로 띄운 프로세스에서 하고 `ru_maxrss`의 증가분을 메모리로
 보고한다(이전 최고치를 넘은 만큼만 잡히므로 작은 작업은 0일 수 있다). 시간은 벽시계(perf_counter)다.
 
-주의: lrn 큐는 모든 연산이 테이블 전체 스캔이라 행 수에 비례해 느려진다(SQL에 LIMIT·ORDER BY·index가
-없다). 이 스크립트는
-그 비용을 그대로 드러내며 성능 우위를 주장하지 않는다. 결과는 이 호스트·이 빌드·이 입력에서의 관측이다.
+lrn 큐의 claim·ack는 state 보조 색인과 기본 키 조회를 쓴다(ack_queue.h). 이 스크립트는 성능 우위를 주장하지 않는다.
+결과는 이 호스트·이 빌드·이 입력에서의 관측이다.
 
 사용법:
   worker  python3 bench/ack_queue_compare.py worker --system lrn --n 200 --payload-bytes 256 --threads 1
