@@ -1204,6 +1204,32 @@ static void expect_pages_accounted(database_t *db, const char *when)
           (unsigned long long)check.free, (unsigned long long)check.orphaned, (unsigned long long)check.conflicts);
 }
 
+/*
+ * 페이지 목록은 디렉터리·행 페이지 수만큼 잡아 두고 색인 페이지를 먼저 넣었다. 색인이 그 여유를 넘게 크면 뒤의 행 페이지가
+ * 목록 끝 밖에 쓰였다(DROP TABLE과 페이지 회계가 같은 함수를 쓴다). 색인이 여러 단계인 표로 둘 다 확인한다.
+ */
+static void test_page_list_with_deep_index(void)
+{
+    printf("\n[test_page_list_with_deep_index]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE deep (id INTEGER PRIMARY KEY, name TEXT, note TEXT)");
+    exec_ok(db, "CREATE INDEX deep_name ON deep (name)");
+    char *sql = malloc(64 * 500 + 64);
+    assert(sql != NULL);
+    for (int start = 1; start <= 10000; start += 500) {
+        size_t used = (size_t)sprintf(sql, "INSERT INTO deep VALUES ");
+        for (int id = start; id < start + 500; id++) {
+            used += (size_t)sprintf(sql + used, "%s(%d, 'name-%d', 'n')", id == start ? "" : ", ", id, id);
+        }
+        exec_ok(db, sql);
+    }
+    free(sql);
+    expect_pages_accounted(db, "색인이 깊은 표");
+    exec_ok(db, "DROP TABLE deep");
+    expect_pages_accounted(db, "깊은 표를 지운 뒤");
+    assert(database_close(db) == DATABASE_OK);
+}
+
 static void test_page_accounting_with_large_values(void)
 {
     printf("\n[test_page_accounting_with_large_values]\n");
@@ -1280,6 +1306,7 @@ int main(void)
     test_aggregate_memory_scales_with_groups();
     test_ordered_secondary_index();
     test_page_accounting_with_large_values();
+    test_page_list_with_deep_index();
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
     return g_fail == 0 ? 0 : 1;

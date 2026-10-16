@@ -1155,7 +1155,6 @@ heap_status_t heap_collect_pages_with_indexes(heap_t *heap, const uint32_t *root
         page = malloc(RECORD_PAGE_BYTES);
     }
     if (fields == NULL || page == NULL) result = HEAP_NOMEM;
-    if (result == HEAP_OK && (!list_reserve(&list, heap->dir_count + heap->entry_count, ledger))) result = HEAP_NOMEM;
     /* 읽기에 쓰지 않는 어긋난 색인도 DROP 때는 그 페이지를 회수해야 한다. */
     if (result == HEAP_OK && heap->index_root != PAGE_FILE_NO_PAGE) {
         result = collect_index_pages(heap, &list);
@@ -1168,6 +1167,8 @@ heap_status_t heap_collect_pages_with_indexes(heap_t *heap, const uint32_t *root
                                                      collect_index_page, &index_collect);
         result = heap_from_pk(heap, visited);
     }
+    /* 색인 페이지를 넣은 뒤에 디렉터리·행 페이지 자리를 잡는다. 아래 두 반복은 자리를 다시 확인하지 않는다 */
+    if (result == HEAP_OK && !list_reserve(&list, heap->dir_count + heap->entry_count, ledger)) result = HEAP_NOMEM;
     for (size_t i = 0; result == HEAP_OK && i < heap->dir_count; i++) list.items[list.len++] = heap->dirs[i];
     for (size_t i = 0; result == HEAP_OK && i < heap->entry_count; i++) {
         list.items[list.len++] = heap->entries[i];
