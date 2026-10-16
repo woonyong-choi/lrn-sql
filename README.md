@@ -57,7 +57,7 @@ QueueStats(ready=0, leased=0, acked=1, failed=0)
 
 1. 응용 프로그램이 C API `database_exec`나 Python `Database.execute`로 SQL과 매개변수를 넘깁니다.
 2. lexer와 parser가 문장 하나를 AST로 바꾸고, 실행기가 기본 키·색인 조회나 테이블 스캔으로 행을 읽습니다.
-3. 변경 문장은 바뀐 페이지를 새 자리에 쓰고, 데이터 페이지를 `fsync`한 뒤 제어 페이지 한 장으로 새 세대를 게시합니다.
+3. 변경 문장은 바뀐 페이지를 새 자리에 쓰고, 제어 페이지 한 장으로 새 세대를 게시한 뒤 `fsync`합니다. 제어 페이지에 적은 페이지 체크섬 목록으로 끝나지 않은 commit을 알아보고 이전 세대로 엽니다.
 4. 쓰기 트랜잭션은 한 번에 하나이고, 트랜잭션은 시작 때 게시된 상태와 자기 변경만 봅니다. 다른 writer가 있으면 Python 바인딩은 `busy_timeout_s`까지 다시 시도합니다.
 5. ACK 큐는 공개 SQL과 트랜잭션 API만 써서 작업을 READY, LEASED, ACKED, FAILED 상태로 옮기고 fence 값으로 오래된 처리 결과를 거절합니다.
 

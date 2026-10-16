@@ -14,7 +14,7 @@
  *
  * 페이지 배치(모든 정수는 little-endian):
  *   0..31   envelope: "LRPG", 버전 u16, 종류 u16, page ID u32, table ID u32,
- *           본문 길이 u32, 예약 8바이트(0), 체크섬 u32(FNV-1a, 체크섬 필드 제외 전체)
+ *           본문 길이 u32, 예약 8바이트(0), 체크섬 u32(CRC32C, 체크섬 필드 제외 전체)
  *   32..8191 본문 8160바이트. 본문 길이 뒤는 0이어야 한다.
  * page 0, 1은 제어 페이지 두 장이다. 세대 번호가 큰 쪽이 현재 값이고 commit은 작은 쪽에 쓴다.
  *
@@ -24,8 +24,7 @@
  *   한 세대 전 상태로 정상 열리며 "게시되지 않은 것"과 구분되지 않는다.
  * - 제어 페이지 한쪽이 손상됐을 때 다른 쪽으로 열리는 fallback은 open_info.damaged_slots로
  *   알리지만, 손상된 쪽이 최신이었는지는 알 수 없다.
- * - 여러 페이지 갱신의 원자성은 없다. commit은 "데이터 페이지 fsync → 제어 페이지 쓰기 → fsync"
- *   순서만 지킨다.
+ * - 여러 페이지 갱신의 원자성은 없다. commit 순서는 page_file_commit에 있다.
  * 빈 페이지 목록(재사용 가능·한 세대 대기)은 commit마다 제어 페이지에 함께 쓴다. 제어 페이지 본문에 다 들어가지
  * 않으면 나머지를 PAGE_KIND_FREE_LIST 사슬 페이지에 쓴다. 그래서 다시 열어도 놓은 페이지가 새지 않는다.
  * 단일 스레드 계약이다.
@@ -209,7 +208,9 @@ size_t page_file_reusable_count(const page_file_t *file);
 page_file_status_t page_file_stage_catalog(page_file_t *file, uint32_t head, uint32_t size,
                                            uint64_t catalog_generation);
 /*
- * 데이터 fsync → 오래된 제어 슬롯에 새 세대 쓰기 → fsync. 성공해야 보류 중이던 해제 페이지가
+ * 이번 commit이 쓴 페이지가 모두 새 페이지이고 MANIFEST_MAX장 이하이면 데이터 쓰기 → 오래된 제어 슬롯에
+ * 새 세대와 manifest(페이지 번호·체크섬) 쓰기 → fsync 한 번이다. 다시 열 때 manifest와 실제 페이지가 다르면
+ * 끝나지 않은 commit으로 보고 이전 세대로 연다. 그 밖에는 데이터 fsync → 제어 쓰기 → fsync다. 성공해야 보류 중이던 해제 페이지가
  * 재사용 가능해진다. 이 핸들이 아는 현재 세대와 보류 목록은 실패하면 그대로이지만, 실패한
  * commit이 디스크에 새 세대를 남기지 않았다고 항상 말할 수는 없다. 결과는 page_file_last_commit_outcome이
  * 알린다. 제어 쓰기를 시도한 뒤의 실패는 다시 열면 새 상태가 보일 수 있고 아닐 수도 있다.
