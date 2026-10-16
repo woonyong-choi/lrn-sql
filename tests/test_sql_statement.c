@@ -457,6 +457,7 @@ static void set_operation_forms(void)
     free_clean(statement);
 }
 
+/* #47 ON CONFLICT 문법: 대상·DO NOTHING·DO UPDATE·오류 위치 */
 static void conflict_forms(void)
 {
     sqlstmt_t *statement = parse_ok("INSERT INTO t (a, b) VALUES (1, 2) ON CONFLICT DO NOTHING RETURNING a");
@@ -471,7 +472,7 @@ static void conflict_forms(void)
     statement = parse_ok("INSERT INTO t DEFAULT VALUES ON CONFLICT (a) DO NOTHING");
     assert(statement->insert.conflict.present && statement->insert.conflict.has_target);
     free_clean(statement);
-    expect_syntax("INSERT INTO t VALUES (1) ON CONFLICT DO UPDATE SET a = 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 37);
+    expect_syntax("INSERT INTO t VALUES (1) ON CONFLICT DO UPDATE SET a = 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 40);
     expect_unsupported("INSERT INTO t VALUES (1) ON CONFLICT (a, b) DO NOTHING", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 39);
     expect_syntax("INSERT INTO t VALUES (1) ON CONFLICT (a) DO", SQLSTMT_REASON_UNEXPECTED_END, 43);
     expect_syntax("INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1, a = 2", SQLSTMT_REASON_DUPLICATE_COLUMN, 62);

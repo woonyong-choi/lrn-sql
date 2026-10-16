@@ -439,6 +439,7 @@ CASES = [
             {"sql": "SELECT p.id FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person = p.nope)", "error": True},
         ],
     },
+    # #47 완료 조건 1: 충돌 처리를 SQLite·PostgreSQL과 비교
     {
         "name": "on-conflict",
         "setup": [

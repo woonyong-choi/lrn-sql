@@ -395,6 +395,7 @@ static const statement_case_t CASES[] = {
     {"update returning", "UPDATE users SET bio = ? WHERE id <= 3 RETURNING id, bio", true},
     {"delete returning", "DELETE FROM users WHERE id = 2 RETURNING *", false},
     {"insert returning", "INSERT INTO users (name, bio) VALUES ('ret', ?) RETURNING id, name", true},
+    /* #47 완료 조건 3: 문장 중간 오류와 rollback 뒤 원래 행·색인 보존 */
     {"upsert update", "INSERT INTO users (id, name, bio) VALUES (1, 'up', ?) ON CONFLICT (id) DO UPDATE SET bio = excluded.bio "
                       "RETURNING id", true},
     {"upsert mixed", "INSERT INTO users (id, name) VALUES (3, 'x'), (77, 'new') ON CONFLICT DO NOTHING", false},

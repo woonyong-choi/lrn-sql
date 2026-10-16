@@ -104,6 +104,7 @@ def test_returning_after_failed_statement_leaves_rows(tmp_path: Path) -> None:
     db.close()
 
 
+# #47 완료 조건 2: 동시 충돌 삽입에서 유일성 유지, 부분 성공 금지
 def test_concurrent_upserts_lose_nothing(tmp_path: Path) -> None:
     db = Database(tmp_path / "upsert.lrdb", busy_timeout_s=10.0)
     db.execute("CREATE TABLE counters (k INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
