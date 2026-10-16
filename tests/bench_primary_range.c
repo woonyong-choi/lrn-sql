@@ -87,7 +87,7 @@ int main(int argc, char **argv)
     assert(sqlite || scan || strcmp(mode, "range") == 0);
     long rows = strtol(argv[2], NULL, 10);
     assert(rows >= RESULT_ROWS && rows % BATCH == 0);
-    const char *path = sqlite ? "build/bench_primary_range.db" : "build/bench_primary_range.lrdb";
+    const char *path = sqlite ? "build/bench_primary_range.db" : "build/bench_primary_range.totedb";
     unlink(path);
 
     database_t *engine = NULL;

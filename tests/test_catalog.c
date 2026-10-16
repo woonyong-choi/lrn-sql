@@ -247,41 +247,19 @@ static void identity_counters_are_monotonic_and_bounded(void)
     catalog_t *catalog;
     assert(catalog_open_empty(&catalog) == CATALOG_OK);
     catalog_column_spec_t columns[] = {column("id", VALUE_INTEGER, true)};
-    catalog_legacy_table_t legacy = {{"old", 3, columns, 1, 0, true}, 40, INT64_MAX, 9, 10};
+    catalog_table_spec_t spec = {"old", 3, columns, 1, 0, true};
     catalog_table_id_t id;
-    assert(catalog_import_legacy(catalog, &legacy, &id) == CATALOG_OK);
-    catalog_table_view_t view = describe(catalog, id);
-    assert(view.row_count == 40 && view.next_identity == (uint64_t)INT64_MAX);
-    assert(view.heap_root == 9 && view.primary_root == 10);
+    assert(catalog_create_table(catalog, &spec, &id) == CATALOG_OK);
     uint64_t value = 0;
+    assert(catalog_reserve_identity(catalog, id, &value) == CATALOG_OK && value == 1);
+    assert(catalog_reserve_identity(catalog, id, &value) == CATALOG_OK && value == 2);
+    assert(catalog_raise_identity(catalog, id, (uint64_t)INT64_MAX) == CATALOG_OK);
     assert(catalog_reserve_identity(catalog, id, &value) == CATALOG_OK && value == INT64_MAX);
     snapshot_t before = snapshot(catalog);
     value = 5;
     assert(catalog_reserve_identity(catalog, id, &value) == CATALOG_LIMIT && value == 5);
     assert_same(catalog, &before);
     free(before.bytes);
-
-    /* 명시적 import만 허용한다. 잘못된 카운터와 중복 이름은 카탈로그를 바꾸지 않는다. */
-    snapshot_t shot = snapshot(catalog);
-    catalog_table_id_t other = 99;
-    legacy.table.name = "fresh";
-    legacy.table.name_bytes = 5;
-    legacy.next_identity = 0;
-    assert(catalog_import_legacy(catalog, &legacy, &other) == CATALOG_INVALID && other == 99);
-    legacy.next_identity = (uint64_t)INT64_MAX + 2;
-    assert(catalog_import_legacy(catalog, &legacy, &other) == CATALOG_INVALID);
-    legacy.next_identity = 3;
-    legacy.table.name = "old";
-    legacy.table.name_bytes = 3;
-    assert(catalog_import_legacy(catalog, &legacy, &other) == CATALOG_EXISTS && other == 99);
-    assert(catalog_import_legacy(catalog, NULL, &other) == CATALOG_INVALID);
-    assert_same(catalog, &shot);
-    legacy.table.name = "edge";
-    legacy.table.name_bytes = 4;
-    legacy.next_identity = (uint64_t)INT64_MAX + 1;
-    assert(catalog_import_legacy(catalog, &legacy, &other) == CATALOG_OK);
-    assert(catalog_reserve_identity(catalog, other, &value) == CATALOG_LIMIT);
-    free(shot.bytes);
     catalog_close(catalog);
 }
 
@@ -362,7 +340,7 @@ static void encode_decode_roundtrips_and_fixes_layout(void)
     catalog_t *empty;
     assert(catalog_open_empty(&empty) == CATALOG_OK);
     snapshot_t empty_shot = snapshot(empty);
-    assert(empty_shot.size == 32 && memcmp(empty_shot.bytes, "LRCT\x01\x00\x00\x00\x20\x00\x00\x00", 12) == 0);
+    assert(empty_shot.size == 36 && memcmp(empty_shot.bytes, "LRCT\x01\x00\x00\x00\x24\x00\x00\x00", 12) == 0);
     catalog_t *back;
     assert(catalog_decode(empty_shot.bytes, empty_shot.size, &back) == CATALOG_OK);
     assert(catalog_table_count(back) == 0 && catalog_generation(back) == 0);
@@ -485,11 +463,11 @@ static void semantic_corruption_is_rejected(void)
     catalog_table_id_t id;
     assert(create(catalog, "t", columns, 2, 0, true, &id) == CATALOG_OK);
     snapshot_t shot = snapshot(catalog);
-    assert(shot.size == 79);
+    assert(shot.size == 83);
     const tamper_t cases[] = {
-        {4, 2, 2, CATALOG_CORRUPT}, {4, 2, 3, CATALOG_OK}, {4, 2, 4, CATALOG_UNSUPPORTED},
+        {4, 2, 2, CATALOG_UNSUPPORTED}, {4, 2, 3, CATALOG_UNSUPPORTED}, {4, 2, 4, CATALOG_UNSUPPORTED},
         {4, 2, 0, CATALOG_UNSUPPORTED}, {6, 2, 1, CATALOG_CORRUPT},
-        {0, 1, 'X', CATALOG_CORRUPT}, {8, 4, 78, CATALOG_CORRUPT}, {8, 4, 80, CATALOG_CORRUPT},
+        {0, 1, 'X', CATALOG_CORRUPT}, {8, 4, 82, CATALOG_CORRUPT}, {8, 4, 84, CATALOG_CORRUPT},
         {20, 4, 0, CATALOG_CORRUPT}, {20, 4, 1, CATALOG_CORRUPT},
         {24, 4, 0, CATALOG_CORRUPT}, {24, 4, 2, CATALOG_CORRUPT}, {24, 4, 0xffffffffu, CATALOG_CORRUPT},
         {28, 4, 0, CATALOG_CORRUPT}, {28, 4, 2, CATALOG_CORRUPT},
@@ -512,7 +490,7 @@ static void semantic_corruption_is_rejected(void)
     catalog_column_spec_t twin[] = {column("x", VALUE_INTEGER, false), column("y", VALUE_TEXT, false)};
     assert(create(catalog, "t", twin, 2, CATALOG_NO_COLUMN, false, &id) == CATALOG_OK);
     shot = snapshot(catalog);
-    assert(shot.size == 78 && shot.bytes[68] == 'x' && shot.bytes[73] == 'y');
+    assert(shot.size == 82 && shot.bytes[68] == 'x' && shot.bytes[73] == 'y');
     const tamper_t twins[] = {{73, 1, 'x', CATALOG_CORRUPT}};
     run_tampers(shot.bytes, shot.size, twins, 1);
     free(shot.bytes);
@@ -524,7 +502,7 @@ static void semantic_corruption_is_rejected(void)
     assert(create(catalog, "a", one, 1, 0, false, &id) == CATALOG_OK);
     assert(create(catalog, "b", one, 1, 0, false, &id) == CATALOG_OK);
     shot = snapshot(catalog);
-    assert(shot.size == 114 && shot.bytes[63] == 'a' && shot.bytes[104] == 'b');
+    assert(shot.size == 118 && shot.bytes[63] == 'a' && shot.bytes[104] == 'b');
     const tamper_t pair[] = {
         {69, 4, 1, CATALOG_CORRUPT}, {69, 4, 0, CATALOG_CORRUPT}, {69, 4, 3, CATALOG_CORRUPT},
         {28, 4, 2, CATALOG_CORRUPT}, {104, 1, 'a', CATALOG_CORRUPT}};
@@ -588,7 +566,7 @@ static void encoded_size_cap_is_enforced(void)
     catalog_close(catalog);
 }
 
-/* #65: v1 테이블 파일을 읽은 뒤 보조 색인 메타데이터를 v2로 게시하고 다시 읽는다. */
+/* #65: 색인 없는 카탈로그를 다시 읽은 뒤 보조 색인 메타데이터를 더해 게시하고 다시 읽는다. */
 static void index_metadata_survives_restart(void)
 {
     catalog_t *catalog;
@@ -609,7 +587,7 @@ static void index_metadata_survives_restart(void)
     assert(catalog_set_index_root(upgraded, "by_name", 7, 123) == CATALOG_OK);
     assert(catalog_set_index_root(upgraded, "order_name", 10, 456) == CATALOG_OK);
     snapshot_t indexed = snapshot(upgraded);
-    assert(indexed.bytes[4] == 2 && catalog_encoded_bytes(upgraded) == indexed.size);
+    assert(indexed.bytes[4] == 1 && catalog_encoded_bytes(upgraded) == indexed.size);
     catalog_t *reopened;
     assert(catalog_decode(indexed.bytes, indexed.size, &reopened) == CATALOG_OK);
     assert(catalog_index_count(reopened, users) == 1);
@@ -624,14 +602,14 @@ static void index_metadata_survives_restart(void)
     assert(catalog_index_count(reopened, users) == 0);
     assert(catalog_drop_table(reopened, orders) == CATALOG_OK);
     snapshot_t empty = snapshot(reopened);
-    assert(empty.bytes[4] == 1 && empty.size == 32);
+    assert(empty.bytes[4] == 1 && empty.size == 36);   /* 머리 28 + 색인 수 4 + 체크섬 4 */
     free(empty.bytes);
     free(indexed.bytes);
     catalog_close(reopened);
     catalog_close(upgraded);
 }
 
-/* 기본값은 형식 버전 3으로 저장되고 그대로 돌아오며, 잘림·비트 뒤집힘은 거절된다 */
+/* 기본값은 그대로 저장되고 돌아오며, 잘림·비트 뒤집힘은 거절된다. 형식 판은 하나다 */
 static void defaults_round_trip(void)
 {
     catalog_t *catalog;
@@ -653,7 +631,7 @@ static void defaults_round_trip(void)
     assert(catalog_create_table(catalog, &bad_spec, &id) == CATALOG_INVALID);
     assert(catalog_create_table(catalog, &spec, &id) == CATALOG_OK);
     snapshot_t shot = snapshot(catalog);
-    assert(shot.bytes[4] == 3 && shot.bytes[5] == 0);
+    assert(shot.bytes[4] == 1 && shot.bytes[5] == 0);
     catalog_t *decoded;
     assert(catalog_decode(shot.bytes, shot.size, &decoded) == CATALOG_OK);
     catalog_table_view_t view;
@@ -676,11 +654,11 @@ static void defaults_round_trip(void)
             assert(status == CATALOG_CORRUPT || status == CATALOG_UNSUPPORTED);
         }
     }
-    /* 기본값 플래그는 버전 1·2에서 쓸 수 없다 */
+    /* 다른 형식 판은 해석하지 않는다 */
     memcpy(copy, shot.bytes, shot.size);
-    copy[4] = 1;
+    copy[4] = 2;
     seal(copy, shot.size);
-    assert(decode_marker(copy, shot.size) == CATALOG_CORRUPT);
+    assert(decode_marker(copy, shot.size) == CATALOG_UNSUPPORTED);
     free(copy);
     free(again.bytes);
     free(shot.bytes);

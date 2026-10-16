@@ -108,7 +108,7 @@ def main() -> int:
     rows = make_rows(args.rows)
     with tempfile.TemporaryDirectory(prefix="aggcmp-") as tmp:
         engines = {
-            "lrn": run_ours(Path(tmp) / "ours.lrdb", rows, args.repeats),
+            "lrn": run_ours(Path(tmp) / "ours.totedb", rows, args.repeats),
             "sqlite": run_sqlite(Path(tmp) / "plain.db", rows, args.repeats, covering=False),
             "sqlite_covering": run_sqlite(Path(tmp) / "covering.db", rows, args.repeats, covering=True),
         }

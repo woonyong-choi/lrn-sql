@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-/* #133: 단일 실행 순서의 시험용 지점이다. 제품 거래·WAL 구현을 뜻하지 않는다. */
+/* #133: 단일 실행 순서의 시험용 지점 이름이다. 제품 코드의 실제 실패 지점과 1:1로 대응하지 않는다. */
 #define FAULT_MAX_SITES 32u
 #define FAULT_NAME_BYTES 48u
 

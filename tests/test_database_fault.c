@@ -24,7 +24,7 @@
  */
 
 #define DIR_NAME "build/test_database_fault_dir"
-#define DB_PATH DIR_NAME "/db.lrdb"
+#define DB_PATH DIR_NAME "/db.totedb"
 
 static int g_run = 0;
 static int g_fail = 0;

@@ -9,7 +9,7 @@
 static const char *const builtin_sites[] = {
     "alloc.malloc", "alloc.realloc", "lock.wait", "file.pread", "file.pwrite",
     "file.fsync", "socket.write", "txn.begin", "txn.commit", "heap.split",
-    "index.split", "wal.append", "wal.flush", "checkpoint.publish", "process.kill"
+    "index.split", "control.write", "control.fsync", "commit.publish", "process.kill"
 };
 
 void fault_runtime_init(fault_runtime_t *runtime, FILE *trace) {

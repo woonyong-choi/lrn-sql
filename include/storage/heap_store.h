@@ -15,27 +15,22 @@
  * catalog의 heap_root는 이 디렉터리의 첫 페이지를 가리킨다(0이면 빈 heap).
  *
  * 위치 locator 구별: heap_root가 가리키는 페이지의 종류를 page_file_page_info로 검증한다.
- *   PAGE_KIND_DIRECTORY + table ID 일치 + magic "LHD1"/"LHD2"/"LHD3"와 대응 version
+ *   PAGE_KIND_DIRECTORY + table ID 일치 + magic "LHD2"/"LHD3"와 대응 version
  *                                                                    -> 이 모듈의 디렉터리
  *   PAGE_KIND_RECORD를 포함한 그 밖의 종류
  *                                                                    -> HEAP_UNSUPPORTED_LOCATOR
  * 어떤 경우에도 옛 record root를 디렉터리로 재해석하거나 변환하지 않으며, 변환 함수도 없다.
  *
- * 디렉터리 페이지 본문(little-endian, 8160바이트, 뒤는 0):
- *   0..3   magic "LHD1"
- *   4..5   version u16 = 1
+ * 디렉터리 잎 본문(LHD3, little-endian, 8160바이트, 뒤는 0):
+ *   0..3   magic "LHD3"
+ *   4..5   version u16 = 3
  *   6..7   flags u16 = 0
  *   8..11  table ID u32 (envelope의 table ID와 같아야 한다)
- *   12..15 다음 디렉터리 페이지 u32 (0이면 마지막)
- *   16..19 항목 수 u32 (한 페이지 최대 HEAP_DIRECTORY_ENTRIES)
- *   20..   record page ID u32 배열
+ *   12..15 예약 u32 = 0
+ *   16..19 항목 수 u32 (한 페이지 최대 HEAP_HINT_DIRECTORY_ENTRIES)
+ *   20..   (record page ID u32, 연속 빈 바이트 u16) 쌍
  * 항목의 순서가 heap의 행 순서(scan 순서)이며 같은 page ID가 두 번 나오거나 디렉터리 페이지와
- * 겹치면 CORRUPT다. 체인이 순환하거나 page_count를 넘어 길면 CORRUPT다.
- *
- * 옛 LHD1 체인과 LHD2/LHD1 트리는 읽을 수 있다. 첫 변경에서 각 record page의 실제 연속 빈 바이트를
- * 한 번 읽어 새 형식으로 바꾼다. 이후 재시작에서는 저장된 힌트를 읽고 record page 전수를 다시 읽지 않는다.
- * 새 디렉터리 잎은 LHD3(version 3)이며, 20바이트 헤더 뒤에 (record page ID u32, 연속 빈 바이트 u16)
- * 쌍을 HEAP_HINT_DIRECTORY_ENTRIES개까지 저장한다. 힌트는 삽입 전 실제 페이지에서 재검증한다.
+ * 겹치면 CORRUPT다. 빈 바이트는 삽입할 페이지를 고르는 힌트이며 삽입 전 실제 페이지에서 재검증한다.
  *   LHD3 단일 잎  record page가 HEAP_HINT_DIRECTORY_ENTRIES개 이하일 때 루트 자체가 잎이다.
  *   LHD2 트리       그보다 많으면 루트 한 장 아래 LHD3 잎 여러 장. 한 행을 바꾸면 바뀐 record page가
  *              속한 잎과 루트만 새로 쓰고 나머지 잎은 그대로 가리킨다.
@@ -43,7 +38,6 @@
  *                12..15 예약 u32 = 0, 16..19 잎 수 u32(1..HEAP_DIRECTORY_ENTRIES), 20.. 잎 페이지 ID u32 배열, 뒤는 0.
  *     잎 본문: LHD3 본문에서 다음 페이지가 0이다. 마지막 잎을 뺀 모든 잎은 항목이 가득 차 있고
  *              i번째 잎이 i * HEAP_HINT_DIRECTORY_ENTRIES번째 항목부터 담는다.
- *   LHD2를 모르는 옛 코드는 트리 heap의 루트를 UNSUPPORTED_LOCATOR로 거절한다(변환하지 않는 계약과 같다).
  *
  * 행 형식(record 하나, version 1): 필드 1 + 2n개.
  *   필드 0: INTEGER 1 (행 형식 version)
@@ -79,7 +73,7 @@
  * 같아도 다시 open한 heap_t의 locator로만 쓴다.
  *
  * 놓은 페이지 목록은 page_file_commit이 제어 페이지와 빈 목록 사슬 페이지에 적으므로 재시작 뒤에도 회수된다.
- * 보장하지 않는 것: WAL, 여러 페이지 갱신의 원자성(게시는 catalog commit 하나에 기대며 그 한계는
+ * 보장하지 않는 것: 여러 페이지 갱신의 원자성(게시는 catalog commit 하나에 기대며 그 한계는
  * page_file.h를 따른다), 삭제된 slot 번호의 재사용, 동시 접근(단일 스레드, 직렬화는 database가 맡는다).
  * 삭제된 행의 데이터 바이트는 같은 record page에
  * 새 행을 넣을 때 재사용한다. 후보 탐색은 메모리 힌트 배열을 훑는 best-fit이며 record page 읽기를 줄이지만
@@ -90,8 +84,6 @@
 #define HEAP_MAX_COLUMNS 511u
 #define HEAP_INLINE_LIMIT_BYTES 4000u
 #define HEAP_MAX_ROW_BYTES 8000u
-#define HEAP_DIRECTORY_MAGIC "LHD1"
-#define HEAP_DIRECTORY_VERSION 1u
 #define HEAP_TREE_ROOT_MAGIC "LHD2"
 #define HEAP_TREE_ROOT_VERSION 2u
 #define HEAP_DIRECTORY_HEADER_BYTES 20u

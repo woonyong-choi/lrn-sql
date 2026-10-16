@@ -770,7 +770,7 @@ static void test_wrong_database_and_read_only(void)
 
     /* 두 번째 database: 같은 이름의 큐 테이블은 없고 업무 테이블만 있다 */
     char path_b[192];
-    snprintf(path_b, sizeof(path_b), "%s/other.lrdb", g_dir);
+    snprintf(path_b, sizeof(path_b), "%s/other.totedb", g_dir);
     database_t *created = NULL;
     assert(database_create(path_b, &created) == DATABASE_OK && database_close(created) == DATABASE_OK);
     session_t *b = open_conn(path_b, true, true, NULL);

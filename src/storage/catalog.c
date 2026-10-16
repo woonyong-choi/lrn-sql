@@ -4,11 +4,10 @@
 #include "storage/catalog.h"
 #include "storage/le.h"
 
+/* 형식은 하나다: 머리, 테이블들(컬럼 기본값 포함), 색인 수 u32와 색인들, 체크섬 */
 #define FORMAT_VERSION 1u
-#define INDEX_FORMAT_VERSION 2u
-/* 컬럼 기본값이 있는 카탈로그. 색인 영역은 테이블 뒤에 바이트가 남아 있을 때만 있다 */
-#define DEFAULT_FORMAT_VERSION 3u
 #define HEADER_BYTES 28u
+#define INDEX_COUNT_BYTES 4u
 #define CHECKSUM_BYTES 4u
 #define TABLE_FIXED_BYTES 35u
 #define COLUMN_FIXED_BYTES 4u
@@ -232,7 +231,7 @@ catalog_status_t catalog_open_empty(catalog_t **out)
     if (out == NULL) return CATALOG_INVALID;
     catalog_t *catalog = malloc(sizeof(*catalog));
     if (catalog == NULL) return CATALOG_NOMEM;
-    *catalog = (catalog_t){.next_table_id = 1, .encoded_bytes = HEADER_BYTES + CHECKSUM_BYTES};
+    *catalog = (catalog_t){.next_table_id = 1, .encoded_bytes = HEADER_BYTES + INDEX_COUNT_BYTES + CHECKSUM_BYTES};
     *out = catalog;
     return CATALOG_OK;
 }
@@ -291,16 +290,11 @@ static catalog_status_t check_can_mutate(const catalog_t *catalog)
 }
 
 /* 모든 검사와 할당을 끝낸 뒤에만 상태를 바꾼다. */
-static catalog_status_t add_table(catalog_t *catalog, const catalog_table_spec_t *spec,
-                                  const catalog_legacy_table_t *legacy, catalog_table_id_t *id)
+static catalog_status_t add_table(catalog_t *catalog, const catalog_table_spec_t *spec, catalog_table_id_t *id)
 {
     if (id == NULL) return CATALOG_INVALID;
     catalog_status_t status = check_spec(spec);
     if (status != CATALOG_OK) return status;
-    if (legacy != NULL && spec->has_identity &&
-        (legacy->next_identity < 1 || legacy->next_identity > IDENTITY_END)) {
-        return CATALOG_INVALID;
-    }
     status = check_spec_names(spec);
     if (status != CATALOG_OK) return status;
     if (find_by_name(catalog, spec->name, spec->name_bytes) != NULL) return CATALOG_EXISTS;
@@ -320,12 +314,6 @@ static catalog_status_t add_table(catalog_t *catalog, const catalog_table_spec_t
         release_table(&table);
         return status;
     }
-    if (legacy != NULL) {
-        table.row_count = legacy->row_count;
-        if (spec->has_identity) table.next_identity = legacy->next_identity;
-        table.heap_root = legacy->heap_root;
-        table.primary_root = legacy->primary_root;
-    }
     catalog->tables[catalog->count++] = table;
     catalog->next_table_id++;
     catalog->generation++;
@@ -338,14 +326,7 @@ catalog_status_t catalog_create_table(catalog_t *catalog, const catalog_table_sp
                                       catalog_table_id_t *id)
 {
     if (catalog == NULL) return CATALOG_INVALID;
-    return add_table(catalog, spec, NULL, id);
-}
-
-catalog_status_t catalog_import_legacy(catalog_t *catalog, const catalog_legacy_table_t *legacy,
-                                       catalog_table_id_t *id)
-{
-    if (catalog == NULL || legacy == NULL) return CATALOG_INVALID;
-    return add_table(catalog, &legacy->table, legacy, id);
+    return add_table(catalog, spec, id);
 }
 
 catalog_status_t catalog_drop_table(catalog_t *catalog, catalog_table_id_t id)
@@ -357,7 +338,6 @@ catalog_status_t catalog_drop_table(catalog_t *catalog, catalog_table_id_t id)
     if (status != CATALOG_OK) return status;
     size_t index = (size_t)(table - catalog->tables);
     catalog->encoded_bytes -= table->encoded_bytes;
-    bool had_indexes = catalog->index_count > 0;
     for (size_t i = 0; i < catalog->index_count;) {
         if (catalog->indexes[i].table_id != id) {
             i++;
@@ -369,7 +349,6 @@ catalog_status_t catalog_drop_table(catalog_t *catalog, catalog_table_id_t id)
                 (catalog->index_count - i - 1) * sizeof(*catalog->indexes));
         catalog->index_count--;
     }
-    if (had_indexes && catalog->index_count == 0) catalog->encoded_bytes -= 4u;
     release_table(table);
     memmove(table, table + 1, (catalog->count - index - 1) * sizeof(*table));
     catalog->count--;
@@ -459,7 +438,7 @@ catalog_status_t catalog_add_index(catalog_t *catalog, catalog_table_id_t table_
         return CATALOG_EXISTS;
     }
     if (catalog->index_count == CATALOG_MAX_INDEXES) return CATALOG_LIMIT;
-    size_t extra = INDEX_FIXED_BYTES + name_bytes + (catalog->index_count == 0 ? 4u : 0u);
+    size_t extra = INDEX_FIXED_BYTES + name_bytes;
     if (extra > CATALOG_MAX_ENCODED_BYTES - catalog->encoded_bytes) return CATALOG_LIMIT;
     catalog_status_t status = check_can_mutate(catalog);
     if (status != CATALOG_OK) return status;
@@ -606,16 +585,6 @@ static uint8_t *encode_table(uint8_t *at, const table_t *table)
     return at;
 }
 
-static bool has_defaults(const catalog_t *catalog)
-{
-    for (size_t t = 0; t < catalog->count; t++) {
-        for (size_t i = 0; i < catalog->tables[t].column_count; i++) {
-            if (catalog->tables[t].columns[i].has_default) return true;
-        }
-    }
-    return false;
-}
-
 catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_t *size)
 {
     if (catalog == NULL || bytes == NULL || size == NULL) return CATALOG_INVALID;
@@ -623,9 +592,7 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
     uint8_t *buffer = malloc(total);
     if (buffer == NULL) return CATALOG_NOMEM;
     memcpy(buffer, "LRCT", 4);
-    put_u16(buffer + 4, has_defaults(catalog)          ? DEFAULT_FORMAT_VERSION
-                        : catalog->index_count > 0 ? INDEX_FORMAT_VERSION
-                                                   : FORMAT_VERSION);
+    put_u16(buffer + 4, FORMAT_VERSION);
     put_u16(buffer + 6, 0);
     le_put_u32(buffer + 8, (uint32_t)total);
     le_put_u64(buffer + 12, catalog->generation);
@@ -633,19 +600,17 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
     le_put_u32(buffer + 24, (uint32_t)catalog->count);
     uint8_t *at = buffer + HEADER_BYTES;
     for (size_t i = 0; i < catalog->count; i++) at = encode_table(at, &catalog->tables[i]);
-    if (catalog->index_count > 0) {
-        le_put_u32(at, (uint32_t)catalog->index_count);
-        at += 4;
-        for (size_t i = 0; i < catalog->index_count; i++) {
-            const index_t *index = &catalog->indexes[i];
-            le_put_u32(at, index->table_id);
-            put_u16(at + 4, index->column);
-            put_u16(at + 6, (uint16_t)index->name_bytes);
-            at[8] = (uint8_t)((index->unique ? INDEX_UNIQUE : 0) | (index->ordered ? INDEX_ORDERED : 0));
-            le_put_u32(at + 9, index->root);
-            memcpy(at + INDEX_FIXED_BYTES, index->name, index->name_bytes);
-            at += INDEX_FIXED_BYTES + index->name_bytes;
-        }
+    le_put_u32(at, (uint32_t)catalog->index_count);
+    at += INDEX_COUNT_BYTES;
+    for (size_t i = 0; i < catalog->index_count; i++) {
+        const index_t *index = &catalog->indexes[i];
+        le_put_u32(at, index->table_id);
+        put_u16(at + 4, index->column);
+        put_u16(at + 6, (uint16_t)index->name_bytes);
+        at[8] = (uint8_t)((index->unique ? INDEX_UNIQUE : 0) | (index->ordered ? INDEX_ORDERED : 0));
+        le_put_u32(at + 9, index->root);
+        memcpy(at + INDEX_FIXED_BYTES, index->name, index->name_bytes);
+        at += INDEX_FIXED_BYTES + index->name_bytes;
     }
     le_put_u32(at, checksum(buffer, (size_t)(at - buffer)));
     *bytes = buffer;
@@ -656,7 +621,6 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
 typedef struct {
     const uint8_t *at;
     size_t left;
-    bool allow_default;          /* 형식 버전 3 */
 } reader_t;
 
 static bool take(reader_t *reader, size_t count, const uint8_t **out)
@@ -681,8 +645,7 @@ static catalog_status_t read_column(reader_t *reader, catalog_column_spec_t *col
     const uint8_t *fixed, *name;
     if (!take(reader, COLUMN_FIXED_BYTES, &fixed)) return CATALOG_CORRUPT;
     size_t name_bytes = (size_t)get_le(fixed + 2, 2);
-    uint8_t allowed = reader->allow_default ? (FLAG_NOT_NULL | FLAG_DEFAULT) : FLAG_NOT_NULL;
-    if ((fixed[1] & ~allowed) != 0 || !column_type_valid((value_type_t)fixed[0])) {
+    if ((fixed[1] & ~(FLAG_NOT_NULL | FLAG_DEFAULT)) != 0 || !column_type_valid((value_type_t)fixed[0])) {
         return CATALOG_CORRUPT;
     }
     if (!take(reader, name_bytes, &name) || !name_valid((const char *)name, name_bytes)) {
@@ -788,9 +751,7 @@ static catalog_status_t check_envelope(const uint8_t *bytes, size_t size)
     if (size > CATALOG_MAX_ENCODED_BYTES) return CATALOG_LIMIT;
     if (memcmp(bytes, "LRCT", 4) != 0) return CATALOG_CORRUPT;
     uint64_t version = get_le(bytes + 4, 2);
-    if (version != FORMAT_VERSION && version != INDEX_FORMAT_VERSION && version != DEFAULT_FORMAT_VERSION) {
-        return CATALOG_UNSUPPORTED;
-    }
+    if (version != FORMAT_VERSION) return CATALOG_UNSUPPORTED;
     if (get_le(bytes + 6, 2) != 0) return CATALOG_CORRUPT;
     if (get_le(bytes + 8, 4) != size) return CATALOG_CORRUPT;
     if (get_le(bytes + size - CHECKSUM_BYTES, 4) != checksum(bytes, size - CHECKSUM_BYTES)) {
@@ -818,18 +779,16 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
         if (catalog->tables == NULL) status = CATALOG_NOMEM;
         else catalog->capacity = table_count;
     }
-    uint64_t version = get_le(bytes + 4, 2);
-    reader_t reader = {bytes + HEADER_BYTES, payload, version == DEFAULT_FORMAT_VERSION};
+    reader_t reader = {bytes + HEADER_BYTES, payload};
     for (size_t i = 0; i < table_count && status == CATALOG_OK; i++) {
         status = read_table(&reader, catalog);
     }
-    if (status == CATALOG_OK &&
-        (version == INDEX_FORMAT_VERSION || (version == DEFAULT_FORMAT_VERSION && reader.left > 0))) {
+    if (status == CATALOG_OK) {
         const uint8_t *count_bytes;
-        if (!take(&reader, 4u, &count_bytes)) status = CATALOG_CORRUPT;
+        if (!take(&reader, INDEX_COUNT_BYTES, &count_bytes)) status = CATALOG_CORRUPT;
         else {
             size_t index_count = (size_t)get_le(count_bytes, 4);
-            if (index_count == 0 || index_count > CATALOG_MAX_INDEXES ||
+            if (index_count > CATALOG_MAX_INDEXES ||
                 index_count > reader.left / (INDEX_FIXED_BYTES + 1u)) status = CATALOG_CORRUPT;
             for (size_t i = 0; i < index_count && status == CATALOG_OK; i++) {
                 const uint8_t *fixed, *name;

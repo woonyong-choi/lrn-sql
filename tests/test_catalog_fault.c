@@ -80,21 +80,20 @@ static void assert_same(const catalog_t *catalog, const snapshot_t *before)
  * #6: 어느 할당이 실패해도 NOMEM이고 카탈로그·카운터·출력 인자가 그대로이며 새어 나간 메모리가 없다.
  * 각 호출이 필요한 할당 횟수보다 큰 fail_at에서 처음 성공한다.
  */
-static void create_and_import_preserve_catalog(bool legacy)
+static void create_preserves_catalog(void)
 {
     catalog_t *catalog = four_tables();
     snapshot_t before = snapshot(catalog);
     uint64_t generation = catalog_generation(catalog);
     long baseline = live;
     catalog_column_spec_t columns[] = {column("id", VALUE_INTEGER), column("payload", VALUE_BLOB)};
-    catalog_legacy_table_t entry = {{"e", 1, columns, 2, 0, true}, 9, 4, 8, 7};
+    catalog_table_spec_t spec = {"e", 1, columns, 2, 0, true};
     int failures = 0;
     for (int step = 1; step <= 40; step++) {
         catalog_table_id_t id = 99;
         calls = 0;
         fail_at = step;
-        catalog_status_t status = legacy ? catalog_import_legacy(catalog, &entry, &id)
-                                         : catalog_create_table(catalog, &entry.table, &id);
+        catalog_status_t status = catalog_create_table(catalog, &spec, &id);
         fail_at = 0;
         if (status == CATALOG_OK) {
             assert(calls < step && id == 5);
@@ -108,7 +107,7 @@ static void create_and_import_preserve_catalog(bool legacy)
     assert(failures >= 4);
     catalog_table_view_t view;
     assert(catalog_describe(catalog, 5, &view) == CATALOG_OK);
-    assert(view.row_count == (legacy ? 9u : 0u));
+    assert(view.row_count == 0u);
     catalog_test_free(before.bytes);
     catalog_close(catalog);
     assert(live == 0);
@@ -177,8 +176,7 @@ static void decode_failure_keeps_output_and_frees_partial_work(void)
 
 int main(void)
 {
-    create_and_import_preserve_catalog(false);
-    create_and_import_preserve_catalog(true);
+    create_preserves_catalog();
     open_empty_failure_keeps_output();
     encode_failure_keeps_output();
     decode_failure_keeps_output_and_frees_partial_work();

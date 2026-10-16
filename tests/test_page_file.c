@@ -1,7 +1,7 @@
 /*
  * test_page_file.c -- 새 저장 형식 page_file 검사 (#77)
  *
- * 합성 데이터만 쓴다. 이 검사는 독립 파일 API의 왕복·거절·게시·잠금만 다루며 WAL, 거래 복구,
+ * 합성 데이터만 쓴다. 이 검사는 독립 파일 API의 왕복·거절·게시·잠금만 다루며 거래 복구,
  * DB 전체 재시작은 검증하지 않는다. 성공 반환 뒤 저장 장치가 버린 쓰기(lost)는 탐지할 수 없고
  * 가장 최근 제어 페이지의 손실이 "게시되지 않음"과 구분되지 않는 한계를 그대로 확인한다.
  *
@@ -27,7 +27,7 @@
 #include "storage/record_page.h"
 
 #define DIR_NAME "__test__page_file_dir"
-#define DB_PATH DIR_NAME "/db.lrdb"
+#define DB_PATH DIR_NAME "/db.totedb"
 #define PARTIAL_PATH DB_PATH ".partial"
 
 static int g_run = 0;
@@ -321,7 +321,7 @@ static void test_fixture_roundtrip_is_page_size_independent(void)
     CHECK(manifest > 0 && bytes[PAGE_FILE_PAGE_BYTES + 16] + 256u * bytes[PAGE_FILE_PAGE_BYTES + 17] == 72 + 8 * manifest,
           "빈 목록이 없는 제어 본문은 머리 72바이트와 manifest %u개", manifest);
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 40] == PAGE_FILE_FORMAT_VERSION, "형식 버전 3");
-    CHECK(memcmp(bytes + PAGE_FILE_PAGE_BYTES + 32, "LRSQLDB\0", 8) == 0, "파일 magic");
+    CHECK(memcmp(bytes + PAGE_FILE_PAGE_BYTES + 32, "TOTEDB\0\0", 8) == 0, "파일 magic");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 48] == 4 && bytes[PAGE_FILE_PAGE_BYTES + 49] == 3 &&
               bytes[PAGE_FILE_PAGE_BYTES + 50] == 2 && bytes[PAGE_FILE_PAGE_BYTES + 51] == 1,
           "byte order 표식은 little-endian 0x01020304");
@@ -431,11 +431,17 @@ static void mut_empty(uint8_t *b, size_t *s)
     (void)b;
     *s = 0;
 }
-static void mut_legacy_minidb(uint8_t *b, size_t *s)
+/* 다른 형식의 파일: 두 제어 페이지 어디에도 ToteDB magic이 없다 */
+static void mut_foreign_file(uint8_t *b, size_t *s)
 {
-    (void)s;
-    memcpy(b, "MINIDB\0", 8);
-    b[8] = 2;
+    for (size_t i = 0; i < *s; i++) b[i] = (uint8_t)(i * 13u + 5u);
+    memcpy(b, "SQLite format 3", 16);
+}
+static void mut_short_text_file(uint8_t *b, size_t *s)
+{
+    static const char text[] = "hello, this is not a database\n";
+    memcpy(b, text, sizeof(text) - 1);
+    *s = sizeof(text) - 1;
 }
 static void mut_both_controls_bad(uint8_t *b, size_t *s)
 {
@@ -476,10 +482,11 @@ static void test_invalid_files_are_rejected_without_change(void)
         {"page_count 초과 길이", mut_truncate_pages, PAGE_FILE_CORRUPT},
         {"잘린 header", mut_truncate_header, PAGE_FILE_CORRUPT},
         {"빈 파일", mut_empty, PAGE_FILE_NO_CONTROL},
-        {"옛 MINIDB 파일", mut_legacy_minidb, PAGE_FILE_UNSUPPORTED},
+        {"다른 형식 파일", mut_foreign_file, PAGE_FILE_UNSUPPORTED},
+        {"짧은 텍스트 파일", mut_short_text_file, PAGE_FILE_UNSUPPORTED},
         {"제어 둘 다 손상", mut_both_controls_bad, PAGE_FILE_CORRUPT},
         {"page_count가 너무 작음", mut_page_count_too_small, PAGE_FILE_CORRUPT},
-        {"옛 LRP1 페이지만", mut_old_lrp1_only, PAGE_FILE_CORRUPT},
+        {"옛 LRP1 페이지만", mut_old_lrp1_only, PAGE_FILE_UNSUPPORTED},
     };
     fresh_dir();
     hooks_reset();

@@ -82,7 +82,7 @@ class SQLiteAckQueue:
         del multithreading  # 항상 스레드 안전하다
         directory = Path(path)
         directory.mkdir(parents=True, exist_ok=True)
-        self._db = Database(directory / "data.lrdb")
+        self._db = Database(directory / "data.totedb")
         self._queue = Queue(self._db, "ack_queue", max_attempts=max_attempts, clock=clock)
         self._serializer: Serializer = serializer or _JsonSerializer()
         self._lease_ms = lease_ms

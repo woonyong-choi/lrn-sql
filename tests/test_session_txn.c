@@ -23,7 +23,7 @@
 #include "sql/session.h"
 
 #define DIR_NAME "__test__session_txn"
-#define DB DIR_NAME "/db.lrdb"
+#define DB DIR_NAME "/db.totedb"
 
 static int g_run, g_fail;
 

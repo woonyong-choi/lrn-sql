@@ -34,7 +34,7 @@
 extern void session_test_with_lock(session_pool_t *pool, void (*fn)(void *ctx, size_t shared_used), void *ctx);
 
 #define DIR_NAME "build/test_session_audit_dir"
-#define DB_PATH DIR_NAME "/db.lrdb"
+#define DB_PATH DIR_NAME "/db.totedb"
 
 static int g_run, g_fail;
 #define CHECK(cond, ...)                              \

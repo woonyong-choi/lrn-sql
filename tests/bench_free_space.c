@@ -115,7 +115,7 @@ int main(int argc, char **argv)
     assert(argc == 2);
     bool ours_mode = strcmp(argv[1], "ours") == 0;
     assert(ours_mode || strcmp(argv[1], "sqlite") == 0);
-    const char *path = ours_mode ? "build/bench_free_space_ours.lrdb" : "build/bench_free_space_sqlite.db";
+    const char *path = ours_mode ? "build/bench_free_space_ours.totedb" : "build/bench_free_space_sqlite.db";
     unlink(path);
     database_t *ours = NULL;
     sqlite3 *sqlite = NULL;

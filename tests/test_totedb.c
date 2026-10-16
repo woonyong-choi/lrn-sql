@@ -33,7 +33,7 @@ static void *capi_test_realloc(void *pointer, size_t size)
 static tote_db_t *open_capi_db(const char *name)
 {
     char path[192];
-    snprintf(path, sizeof(path), "%s/%s.lrdb", g_dir, name);
+    snprintf(path, sizeof(path), "%s/%s.totedb", g_dir, name);
     tote_db_t *db = NULL;
     int st = tote_open(path, 1, &db);
     assert(st == TOTE_OK);

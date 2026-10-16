@@ -3,7 +3,11 @@
 
 #include "storage/pk_tree.h"
 
-/* Binary TEXT key -> heap locator. Node slots and entries use actual key bytes. */
+/*
+ * 바이트 키 -> heap locator의 지속형 COW B+Tree. TEXT 기본 키와 보조 색인이 쓴다(보조 색인 키는 값 뒤에 기본 키나
+ * 위치를 붙인 꼬리를 단다). 노드 슬롯과 항목은 실제 키 바이트를 담고 키는 memcmp 순서로 정렬한다.
+ * 키는 TEXT_TREE_KEY_MAX_BYTES 이하다. 페이지 입출력·할당·COW 규칙은 pk_tree.h와 같다.
+ */
 #define TEXT_TREE_MAGIC "LTX1"
 #define TEXT_TREE_VERSION 1u
 #define TEXT_TREE_KEY_MAX_BYTES 1024u

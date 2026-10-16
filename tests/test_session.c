@@ -25,7 +25,7 @@
  */
 
 #define DIR_NAME "build/test_session_dir"
-#define DB_PATH DIR_NAME "/db.lrdb"
+#define DB_PATH DIR_NAME "/db.totedb"
 
 static int g_run, g_fail;
 #define CHECK(cond, ...)                              \

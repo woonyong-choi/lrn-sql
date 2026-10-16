@@ -82,7 +82,7 @@ int main(int argc, char **argv)
     bool ours = strcmp(argv[1], "ours") == 0;
     bool wal = strcmp(argv[1], "wal") == 0;
     assert(ours || wal || strcmp(argv[1], "delete") == 0);
-    const char *path = ours ? "build/bench_secondary_ours.lrdb" :
+    const char *path = ours ? "build/bench_secondary_ours.totedb" :
                        wal ? "build/bench_secondary_wal.db" : "build/bench_secondary_delete.db";
     char sidecar[160];
     unlink(path);

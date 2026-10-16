@@ -45,7 +45,7 @@ def run_workers(target, count: int = WORKERS) -> None:
 
 
 def test_conditional_claim_gives_each_row_to_one_worker(tmp_path: Path) -> None:
-    path = tmp_path / "claim.lrdb"
+    path = tmp_path / "claim.totedb"
     main = Database(path, busy_timeout_s=10.0)
     make_jobs(main)
     claimed: dict[int, list[int]] = {}
@@ -70,7 +70,7 @@ def test_conditional_claim_gives_each_row_to_one_worker(tmp_path: Path) -> None:
 
 
 def test_concurrent_increments_lose_nothing(tmp_path: Path) -> None:
-    path = tmp_path / "count.lrdb"
+    path = tmp_path / "count.totedb"
     main = Database(path, busy_timeout_s=10.0)
     make_jobs(main)
     rounds = 20
@@ -92,7 +92,7 @@ def test_concurrent_increments_lose_nothing(tmp_path: Path) -> None:
 
 
 def test_returning_after_failed_statement_leaves_rows(tmp_path: Path) -> None:
-    db = Database(tmp_path / "fail.lrdb")
+    db = Database(tmp_path / "fail.totedb")
     make_jobs(db)
     db.execute("CREATE UNIQUE INDEX jobs_owner ON jobs (owner)")
     db.execute("UPDATE jobs SET owner = 1 WHERE id = 1")
@@ -107,7 +107,7 @@ def test_returning_after_failed_statement_leaves_rows(tmp_path: Path) -> None:
 
 # #47 완료 조건 2: 동시 충돌 삽입에서 유일성 유지, 부분 성공 금지
 def test_concurrent_upserts_lose_nothing(tmp_path: Path) -> None:
-    db = Database(tmp_path / "upsert.lrdb", busy_timeout_s=10.0)
+    db = Database(tmp_path / "upsert.totedb", busy_timeout_s=10.0)
     db.execute("CREATE TABLE counters (k INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
     rounds = 30
 
@@ -140,7 +140,7 @@ def test_concurrent_upserts_lose_nothing(tmp_path: Path) -> None:
     ],
 )
 def test_function_signature_errors_are_distinct(tmp_path: Path, sql: str, code: int) -> None:
-    db = Database(tmp_path / "fn.lrdb")
+    db = Database(tmp_path / "fn.totedb")
     db.execute("CREATE TABLE t (x INTEGER)")
     with pytest.raises(SqlError) as raised:
         db.execute(sql)
@@ -152,7 +152,7 @@ def test_function_signature_errors_are_distinct(tmp_path: Path, sql: str, code: 
 def test_cancel_from_another_thread_is_distinct_from_success(tmp_path: Path) -> None:
     from totedb.database import RESULT_E_CANCELLED
 
-    db = Database(tmp_path / "cancel.lrdb")
+    db = Database(tmp_path / "cancel.totedb")
     db.execute("CREATE TABLE n (id INTEGER PRIMARY KEY)")
     with db.begin() as tx:
         for start in range(1, 3001, 500):
@@ -187,7 +187,7 @@ def test_cancel_from_another_thread_is_distinct_from_success(tmp_path: Path) -> 
 def test_values_and_column_info_round_trip(tmp_path: Path) -> None:
     from totedb import Column
 
-    db = Database(tmp_path / "values.lrdb")
+    db = Database(tmp_path / "values.totedb")
     db.execute("CREATE TABLE v (id INTEGER PRIMARY KEY, t TEXT, b BLOB, r REAL, n INTEGER NOT NULL)")
     big_text = "한글" * 60_000 + "\x00끝"
     big_blob = bytes(range(256)) * 1200
@@ -217,7 +217,7 @@ def test_limit_and_errors_are_distinct_from_success(tmp_path: Path) -> None:
     from totedb import LimitError
     from totedb.database import _lib
 
-    db = Database(tmp_path / "limits.lrdb")
+    db = Database(tmp_path / "limits.totedb")
     db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT)")
     for i in range(1, 21):
         db.execute("INSERT INTO t VALUES (?, ?)", (i, "x" * 100))
@@ -253,7 +253,7 @@ def test_result_buffer_is_freed_when_decoding_fails(tmp_path: Path, monkeypatch:
     def broken_decode(data: bytes) -> module.Result:
         raise ValueError("decoder failure")
 
-    db = Database(tmp_path / "free.lrdb")
+    db = Database(tmp_path / "free.totedb")
     monkeypatch.setattr(module, "_lib", CountingLib())
     monkeypatch.setattr(module, "decode_result", broken_decode)
     with pytest.raises(ValueError):

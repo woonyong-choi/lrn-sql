@@ -28,7 +28,7 @@
 #include "storage/pk_tree.h"
 
 #define DIR_NAME "build/test_primary_index_dir"
-#define DB_PATH DIR_NAME "/db.lrdb"
+#define DB_PATH DIR_NAME "/db.totedb"
 
 static int g_run = 0;
 static int g_fail = 0;

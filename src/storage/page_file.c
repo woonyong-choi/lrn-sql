@@ -40,7 +40,7 @@ _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
  * 실제 페이지, 파일 길이를 대조해 알아보고 이전 세대로 연다. manifest가 없으면 데이터 fsync → 제어 쓰기 → fsync다.
  * 어느 쪽이든 새 페이지는 두 제어 슬롯이 가리키지 않는 자리에만 쓰므로 이전 세대는 그대로다.
  */
-static const uint8_t FILE_MAGIC[8] = {'L', 'R', 'S', 'Q', 'L', 'D', 'B', 0};
+static const uint8_t FILE_MAGIC[8] = {'T', 'O', 'T', 'E', 'D', 'B', 0, 0};
 
 /* 쓰기 핸들이 아는 페이지 하나의 상태 */
 typedef enum {
@@ -195,6 +195,12 @@ static uint32_t chain_pages_for(uint64_t total)
 {
     if (total <= CONTROL_INLINE_IDS) return 0;
     return (uint32_t)((total - CONTROL_INLINE_IDS + CHAIN_IDS - 1) / CHAIN_IDS);
+}
+
+/* 제어 페이지 본문 앞에 ToteDB 파일 magic이 있는지(체크섬과 무관하게) */
+static bool has_file_magic(const uint8_t *page)
+{
+    return memcmp(page + PAGE_ENVELOPE_BYTES, FILE_MAGIC, sizeof(FILE_MAGIC)) == 0;
 }
 
 static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file_control_t *out,
@@ -605,19 +611,25 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
     status = PAGE_FILE_OK;
     if (fstat(fd, &st) != 0) {
         status = PAGE_FILE_IO;
-    } else {
-        /* 옛 MINIDB 파일은 길이와 상관없이 첫 8바이트로 알아보고 거절한다. */
-        uint8_t magic[8] = {0};
-        ssize_t got = pread(fd, magic, sizeof(magic), 0);
-        if (got == (ssize_t)sizeof(magic) && memcmp(magic, "MINIDB\0", 8) == 0) {
-            status = PAGE_FILE_UNSUPPORTED;
-        } else if (st.st_size < (off_t)(PAGE_FILE_CONTROL_PAGES * PAGE_FILE_PAGE_BYTES)) {
-            status = st.st_size == 0 ? PAGE_FILE_NO_CONTROL : PAGE_FILE_CORRUPT;
+    } else if (st.st_size == 0) {
+        status = PAGE_FILE_NO_CONTROL;
+    } else if (st.st_size < (off_t)(PAGE_FILE_CONTROL_PAGES * PAGE_FILE_PAGE_BYTES)) {
+        /* 제어 페이지 두 장보다 짧다. 읽은 앞부분이 0뿐이거나 파일 magic이 있으면 잘린 ToteDB 파일, 다른 내용이면 다른 형식이다 */
+        memset(pages[0], 0, PAGE_FILE_PAGE_BYTES);
+        size_t head = st.st_size < (off_t)PAGE_FILE_PAGE_BYTES ? (size_t)st.st_size : PAGE_FILE_PAGE_BYTES;
+        status = read_full(file, pages[0], head, 0);
+        if (status == PAGE_FILE_OK) {
+            status = is_blank(pages[0]) || has_file_magic(pages[0]) ? PAGE_FILE_CORRUPT : PAGE_FILE_UNSUPPORTED;
         }
     }
     for (uint32_t slot = 0; status == PAGE_FILE_OK && slot < 2; slot++) {
         status = read_full(file, pages[slot], PAGE_FILE_PAGE_BYTES,
                            (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
+    }
+    /* 두 제어 페이지 어디에도 파일 magic이 없고 비어 있지도 않으면 ToteDB 파일이 아니다. 바꾸지 않고 거절한다 */
+    if (status == PAGE_FILE_OK && !has_file_magic(pages[0]) && !has_file_magic(pages[1]) &&
+        !(is_blank(pages[0]) && is_blank(pages[1]))) {
+        status = PAGE_FILE_UNSUPPORTED;
     }
     if (status == PAGE_FILE_OK) status = pick_control(pages, -1, &chosen, &chosen_free, &local_info);
     if (status == PAGE_FILE_OK) {
