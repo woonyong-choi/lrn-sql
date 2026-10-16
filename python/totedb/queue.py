@@ -134,9 +134,15 @@ class Queue:
             clock_ctx=None,
         )
         handle = ctypes.c_void_p()
-        status = _lib.tote_queue_open(
-            db.handle, name.encode("utf-8"), 1 if install else 0, ctypes.byref(options), ctypes.byref(handle)
+        # 다른 프로세스가 쓰는 중이면 BUSY다. 다른 큐 호출처럼 busy_timeout_s까지 다시 시도한다
+        status = retry_busy(
+            lambda: _lib.tote_queue_open(
+                db.handle, name.encode("utf-8"), 1 if install else 0, ctypes.byref(options), ctypes.byref(handle)
+            ),
+            db.busy_timeout_s,
         )
+        if status == STATUS_BUSY:
+            raise BusyError("another writer holds the database", status=status)
         check(status)
         self._handle: ctypes.c_void_p | None = handle
         db.register_queue(self)

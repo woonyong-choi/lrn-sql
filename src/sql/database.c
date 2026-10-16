@@ -172,6 +172,7 @@ static database_status_t from_page_file(page_file_status_t status)
         case PAGE_FILE_UNSUPPORTED: return DATABASE_UNSUPPORTED;
         case PAGE_FILE_EXISTS: return DATABASE_EXISTS;
         case PAGE_FILE_LOCKED: return DATABASE_LOCKED;
+        case PAGE_FILE_FORKED: return DATABASE_FORKED;
         case PAGE_FILE_NOMEM: return DATABASE_NOMEM;
         default: return DATABASE_IO;
     }
@@ -188,6 +189,13 @@ static database_status_t from_store(catalog_store_status_t status)
         case CATALOG_STORE_INVALID: return DATABASE_INVALID;
         default: return DATABASE_CORRUPT;
     }
+}
+
+/* 열기·생성이 쥐고 돌려준 잠금을 놓는다. 이후 잠금은 문장·작업 동안만 쥐며 기다리지 않는다(#199) */
+static void release_open_lock(page_file_t *file)
+{
+    page_file_set_lock_timeout(file, 0);
+    page_file_unlock(file);
 }
 
 database_status_t database_create(const char *path, database_t **out)
@@ -216,6 +224,7 @@ database_status_t database_create(const char *path, database_t **out)
             status = published == PAGE_FILE_OK ? DATABASE_OK : from_page_file(published);
         }
     }
+    if (status == DATABASE_OK) release_open_lock(db->file);
     if (status != DATABASE_OK) {
         int saved = errno;
         catalog_close(db->catalog);
@@ -274,6 +283,7 @@ static database_status_t open_database(const char *path, bool writable, admissio
         errno = saved;
         return loaded == CATALOG_STORE_EMPTY ? DATABASE_CORRUPT : from_store(loaded);
     }
+    release_open_lock(db->file);
     *out = db;
     return DATABASE_OK;
 }
@@ -849,6 +859,64 @@ static database_exec_status_t materialize(database_t *db, database_exec_status_t
     return DATABASE_EXEC_OK;
 }
 
+/* ── 여러 프로세스 잠금(#199) ── */
+
+/*
+ * 다른 핸들이 게시한 카탈로그를 다시 읽는다. 상주 몫은 새 카탈로그와 늘어난 해제 목록 상한으로 맞춘다. 실패하면
+ * 게시된 카탈로그와 몫은 그대로다.
+ */
+static database_status_t reload_catalog(database_t *db)
+{
+    size_t lists = page_file_list_peak_bytes(page_file_control(db->file)->page_count);
+    size_t more_lists = lists > db->res_lists ? lists - db->res_lists : 0;
+    if (!mem_reserve(&db->resident, MEM_SCOPE_RESIDENT, more_lists)) return DATABASE_NOMEM;
+    bool bounded = mem_ledger_enabled(&db->resident);
+    admission_t admission = {&db->resident, NULL, 0};
+    catalog_t *fresh = NULL;
+    catalog_store_status_t loaded =
+        catalog_store_load_admitted(db->file, bounded ? admit_catalog : NULL, &admission, &fresh);
+    if (loaded != CATALOG_STORE_OK) {
+        int saved = errno;
+        mem_release(&db->resident, MEM_SCOPE_RESIDENT, more_lists + admission.admitted);
+        errno = saved;
+        return loaded == CATALOG_STORE_EMPTY ? DATABASE_CORRUPT : from_store(loaded);
+    }
+    size_t exact = bounded ? catalog_memory_bytes(fresh) : 0;
+    assert(exact <= admission.admitted);
+    mem_release(&db->resident, MEM_SCOPE_RESIDENT, admission.admitted - exact + db->res_catalog);
+    catalog_close(db->catalog);
+    db->catalog = fresh;
+    db->res_catalog = exact;
+    db->res_lists += more_lists;
+    return DATABASE_OK;
+}
+
+database_status_t database_lock_file(database_t *db, page_file_lock_t mode)
+{
+    bool changed = false;
+    page_file_status_t locked = page_file_lock(db->file, mode, &changed);
+    if (locked != PAGE_FILE_OK) return from_page_file(locked);
+    if (!changed) return DATABASE_OK;
+    database_status_t status = reload_catalog(db);
+    if (status != DATABASE_OK) page_file_unlock(db->file);
+    return status;
+}
+
+/* 문장 앞에서 잠금을 얻지 못한 결과. 실행 전 거절이라 반영된 것이 없다 */
+static database_exec_status_t lock_failure(database_t *db, database_status_t status)
+{
+    switch (status) {
+        case DATABASE_LOCKED:
+            return fail_result(db, RESULT_E_BUSY, DATABASE_CODE_FILE_LOCKED, "다른 연결이 파일을 쓰는 중입니다");
+        case DATABASE_FORKED:
+            return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_FORKED,
+                               "fork한 자식 프로세스는 부모가 연 핸들을 쓸 수 없습니다. 자식에서 파일을 새로 여세요");
+        case DATABASE_NOMEM: return DATABASE_EXEC_NOMEM;
+        case DATABASE_CORRUPT: return fail_result(db, RESULT_E_IO, 35, "다른 연결이 게시한 상태를 읽지 못했습니다(손상)");
+        default: return fail_result(db, RESULT_E_IO, 36, "다른 연결이 게시한 상태를 읽지 못했습니다(입출력)");
+    }
+}
+
 static database_exec_status_t exec_statement(database_t *db, const database_exec_options_t *opts,
                                              const uint8_t *sql, size_t size,
                                              const lexer_binding_t *binding, result_t **out)
@@ -957,6 +1025,16 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
         status = fail_result(db, RESULT_E_SEMANTIC, 22, "읽기 전용으로 연 데이터베이스입니다");
         goto done;
     }
+    /* 작업 밖 문장은 문장 동안 잠금을 쥔다. 작업은 시작할 때 배타 잠금을 잡았다 */
+    bool locked_here = page_file_lock_mode(db->file) == PAGE_FILE_LOCK_NONE;
+    if (locked_here) {
+        page_file_lock_t mode = statement->kind == SQLSTMT_SELECT ? PAGE_FILE_LOCK_SHARED : PAGE_FILE_LOCK_EXCLUSIVE;
+        database_status_t locked = database_lock_file(db, mode);
+        if (locked != DATABASE_OK) {
+            status = lock_failure(db, locked);
+            goto done;
+        }
+    }
     switch (statement->kind) {
         case SQLSTMT_CREATE_TABLE: status = exec_create(db, &statement->create, out); break;
         case SQLSTMT_CREATE_INDEX: status = exec_create_index(db, &statement->index, out); break;
@@ -967,6 +1045,7 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
         case SQLSTMT_DROP_TABLE: status = exec_drop(db, &statement->drop, out); break;
         default: status = fail_result(db, RESULT_E_INTERNAL, 21, "문장을 실행하지 못했습니다"); break;
     }
+    if (locked_here) page_file_unlock(db->file);
 done:
     relations_free(db);
     sqlstmt_free(statement);
@@ -1088,6 +1167,9 @@ database_status_t database_work_begin(database_t *db)
 {
     if (db == NULL || !db->writable || db->work.active) return DATABASE_INVALID;
     if (db->poisoned) return DATABASE_IO;
+    /* 작업이 끝날 때까지 배타 잠금을 쥔다. 다른 핸들의 쓰기는 그동안 시작하지 못한다(#199) */
+    database_status_t locked = database_lock_file(db, PAGE_FILE_LOCK_EXCLUSIVE);
+    if (locked != DATABASE_OK) return locked;
     db->work = (work_state_t){0};
     db->work.active = true;
     return DATABASE_OK;
@@ -1168,4 +1250,5 @@ void database_work_end(database_t *db, database_work_outcome_t outcome)
     }
     catalog_close(db->work.cat);
     work_reset(db);
+    page_file_unlock(db->file);
 }

@@ -101,6 +101,10 @@ class DatabaseOpenError(ToteDBError):
     """database 열기 실패(없음·잠김·손상·형식 미지원)."""
 
 
+class ForkedHandleError(ToteDBError):
+    """fork한 자식 프로세스가 부모가 연 핸들을 썼다. 아무것도 하지 않았다. 자식에서 새로 연다."""
+
+
 class SqlError(ToteDBError):
     """문장이 오류 결과로 끝났다. 분류와 코드는 속성에 있다."""
 
@@ -134,6 +138,7 @@ _BY_STATUS: dict[int, type[ToteDBError]] = {
     105: DatabaseOpenError,
     106: DatabaseOpenError,
     107: DatabaseOpenError,
+    108: ForkedHandleError,
 }
 
 

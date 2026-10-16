@@ -12,6 +12,7 @@
 #include "sql/database.h"
 #include "sql/mem_ledger.h"
 #include "storage/page_file.h"
+#include "../src/sql/database_internal.h"
 
 /*
  * 상한을 지키는 열기(database_open_bounded·database_create_bounded) 검사.
@@ -264,16 +265,24 @@ static void test_failed_opens_release_everything(void)
     CHECK(t.used == 0, "손상 파일 뒤 reserve %zu", t.used);
     CHECK(audit_live == 0, "손상 파일 뒤 살아 있는 할당 %zu", audit_live);
 
-    /* 같은 파일을 쓰기로 이미 연 핸들이 있으면 LOCKED이고 reserve는 돌아온다 */
+    /* 다른 핸들이 쓰기 작업(배타 잠금) 중이면 대기 상한 뒤 LOCKED이고 reserve는 돌아온다 */
     const char *path = DIR_NAME "/lock.totedb";
     make_fixture(path, 2);
     database_t *first = NULL;
     assert(database_open(path, true, &first) == DATABASE_OK);
+    assert(database_work_begin(first) == DATABASE_OK);
+    page_file_set_default_lock_timeout(0);
     watch(&t);
     database_status_t locked = database_open_bounded(path, true, &ledger, &db);
     unwatch(&t);
+    page_file_set_default_lock_timeout(PAGE_FILE_LOCK_TIMEOUT_MS);
     CHECK(locked == DATABASE_LOCKED && db == NULL, "잠긴 파일 %d", (int)locked);
     CHECK(t.used == 0, "잠긴 파일 뒤 reserve %zu", t.used);
+    database_work_end(first, DATABASE_WORK_NOT_APPLIED);
+    /* 작업이 끝나면 쓰기 핸들이 열려 있어도 두 번째 핸들이 열린다(#199) */
+    database_t *second = NULL;
+    CHECK(database_open_bounded(path, true, &ledger, &second) == DATABASE_OK, "작업이 없는 파일의 두 번째 열기");
+    database_close(second);
     database_close(first);
 }
 

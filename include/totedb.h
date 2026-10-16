@@ -15,6 +15,10 @@
  * 세션: 문장과 큐 연산은 session.h의 세션으로 실행한다. 트랜잭션 밖의 호출은 연결 하나에 하나인 자동 commit 세션을,
  * 트랜잭션 안의 호출은 트랜잭션마다 따로 연 세션을 쓴다. 연결의 세션 풀은 한도가 없다.
  *
+ * 여러 프로세스: 같은 파일을 여러 프로세스가 각자 tote_open으로 연다. 쓰기 트랜잭션은 파일 전체에서 한 번에 하나이고,
+ * 다른 프로세스가 쓰는 동안 문장·큐 연산·tote_begin은 기다리지 않고 TOTE_BUSY(문장은 BUSY 오류 결과)다. 핸들은 연
+ * 프로세스에서만 쓴다. fork한 자식에서는 tote_close를 포함한 모든 호출이 TOTE_DB_FORKED이며 아무것도 하지 않는다.
+ *
  * 반환값: 0(TOTE_OK)과 ackq_status_t의 숫자(1~16)가 그대로 쓰인다. 그 밖의 TOTE_* 값은 아래에 있다.
  */
 #define TOTE_OK 0
@@ -26,6 +30,7 @@
 #define TOTE_DB_UNSUPPORTED 105
 #define TOTE_DB_NOMEM 106
 #define TOTE_DB_NOT_FOUND 107 /* create가 0인데 파일이 없다 */
+#define TOTE_DB_FORKED 108    /* fork한 자식이 부모가 연 핸들을 썼다. 아무것도 하지 않았다. 자식은 tote_open으로 새로 연다 */
 
 typedef struct tote_db tote_db_t;
 typedef struct tote_queue tote_queue_t;

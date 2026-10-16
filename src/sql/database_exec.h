@@ -79,6 +79,9 @@ struct database {
 
 #define NO_COLUMN CATALOG_NO_COLUMN
 
+/* 파일 잠금을 잡고, 다른 핸들이 그 사이 게시했으면 카탈로그를 다시 읽는다. 실패하면 잠금을 쥐지 않는다(#199) */
+database_status_t database_lock_file(database_t *db, page_file_lock_t mode);
+
 typedef struct {
     catalog_t *cat;
     size_t charged;  /* 이 카탈로그에 대해 reserve해 둔 바이트 */

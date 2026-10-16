@@ -39,8 +39,14 @@
  * identity(AUTOINCREMENT)는 카탈로그 카운터가 주며, 자동 값은 늘 기존 최대 키보다 크다(명시한 큰 키가 있으면
  * 카운터를 그 뒤로 한 번에 옮긴다). 최대 키가 INT64_MAX면 더 줄 값이 없어 오류다.
  *
- * 보장하지 않는 것: 여러 문장 거래(database_txn.h가 붙인다), 전원 손실 복구, lost write 탐지, 동시 접근(단일
- * 스레드, 쓰기 핸들은 파일 잠금이 배타), 큰 테이블의 성능(기본 키 등가 밖의 조회는 전체 스캔이고 문장마다 카탈로그를 다시 쓴다), SQLite와 같은
+ * 여러 프로세스(#199): 같은 파일을 여러 핸들(다른 프로세스 포함)이 함께 연다. 핸들은 문장 동안(SELECT는 공유, 변경은
+ * 배타), 쓰기 작업 동안(배타) 파일 잠금을 쥐고, 잠금을 얻을 때 다른 핸들이 게시했으면 카탈로그를 다시 읽는다. 잠금은 기다리지
+ * 않는다. 다른 핸들이 쥐고 있으면 문장은 RESULT_E_BUSY(DATABASE_CODE_FILE_LOCKED) 오류 결과, 작업 시작은 DATABASE_LOCKED이며
+ * 아무것도 반영하지 않았다. 열기는 page_file 잠금 대기 상한까지 기다린다. fork한 자식이 부모의 핸들을 쓰면 문장은
+ * DATABASE_CODE_FORKED 오류 결과, 그 밖은 DATABASE_FORKED이며 파일을 바꾸지 않는다. 자식은 파일을 새로 연다.
+ *
+ * 보장하지 않는 것: 여러 문장 거래(database_txn.h가 붙인다), 전원 손실 복구, lost write 탐지, 한 핸들의 동시 사용(단일
+ * 스레드), 여러 writer의 동시 commit(쓰기는 파일 전체 배타 잠금으로 직렬), 큰 테이블의 성능(기본 키 등가 밖의 조회는 전체 스캔이고 문장마다 카탈로그를 다시 쓴다), SQLite와 같은
  * 타입 친화성(여기서는 정확히 변환되는 값만 받고 아니면 오류).
  */
 
@@ -53,8 +59,9 @@ typedef enum {
     DATABASE_UNSUPPORTED,  /* ToteDB 파일이 아님, 알 수 없는 형식 판 */
     DATABASE_NOMEM,
     DATABASE_EXISTS,       /* create: 파일이 이미 있음 */
-    DATABASE_LOCKED,       /* 다른 핸들이 잠금을 쥐고 있음 */
-    DATABASE_BUSY          /* close: 해제하지 않은 트랜잭션이 남아 있다. 핸들은 그대로다 */
+    DATABASE_LOCKED,       /* 다른 핸들이 파일 잠금을 쥐고 있음 */
+    DATABASE_BUSY,         /* close: 해제하지 않은 트랜잭션이 남아 있다. 핸들은 그대로다 */
+    DATABASE_FORKED        /* 핸들을 연 프로세스가 아님(fork한 자식). 파일을 바꾸지 않았다 */
 } database_status_t;
 
 typedef enum {
@@ -137,6 +144,10 @@ database_exec_status_t database_exec(database_t *db, const uint8_t *sql, size_t 
 #define DATABASE_CODE_CANCELLED 23
 /* 메모리 예산 거절 오류 결과의 code */
 #define DATABASE_CODE_BUDGET 24
+/* 다른 핸들(다른 프로세스)이 파일 잠금을 쥐고 있어 실행 전에 거절한 오류 결과의 code(RESULT_E_BUSY) */
+#define DATABASE_CODE_FILE_LOCKED 30
+/* fork한 자식이 부모가 연 핸들을 쓴 오류 결과의 code(RESULT_E_SEMANTIC) */
+#define DATABASE_CODE_FORKED 31
 /* 식 평가 오류 결과의 code(RESULT_E_SEMANTIC). 메시지는 원인 식의 입력 위치를 함께 적는다 */
 #define DATABASE_CODE_TYPE 40               /* 형식이 맞지 않는 연산·비교·조건 */
 #define DATABASE_CODE_DIVIDE_BY_ZERO 41

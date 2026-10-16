@@ -95,7 +95,14 @@ static txn_status_t be_write_begin(void *ctx, uint64_t base_seq, void **write)
     layer_t *l = ctx;
     (void)base_seq;
     database_status_t st = database_work_begin(l->db);
-    if (st != DATABASE_OK) return st == DATABASE_IO ? TXN_IO : TXN_INVALID;
+    switch (st) {
+        case DATABASE_OK: break;
+        case DATABASE_LOCKED: return TXN_BUSY;  /* 다른 핸들(다른 프로세스)이 쓰는 중 */
+        case DATABASE_NOMEM: return TXN_NOMEM;
+        case DATABASE_IO:
+        case DATABASE_CORRUPT: return TXN_IO;
+        default: return TXN_INVALID;
+    }
     *write = l;
     return TXN_OK;
 }

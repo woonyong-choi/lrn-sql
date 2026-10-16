@@ -106,9 +106,15 @@ database_status_t database_check_pages(database_t *db, database_page_check_t *ou
 {
     if (db == NULL || out == NULL || !db->writable || db->work.active) return DATABASE_INVALID;
     *out = (database_page_check_t){0};
+    /* 빈 목록과 도달 페이지를 같은 게시 상태로 보도록 검사 동안 배타 잠금을 쥔다(#199) */
+    database_status_t locked = database_lock_file(db, PAGE_FILE_LOCK_EXCLUSIVE);
+    if (locked != DATABASE_OK) return locked;
     uint32_t count = page_file_control(db->file)->page_count;
     page_marks_t marks = {calloc(count > 0 ? count : 1, 1), count, 0};
-    if (marks.seen == NULL) return DATABASE_NOMEM;
+    if (marks.seen == NULL) {
+        page_file_unlock(db->file);
+        return DATABASE_NOMEM;
+    }
     database_status_t status = mark_catalog_chain(db, &marks);
     for (size_t t = 0; status == DATABASE_OK && t < catalog_table_count(db->catalog); t++) {
         catalog_table_view_t view;
@@ -135,6 +141,7 @@ database_status_t database_check_pages(database_t *db, database_page_check_t *ou
     }
     out->conflicts += marks.outside;
     free(marks.seen);
+    page_file_unlock(db->file);
     if (status != DATABASE_OK) *out = (database_page_check_t){0};
     return status;
 }
