@@ -30,7 +30,7 @@
 #include "storage/value.h"
 
 #define DIR_NAME "__test__database_txn"
-#define DB DIR_NAME "/db.lrdb"
+#define DB DIR_NAME "/db.totedb"
 
 static int g_run, g_fail;
 

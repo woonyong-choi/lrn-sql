@@ -73,7 +73,7 @@ static double now_ms(void)
 
 static void db_create(db_t *db, const char *dir, int tag)
 {
-    snprintf(db->path, sizeof(db->path), "%s/m%d.lrdb", dir, tag);
+    snprintf(db->path, sizeof(db->path), "%s/m%d.totedb", dir, tag);
     unlink(db->path);
     assert(page_file_create(db->path, &db->file) == PAGE_FILE_OK);
     assert(catalog_open_empty(&db->catalog) == CATALOG_OK);

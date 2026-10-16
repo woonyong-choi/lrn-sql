@@ -9,7 +9,7 @@ static void registration(FILE *trace) {
     fault_runtime_t runtime;
     fault_runtime_init(&runtime, trace);
     const char *required[] = {"txn.begin", "txn.commit", "heap.split", "index.split",
-                             "wal.append", "wal.flush", "checkpoint.publish"};
+                             "control.write", "control.fsync", "commit.publish"};
     for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); ++i)
         assert(fault_find(&runtime, required[i]) >= 0);
     assert(fault_register(&runtime, "heap.split") == -1);

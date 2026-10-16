@@ -2,7 +2,7 @@
  * test_catalog_store.c -- catalog(#6)·가변 값(#81)과 page_file(#77) 연결 검사
  *
  * 합성 데이터만 쓴다. 이 검사는 "새 파일을 닫고 다시 열어 같은 카탈로그·레코드·큰 값을 읽는다"와
- * "저장 실패·손상에서 이전 세대를 보존한다"만 다룬다. WAL·거래 복구·DB 전체 재시작은 검증하지
+ * "저장 실패·손상에서 이전 세대를 보존한다"만 다룬다. 거래 복구·DB 전체 재시작은 검증하지
  * 않는다. 가장 최근 제어 쓰기가 사라진 경우는 정상 미반영과 구분되지 않는다.
  *
  * 빌드: tests/test_catalog_store.c, src/storage/{catalog_store,page_file,catalog,value,record,
@@ -23,7 +23,7 @@
 #include "storage/record_page.h"
 
 #define DIR_NAME "__test__catalog_store_dir"
-#define DB_PATH DIR_NAME "/db.lrdb"
+#define DB_PATH DIR_NAME "/db.totedb"
 
 static int g_run = 0;
 static int g_fail = 0;

@@ -21,7 +21,7 @@
  */
 
 #define DIR_NAME "build/test_database_dir"
-#define DB_PATH DIR_NAME "/db.lrdb"
+#define DB_PATH DIR_NAME "/db.totedb"
 
 static int g_run = 0;
 static int g_fail = 0;
@@ -850,22 +850,22 @@ static void test_open_rejects_other_files_without_change(void)
 {
     printf("\n[test_open_rejects_other_files_without_change]\n");
     fresh_dir();
+    /* 다른 형식 파일(SQLite 머리)은 바꾸지 않고 UNSUPPORTED로 거절한다 */
     uint8_t legacy[16384];
-    memset(legacy, 0, sizeof(legacy));
-    memcpy(legacy, "MINIDB\0", 8);
-    legacy[8] = 2;
+    for (size_t i = 0; i < sizeof(legacy); i++) legacy[i] = (uint8_t)(i * 7u + 1u);
+    memcpy(legacy, "SQLite format 3", 16);
     FILE *f = fopen(DB_PATH, "wb");
     assert(f != NULL && fwrite(legacy, 1, sizeof(legacy), f) == sizeof(legacy));
     fclose(f);
     database_t *db = NULL;
-    CHECK(database_open(DB_PATH, true, &db) == DATABASE_UNSUPPORTED && db == NULL, "옛 파일은 UNSUPPORTED");
+    CHECK(database_open(DB_PATH, true, &db) == DATABASE_UNSUPPORTED && db == NULL, "다른 형식 파일은 UNSUPPORTED");
     f = fopen(DB_PATH, "rb");
     uint8_t after[sizeof(legacy)];
     assert(f != NULL && fread(after, 1, sizeof(after), f) == sizeof(after));
     fclose(f);
     CHECK(memcmp(after, legacy, sizeof(legacy)) == 0, "열기 시도가 파일을 바꾸지 않음");
     CHECK(database_create(DB_PATH, &db) == DATABASE_EXISTS, "이미 있으면 create는 거절");
-    CHECK(database_open(DIR_NAME "/missing.lrdb", false, &db) == DATABASE_IO, "없는 파일은 IO");
+    CHECK(database_open(DIR_NAME "/missing.totedb", false, &db) == DATABASE_IO, "없는 파일은 IO");
     clean_dir();
 }
 

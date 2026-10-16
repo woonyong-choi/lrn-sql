@@ -44,7 +44,7 @@ static __attribute__((unused)) uint64_t fake_clock(void *ctx)
 static __attribute__((unused)) void set_dir(const char *dir)
 {
     snprintf(g_dir, sizeof(g_dir), "%s", dir);
-    snprintf(g_db_path, sizeof(g_db_path), "%s/db.lrdb", dir);
+    snprintf(g_db_path, sizeof(g_db_path), "%s/db.totedb", dir);
 }
 
 static __attribute__((unused)) void fresh_dir(void)

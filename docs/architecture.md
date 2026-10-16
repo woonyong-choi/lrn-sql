@@ -24,7 +24,8 @@ ToteDB은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데이
 | `transaction` | 단일 writer 경합, snapshot 순번, commit 결과, timeout·취소 | C11, pthread | `src/storage/transaction.c` |
 | `lexer`·`sql_statement` | SQL 문장을 토큰으로 나누고 문 구조(AST)로 바꾼다 | C11 | `src/sql/lexer.c`, `src/sql/sql_statement.c` |
 | `sql_eval` | 식을 컴파일하고 행마다 평가한다. 내장 함수와 집계를 포함한다 | C11 | `src/sql/sql_eval.c` |
-| `database` | 문장 실행기. 테이블 스캔·색인 조회·JOIN·GROUP BY·서브쿼리·집합 연산·ON CONFLICT·RETURNING | C11 | `src/sql/database.c` |
+| `database` | 데이터베이스 핸들 열기·닫기, 메모리 계상, 작업 카탈로그, COW 게시, 문장 실행 진입점 | C11 | `src/sql/database.c` |
+| 실행기 | 문장 종류별 실행. 공유 타입은 `database_exec.h` 하나에 둔다 | C11 | `src/sql/database_expr.c`(WHERE·식), `database_subquery.c`(서브쿼리·WITH), `database_ddl.c`(CREATE·DROP), `database_insert.c`(INSERT·ON CONFLICT), `database_select.c`(SELECT·행 공급·집합 연산), `database_group.c`(GROUP BY·집계), `database_join.c`(결합), `database_update.c`(RETURNING·UPDATE·DELETE), `database_check.c`(페이지 회계) |
 | `database_txn` | 여러 문장을 한 게시로 확정하는 트랜잭션 핸들 | C11 | `src/sql/database_txn.c` |
 | `result` | 결과 집합과 오류를 바이트 버퍼로 인코딩 | C11 | `src/sql/result.c` |
 | `session` | 연결 하나. 문장 실행, 트랜잭션, 예산 세 단계(문장·세션·풀), 결과 수명, 취소 | C11, pthread | `src/sql/session.c` |

@@ -80,7 +80,7 @@ class Lrn:
     def __init__(self, directory: Path) -> None:
         from totedb import Database  # noqa: PLC0415
 
-        self.db = Database(directory / f"{secrets.token_hex(4)}.lrdb", busy_timeout_s=5.0)
+        self.db = Database(directory / f"{secrets.token_hex(4)}.totedb", busy_timeout_s=5.0)
 
     def run(self, sql: str) -> list[Row] | None:
         try:

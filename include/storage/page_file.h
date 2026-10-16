@@ -10,7 +10,7 @@
 
 /*
  * 새 저장 형식의 파일 I/O 드라이버. OS 페이지 크기와 독립적으로 물리 페이지 8192바이트를 쓴다.
- * 옛 MINIDB v1/v2 파일은 열거나 해석하거나 바꾸지 않는다.
+ * ToteDB 파일이 아닌 파일은 열거나 해석하거나 바꾸지 않는다.
  *
  * 페이지 배치(모든 정수는 little-endian):
  *   0..31   envelope: "LRPG", 버전 u16, 종류 u16, page ID u32, table ID u32,
@@ -55,7 +55,7 @@ typedef enum {
     PAGE_FILE_INVALID,      /* 인자·범위·이중 해제 */
     PAGE_FILE_IO,           /* 읽기·쓰기·fsync·열기 실패. errno를 남긴다 */
     PAGE_FILE_CORRUPT,      /* 체크섬·magic·page ID·길이·세대 불일치, 잘린 파일 */
-    PAGE_FILE_UNSUPPORTED,  /* 알 수 없는 version·페이지 크기·byte order, 옛 MINIDB 파일 */
+    PAGE_FILE_UNSUPPORTED,  /* 알 수 없는 version·페이지 크기·byte order, ToteDB 파일이 아님 */
     PAGE_FILE_NO_CONTROL,   /* 유효한 제어 페이지가 없음. 게시되지 않은 파일 */
     PAGE_FILE_EXISTS,       /* 목적지 또는 partial 파일이 이미 있음 */
     PAGE_FILE_LOCKED,       /* 다른 열린 핸들이 잠금을 쥐고 있음 */
@@ -136,7 +136,9 @@ page_file_status_t page_file_publish(page_file_t *file);
 /*
  * 게시된 파일을 연다. 쓰기 전에는 아무것도 쓰지 않으며 version·길이·header가 맞지 않으면
  * 파일을 바꾸지 않고 거절한다. writable이면 배타, 아니면 공유 잠금을 non-blocking으로 잡는다.
- * 옛 MINIDB 파일은 PAGE_FILE_UNSUPPORTED다. 어떤 경우에도 자동으로 변환하지 않는다.
+ * 두 제어 페이지 어디에도 파일 magic("TOTEDB")이 없는 파일은 PAGE_FILE_UNSUPPORTED다(다른 형식 파일). 제어 페이지
+ * 두 장보다 짧은 파일은 앞부분이 0뿐이거나 magic이 있으면 잘린 파일(CORRUPT), 아니면 UNSUPPORTED다. 어떤 경우에도
+ * 자동으로 변환하지 않는다.
  */
 page_file_status_t page_file_open(const char *path, bool writable, page_file_t **out,
                                   page_file_open_info_t *info);

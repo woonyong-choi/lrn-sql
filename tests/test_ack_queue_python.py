@@ -46,7 +46,7 @@ def clock() -> FakeClock:
 
 @pytest.fixture
 def db(tmp_path: Path) -> Iterator[Database]:
-    database = Database(tmp_path / "db.lrdb", busy_timeout_s=0.05)
+    database = Database(tmp_path / "db.totedb", busy_timeout_s=0.05)
     yield database
     database.close()
 
@@ -224,7 +224,7 @@ def test_queue_list_items_pages_without_payload_copy(db: Database) -> None:
 
 
 def test_queue_restart_preserves_state_and_fence_continues(tmp_path: Path, clock: FakeClock) -> None:
-    path = tmp_path / "db.lrdb"
+    path = tmp_path / "db.totedb"
     with Database(path) as db:
         queue = Queue(db, "jobs", clock=clock)
         queue.put(b"a", "key-a")
@@ -277,7 +277,7 @@ def test_queue_transaction_from_other_database_is_rejected(db: Database, tmp_pat
     queue.put(b"x")
     claim = queue.get(1000)
     assert claim is not None
-    with Database(tmp_path / "other.lrdb") as other, other.begin() as foreign:
+    with Database(tmp_path / "other.totedb") as other, other.begin() as foreign:
         with pytest.raises(InvalidArgumentError):
             queue.ack(claim, txn=foreign)
         with pytest.raises(InvalidArgumentError):
@@ -292,7 +292,7 @@ def test_transaction_begin_while_writer_open_raises_busy_after_timeout(db: Datab
 
 
 def test_database_close_closes_its_queues_and_busy_transaction_keeps_it_open(tmp_path: Path) -> None:
-    db = Database(tmp_path / "db.lrdb", busy_timeout_s=0.05)
+    db = Database(tmp_path / "db.totedb", busy_timeout_s=0.05)
     queue = Queue(db, "jobs")
     txn = db.begin()
 

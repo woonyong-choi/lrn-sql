@@ -187,7 +187,7 @@ class Lrn:
         from totedb import Queue, Database  # noqa: PLC0415
 
         self.name = "lrn"
-        self.db = Database(directory / "db.lrdb", busy_timeout_s=120.0)
+        self.db = Database(directory / "db.totedb", busy_timeout_s=120.0)
         self.queue = Queue(self.db, "jobs")
         self.synchronous = "cow-fsync"
 

@@ -110,18 +110,6 @@ typedef struct {
     uint32_t primary_root;  /* 기본 키 인덱스 root, 설정 전에는 CATALOG_NO_PAGE */
 } catalog_table_view_t;
 
-/*
- * 명시적 legacy import 입력. 호출자가 옛 단일 테이블 header를 직접 해석해 채운다. 이 모듈은
- * 옛 파일을 자동으로 읽거나 재해석하지 않는다. 옛 VARCHAR 폭은 제한으로 옮기지 않는다.
- */
-typedef struct {
-    catalog_table_spec_t table;
-    uint64_t row_count;
-    uint64_t next_identity;  /* has_identity일 때만 의미가 있고 1 이상이어야 한다. */
-    uint32_t heap_root;
-    uint32_t primary_root;
-} catalog_legacy_table_t;
-
 catalog_status_t catalog_open_empty(catalog_t **out);
 void catalog_close(catalog_t *catalog);
 
@@ -131,8 +119,6 @@ void catalog_close(catalog_t *catalog);
  */
 catalog_status_t catalog_create_table(catalog_t *catalog, const catalog_table_spec_t *spec,
                                       catalog_table_id_t *id);
-catalog_status_t catalog_import_legacy(catalog_t *catalog, const catalog_legacy_table_t *legacy,
-                                       catalog_table_id_t *id);
 catalog_status_t catalog_drop_table(catalog_t *catalog, catalog_table_id_t id);
 
 catalog_status_t catalog_find(const catalog_t *catalog, const char *name, size_t name_bytes,

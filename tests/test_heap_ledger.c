@@ -25,7 +25,7 @@
  */
 
 #define DIR_NAME "build/test_heap_ledger_dir"
-#define DB_PATH DIR_NAME "/db.lrdb"
+#define DB_PATH DIR_NAME "/db.totedb"
 #define COLUMNS 3
 
 static int g_run, g_fail;

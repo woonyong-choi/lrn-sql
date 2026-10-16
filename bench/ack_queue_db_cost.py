@@ -43,7 +43,7 @@ def measure(rows: int, payload_bytes: int, repeats: int) -> dict[str, float]:
     """한 (n, s) 조합에서 문장별 한 번의 중앙값 시간(밀리초)."""
     result: dict[str, float] = {"n": rows, "payload_bytes": payload_bytes}
     with tempfile.TemporaryDirectory(prefix="ackq-dbcost-") as tmp:
-        db = Database(Path(tmp) / "db.lrdb", busy_timeout_s=60.0)
+        db = Database(Path(tmp) / "db.totedb", busy_timeout_s=60.0)
         db.execute(SCHEMA)
         body = bytes(index % 251 for index in range(payload_bytes))
         for _ in range(rows):

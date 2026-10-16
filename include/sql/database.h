@@ -12,7 +12,7 @@
 /*
  * 새 저장 형식(page_file) 위에서 CREATE·INSERT·SELECT·UPDATE·DELETE·DROP을 실행하는 데이터베이스.
  * 파일 하나에 테이블 여러 개가 있고 카탈로그(catalog_store)와 테이블별 heap(heap_store)을 연결한다.
- * 옛 MINIDB 파일이나 #77 단일 record root는 열지 않으며 자동으로 옮기지도 않는다.
+ * ToteDB 파일이 아닌 파일(두 제어 페이지에 파일 magic이 없음)과 다른 형식 판은 열지 않으며 자동으로 옮기지도 않는다.
  *
  * 실행 단위: database_exec 한 번은 SQL 문장 하나이며 문장마다 자동 commit이다. 문장이 둘 이상이면
  * 실행하지 않고 SYNTAX 오류 결과를 돌려준다. 매개변수는 binding으로 받고 SQL 문자열에 이어 붙이지 않는다.
@@ -50,7 +50,7 @@ typedef enum {
     DATABASE_INVALID,
     DATABASE_IO,           /* errno를 남긴다 */
     DATABASE_CORRUPT,
-    DATABASE_UNSUPPORTED,  /* 옛 MINIDB 파일, 알 수 없는 version */
+    DATABASE_UNSUPPORTED,  /* ToteDB 파일이 아님, 알 수 없는 형식 판 */
     DATABASE_NOMEM,
     DATABASE_EXISTS,       /* create: 파일이 이미 있음 */
     DATABASE_LOCKED,       /* 다른 핸들이 잠금을 쥐고 있음 */
