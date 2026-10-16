@@ -22,11 +22,12 @@
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
  *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT]
  *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )} [returning]
- *   SELECT core {set_op core} [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
+ *   [WITH cte {, cte}] SELECT core {set_op core} [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
+ *     cte        = name [( column {, column} )] AS ( query )
  *     core       = [DISTINCT] item {, item} [FROM source {join}] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
  *     set_op     = UNION [ALL] SELECT | EXCEPT SELECT | INTERSECT SELECT
  *     item       = * | name.* | expr [[AS] alias]
- *     source     = name [[AS] alias]
+ *     source     = name [[AS] alias] | ( query ) [[AS] alias]
  *     join       = , source | CROSS JOIN source | [INNER] JOIN source ON expr | LEFT [OUTER] JOIN source ON expr
  *   UPDATE name SET column_name = expr {, column_name = expr} [WHERE expr] [returning]
  *   DELETE FROM name [WHERE expr] [returning]
@@ -37,7 +38,9 @@
  *   expr(우선순위 낮은 것부터): OR, AND, NOT, 비교(= == != <> < <= > >=)·IS [NOT] NULL·[NOT] BETWEEN·[NOT] IN (목록)·
  *     [NOT] LIKE [ESCAPE], + -, * / %, ||, 단항 + -, 기본식
  *   기본식      = 숫자 | 'string' | NULL | TRUE | FALSE | X'hex' | ? | ?N | [name.]column | name(args) | name(*) |
- *                name(DISTINCT expr) | CASE [expr] WHEN expr THEN expr {...} [ELSE expr] END | CAST(expr AS type) | ( expr )
+ *                name(DISTINCT expr) | CASE [expr] WHEN expr THEN expr {...} [ELSE expr] END | CAST(expr AS type) | ( expr ) |
+ *                ( query ) | EXISTS ( query ),  그리고 expr [NOT] IN ( query )
+ *   query      = [WITH ...] SELECT ... (괄호 안의 SELECT 문 전체)
  *   문장 끝의 세미콜론은 lexer가 처리하므로 이 API는 토큰만 본다.
  *
  * 의미:
@@ -57,7 +60,8 @@
  *   - FROM 원본은 SQLSTMT_MAX_SOURCES개까지다. 넘으면 SQLSTMT_LIMIT다.
  *
  * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): RIGHT·FULL·NATURAL JOIN, JOIN ... USING, 괄호로 묶은 JOIN,
- * INTERSECT와 UNION·EXCEPT를 괄호 없이 섞기, EXCEPT ALL·INTERSECT ALL, 괄호로 묶은 SELECT, WITH·창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS·FROM 안), INSERT ... SELECT,
+ * INTERSECT와 UNION·EXCEPT를 괄호 없이 섞기, EXCEPT ALL·INTERSECT ALL, 집합 연산 자리의 괄호 SELECT,
+ * WITH RECURSIVE, SELECT가 아닌 문장 앞의 WITH, 창 함수, INSERT ... SELECT,
  * CREATE TABLE ... AS,
  * IF [NOT] EXISTS, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중 PRIMARY KEY 외의 것,
  * 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE, 테이블 이름의 한정(schema.table).
@@ -171,10 +175,12 @@ typedef enum {
     SQLEXPR_BINARY,    /* args[0] op args[1] */
     SQLEXPR_IS_NULL,   /* args[0] IS [NOT] NULL (negated) */
     SQLEXPR_BETWEEN,   /* args[0] [NOT] BETWEEN args[1] AND args[2] */
-    SQLEXPR_IN,        /* args[0] [NOT] IN (args[1..]) */
+    SQLEXPR_IN,        /* args[0] [NOT] IN (args[1..]) | args[0] [NOT] IN ( query ) (subquery) */
     SQLEXPR_LIKE,      /* args[0] [NOT] LIKE args[1] [ESCAPE args[2]] */
     SQLEXPR_CASE,      /* has_operand면 args[0]이 비교 대상. 이어 WHEN·THEN 쌍, has_else면 마지막이 ELSE */
     SQLEXPR_FUNCTION,  /* name(args) | name(*) (star) | name(DISTINCT x) (distinct) */
+    SQLEXPR_SUBQUERY,  /* ( query ): 한 행 한 열 결과(행이 없으면 NULL) */
+    SQLEXPR_EXISTS,    /* EXISTS ( query ) */
     SQLEXPR_CAST       /* CAST(args[0] AS cast_type) */
 } sqlexpr_kind_t;
 
@@ -200,6 +206,7 @@ typedef struct sqlexpr {
     sqlstmt_name_t name;         /* COLUMN·FUNCTION 이름 */
     struct sqlexpr **args;
     size_t arg_count;
+    struct sqlstmt_select *subquery;  /* SUBQUERY·EXISTS·IN ( query )의 질의 */
 } sqlexpr_t;
 
 typedef struct {
@@ -238,8 +245,9 @@ typedef struct {
 typedef enum { SQLSTMT_JOIN_NONE, SQLSTMT_JOIN_CROSS, SQLSTMT_JOIN_INNER, SQLSTMT_JOIN_LEFT } sqlstmt_join_t;
 
 typedef struct {
-    sqlstmt_name_t table;
+    sqlstmt_name_t table;        /* subquery면 size 0 */
     sqlstmt_name_t alias;        /* 없으면 size 0 */
+    struct sqlstmt_select *subquery;  /* FROM ( query ) */
     sqlstmt_join_t join;
     sqlexpr_t *on;               /* INNER·LEFT의 ON 조건. 그 밖에는 NULL */
 } sqlstmt_source_t;
@@ -249,7 +257,17 @@ typedef struct {
 /* 집합 연산. 왼쪽부터 결합한다. INTERSECT를 다른 연산과 섞으면 거절한다(엔진마다 우선순위가 다르다) */
 typedef enum { SQLSTMT_SET_UNION, SQLSTMT_SET_UNION_ALL, SQLSTMT_SET_EXCEPT, SQLSTMT_SET_INTERSECT } sqlstmt_set_op_t;
 
+/* WITH name [( column {, column} )] AS ( query ). columns가 없으면 질의의 결과 열 이름을 쓴다 */
+typedef struct {
+    sqlstmt_name_t name;
+    sqlstmt_name_t *columns;
+    size_t column_count;
+    struct sqlstmt_select *query;
+} sqlstmt_cte_t;
+
 typedef struct sqlstmt_select {
+    sqlstmt_cte_t *ctes;         /* WITH 목록(첫 SELECT에만). 뒤 이름은 앞 이름을 볼 수 있다 */
+    size_t cte_count;
     bool distinct;
     sqlstmt_select_item_t *items;
     size_t item_count;

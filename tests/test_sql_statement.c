@@ -417,6 +417,30 @@ static void parameters(void)
     assert(out == NULL && live_allocations == 0);
 }
 
+static void subquery_forms(void)
+{
+    sqlstmt_t *statement = parse_ok("SELECT (SELECT MAX(b) FROM u), a FROM t WHERE a IN (SELECT b FROM u WHERE b > 1 LIMIT 3) "
+                                    "AND NOT EXISTS (SELECT 1 FROM v) AND a NOT IN (WITH w AS (SELECT 1) SELECT * FROM w)");
+    const sqlstmt_select_t *q = &statement->select;
+    assert(q->items[0].expr->kind == SQLEXPR_SUBQUERY && q->items[0].expr->subquery->item_count == 1);
+    const sqlexpr_t *where = q->where;  /* ((a IN ...) AND NOT EXISTS ...) AND a NOT IN ... */
+    const sqlexpr_t *in = where->args[0]->args[0], *exists = where->args[0]->args[1]->args[0];
+    const sqlexpr_t *not_in = where->args[1];
+    assert(in->kind == SQLEXPR_IN && in->arg_count == 1 && in->subquery->limit != NULL && !in->negated);
+    assert(exists->kind == SQLEXPR_EXISTS && name_is(&exists->subquery->sources[0].table, "v"));
+    assert(not_in->kind == SQLEXPR_IN && not_in->negated && not_in->subquery->cte_count == 1);
+    free_clean(statement);
+
+    statement = parse_ok("WITH a AS (SELECT 1 AS x), b (y, z) AS (SELECT x, x + 1 FROM a) "
+                         "SELECT * FROM b JOIN (SELECT 2 AS k UNION SELECT 3) s ON s.k = b.z, (SELECT 4) AS u");
+    q = &statement->select;
+    assert(q->cte_count == 2 && name_is(&q->ctes[0].name, "a") && q->ctes[0].column_count == 0);
+    assert(name_is(&q->ctes[1].name, "b") && q->ctes[1].column_count == 2 && name_is(&q->ctes[1].columns[1], "z"));
+    assert(q->source_count == 3 && q->sources[1].subquery != NULL && q->sources[1].subquery->next != NULL);
+    assert(name_is(&q->sources[1].alias, "s") && name_is(&q->sources[2].alias, "u") && q->sources[2].table.size == 0);
+    free_clean(statement);
+}
+
 static void set_operation_forms(void)
 {
     sqlstmt_t *statement = parse_ok("SELECT a FROM t UNION SELECT b FROM u UNION ALL SELECT DISTINCT c FROM v WHERE c > 1 "
@@ -763,9 +787,15 @@ static void select_and_where_errors(void)
     expect_syntax("SELECT a FROM t UNION", SQLSTMT_REASON_UNEXPECTED_END, 21);
     expect_syntax("SELECT a FROM t UNION a FROM u", SQLSTMT_REASON_EXPECTED_KEYWORD, 22);
     expect_syntax("SELECT a FROM t ORDER BY a UNION SELECT a FROM u", SQLSTMT_REASON_TRAILING_TOKENS, 27);
-    expect_unsupported("SELECT * FROM t WHERE a IN (SELECT b FROM u)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 28);
-    expect_unsupported("SELECT (SELECT 1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 7);
-    expect_unsupported("SELECT * FROM t WHERE EXISTS (SELECT 1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 22);
+    expect_syntax("SELECT (SELECT 1", SQLSTMT_REASON_UNEXPECTED_END, 16);
+    expect_syntax("SELECT * FROM t WHERE EXISTS (1)", SQLSTMT_REASON_EXPECTED_KEYWORD, 30);
+    expect_syntax("SELECT * FROM t WHERE EXISTS SELECT 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 29);
+    expect_syntax("SELECT * FROM (SELECT 1", SQLSTMT_REASON_UNEXPECTED_END, 23);
+    expect_unsupported("WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 5);
+    expect_unsupported("WITH r AS (SELECT 1) DELETE FROM t", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 21);
+    expect_syntax("WITH r AS (SELECT 1), r AS (SELECT 2) SELECT 1", SQLSTMT_REASON_DUPLICATE_COLUMN, 22);
+    expect_syntax("WITH r (a, a) AS (SELECT 1, 2) SELECT 1", SQLSTMT_REASON_DUPLICATE_COLUMN, 11);
+    expect_syntax("WITH r AS SELECT 1 SELECT 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 10);
     expect_unsupported("SELECT * FROM t.u", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 15);
     expect_syntax("DELETE FROM t ORDER BY a", SQLSTMT_REASON_TRAILING_TOKENS, 14);
     expect_syntax("UPDATE t SET a = 1 RETURNING", SQLSTMT_REASON_UNEXPECTED_END, 28);
@@ -962,6 +992,7 @@ int main(void)
     join_forms();
     returning_forms();
     set_operation_forms();
+    subquery_forms();
     update_delete_drop();
     transaction_control();
     create_errors();

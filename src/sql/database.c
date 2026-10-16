@@ -63,6 +63,10 @@ struct database {
     const database_layer_t *layer;
     void *layer_ctx;
     heap_stats_t stats;   /* 문장이 연 heap들이 올리는 누적 계수기 */
+    /* 문장 동안 쥐는 서브쿼리·WITH·FROM 서브쿼리 결과와 보이는 WITH 이름 */
+    struct relation *relations;
+    struct cte_scope *ctes;
+    database_exec_status_t subquery_status;  /* 서브쿼리 실행이 실패한 결과(평가기 오류에서 돌려준다) */
 };
 
 static const lexer_limits_t LEXER_LIMITS = {
@@ -673,6 +677,227 @@ static void work_settle(database_t *db, work_t *work, size_t peak)
 
 /* ── WHERE ── */
 
+/* ── 서브쿼리·WITH·FROM 서브쿼리 결과 ── */
+
+/*
+ * 질의 결과를 문장이 끝날 때까지 쥔다. key는 결과를 만든 문법 노드(sqlexpr_t·sqlstmt_source_t·sqlstmt_cte_t)이며
+ * 같은 노드는 한 번만 실행한다. 바깥 행에 기대지 않으므로 한 번 계산하면 된다.
+ */
+typedef struct relation {
+    const void *key;
+    catalog_column_t *columns;
+    size_t column_count;
+    char *names;
+    size_t names_bytes;
+    value_t *cells;             /* row_count × column_count */
+    size_t row_count;
+    size_t row_cap;
+    sqleval_subquery_t info;    /* 식 자리 서브쿼리로 쓸 때 */
+    value_view_t *set;          /* IN ( query )의 정렬된 값. 처음 필요할 때 만든다 */
+    size_t set_bytes;
+    struct relation *next;
+} relation_t;
+
+/* 보이는 WITH 이름: owner의 ctes[0..visible) */
+typedef struct cte_scope {
+    const sqlstmt_select_t *owner;
+    size_t visible;
+    struct cte_scope *parent;
+} cte_scope_t;
+
+static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out);
+typedef int (*row_compare_fn)(const void *ctx, const value_t *a, const value_t *b);
+static void sort_rows(value_t **rows, value_t **scratch, size_t count, row_compare_fn cmp, const void *ctx);
+static int compare_first_value(const void *ctx, const value_t *a, const value_t *b);
+
+static void relation_free(database_t *db, relation_t *rel)
+{
+    if (rel->cells != NULL) owned_clear(db, rel->cells, rel->row_count * rel->column_count);
+    q_free(db, rel->cells, rel->row_cap * rel->column_count * sizeof(value_t));
+    q_free(db, rel->columns, (rel->column_count > 0 ? rel->column_count : 1) * sizeof(catalog_column_t));
+    q_free(db, rel->names, rel->names_bytes);
+    q_free(db, rel->set, rel->set_bytes);
+    q_free(db, rel, sizeof(*rel));
+}
+
+static void relations_free(database_t *db)
+{
+    while (db->relations != NULL) {
+        relation_t *next = db->relations->next;
+        relation_free(db, db->relations);
+        db->relations = next;
+    }
+}
+
+static relation_t *relation_find(const database_t *db, const void *key)
+{
+    for (relation_t *rel = db->relations; rel != NULL; rel = rel->next) {
+        if (rel->key == key) return rel;
+    }
+    return NULL;
+}
+
+static database_exec_status_t relation_add_row(database_t *db, relation_t *rel, const result_row_t *row)
+{
+    size_t n = rel->column_count;
+    if (rel->row_count == rel->row_cap) {
+        size_t cap = rel->row_cap == 0 ? 16 : rel->row_cap * 2;
+        if (n > 0 && cap > SIZE_MAX / n / sizeof(value_t)) return DATABASE_EXEC_NOMEM;
+        size_t bytes = cap * n * sizeof(value_t), old = rel->row_cap * n * sizeof(value_t);
+        if (!q_reserve(db, bytes)) return DATABASE_EXEC_NOMEM;
+        value_t *grown = realloc(rel->cells, bytes > 0 ? bytes : 1);
+        if (grown == NULL) {
+            q_release(db, bytes);
+            return DATABASE_EXEC_NOMEM;
+        }
+        q_release(db, old);
+        memset(grown + rel->row_cap * n, 0, (cap - rel->row_cap) * n * sizeof(value_t));
+        rel->cells = grown;
+        rel->row_cap = cap;
+    }
+    value_t *cells = rel->cells + rel->row_count * n;
+    for (size_t c = 0; c < n; c++) {
+        if (q_clone(db, &row->cells[c], &cells[c]) != VALUE_OK) {
+            owned_clear(db, cells, c);
+            return DATABASE_EXEC_NOMEM;
+        }
+    }
+    rel->row_count++;
+    return DATABASE_EXEC_OK;
+}
+
+/* query를 실행해 key의 결과로 쥔다. cte가 열 이름을 주면 그 이름을 쓴다 */
+static database_exec_status_t relation_build(database_t *db, const void *key, const sqlstmt_select_t *query,
+                                             const sqlstmt_cte_t *cte, relation_t **out)
+{
+    *out = relation_find(db, key);
+    if (*out != NULL) return DATABASE_EXEC_OK;
+    if (cancel_requested(db)) return cancelled_result(db);
+    result_t *result = NULL;
+    database_exec_status_t status = exec_select(db, query, &result);
+    if (status != DATABASE_EXEC_OK) return status;
+    relation_t *rel = q_calloc(db, 1, sizeof(*rel));
+    if (rel == NULL) {
+        result_release(&result);
+        return DATABASE_EXEC_NOMEM;
+    }
+    rel->key = key;
+    rel->next = db->relations;
+    db->relations = rel;
+    size_t n = result_column_count(result);
+    rel->column_count = n;
+    if (cte != NULL && cte->column_count > 0 && cte->column_count != n) {
+        result_release(&result);
+        return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_SUBQUERY, "WITH %.*s의 열 이름 수(%zu)가 결과 열 수(%zu)와 다릅니다",
+                           name_len(cte->name.size), (const char *)cte->name.bytes, cte->column_count, n);
+    }
+    for (size_t c = 0; c < n; c++) {
+        bool renamed = cte != NULL && cte->column_count > 0;
+        rel->names_bytes += renamed ? cte->columns[c].size : result_column(result, c)->name_len;
+    }
+    rel->columns = q_calloc(db, n > 0 ? n : 1, sizeof(catalog_column_t));
+    rel->names = rel->names_bytes > 0 ? q_malloc(db, rel->names_bytes) : NULL;
+    if (rel->columns == NULL || (rel->names_bytes > 0 && rel->names == NULL)) {
+        result_release(&result);
+        return DATABASE_EXEC_NOMEM;
+    }
+    size_t used = 0;
+    for (size_t c = 0; c < n; c++) {
+        const result_column_t *meta = result_column(result, c);
+        const uint8_t *name = meta->name;
+        size_t length = meta->name_len;
+        if (cte != NULL && cte->column_count > 0) {
+            name = cte->columns[c].bytes;
+            length = cte->columns[c].size;
+        }
+        if (length > 0) memcpy(rel->names + used, name, length);
+        rel->columns[c] = (catalog_column_t){rel->names + used, length, meta->type, !meta->is_nullable};
+        used += length;
+    }
+    result_row_t row;
+    result_next_t next;
+    while ((next = result_next(result, &row)) == RESULT_NEXT_ROW && status == DATABASE_EXEC_OK) {
+        status = relation_add_row(db, rel, &row);
+    }
+    if (status == DATABASE_EXEC_OK && next != RESULT_NEXT_DONE) {
+        status = next == RESULT_NEXT_CANCELLED ? cancelled_result(db) : DATABASE_EXEC_NOMEM;
+    }
+    result_release(&result);
+    if (status != DATABASE_EXEC_OK) return status;
+    rel->info = (sqleval_subquery_t){n > 0 ? rel->columns[0].type : VALUE_NULL, n, rel->row_count,
+                                     rel->row_count > 0 && n > 0 ? &rel->cells[0].view : NULL, NULL, 0, false};
+    *out = rel;
+    return DATABASE_EXEC_OK;
+}
+
+/* IN ( query )용 정렬·중복 제거한 첫 열 값 */
+static database_exec_status_t relation_set(database_t *db, relation_t *rel)
+{
+    if (rel->set != NULL || rel->row_count == 0) return DATABASE_EXEC_OK;
+    size_t n = rel->column_count;
+    rel->set_bytes = rel->row_count * sizeof(value_view_t);
+    rel->set = q_malloc(db, rel->set_bytes);
+    size_t scratch_bytes = rel->row_count * sizeof(value_t *);
+    value_t **order = q_malloc(db, scratch_bytes);
+    value_t **scratch = q_malloc(db, scratch_bytes);
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    if (rel->set == NULL || order == NULL || scratch == NULL) {
+        status = DATABASE_EXEC_NOMEM;
+    } else {
+        size_t count = 0;
+        for (size_t r = 0; r < rel->row_count; r++) {
+            value_t *cell = &rel->cells[r * n];
+            if (cell->view.type == VALUE_NULL) rel->info.set_has_null = true;
+            else order[count++] = cell;
+        }
+        sort_rows(order, scratch, count, compare_first_value, NULL);
+        for (size_t i = 0; i < count; i++) {
+            if (rel->info.set_count == 0 ||
+                sqleval_compare(&rel->set[rel->info.set_count - 1], &order[i]->view) != 0) {
+                rel->set[rel->info.set_count++] = order[i]->view;
+            }
+        }
+        rel->info.set = rel->set;
+    }
+    q_free(db, order, scratch_bytes);
+    q_free(db, scratch, scratch_bytes);
+    return status;
+}
+
+static sqleval_status_t subquery_hook(void *ctx, const sqlexpr_t *expr, const sqleval_subquery_t **out)
+{
+    database_t *db = ctx;
+    relation_t *rel = NULL;
+    database_exec_status_t status = relation_build(db, expr, expr->subquery, NULL, &rel);
+    if (status == DATABASE_EXEC_OK && expr->kind == SQLEXPR_IN) status = relation_set(db, rel);
+    if (status != DATABASE_EXEC_OK) {
+        db->subquery_status = status;
+        return status == DATABASE_EXEC_NOMEM ? SQLEVAL_NOMEM : SQLEVAL_SUBQUERY;
+    }
+    *out = &rel->info;
+    return SQLEVAL_OK;
+}
+
+/* FROM의 이름이 보이는 WITH 이름이면 그 결과를 만든다. 아니면 *out은 NULL */
+static database_exec_status_t cte_relation(database_t *db, const sqlstmt_name_t *name, relation_t **out)
+{
+    *out = NULL;
+    for (cte_scope_t *scope = db->ctes; scope != NULL; scope = scope->parent) {
+        for (size_t i = 0; i < scope->visible; i++) {
+            const sqlstmt_cte_t *cte = &scope->owner->ctes[i];
+            if (cte->name.size != name->size || memcmp(cte->name.bytes, name->bytes, name->size) != 0) continue;
+            /* WITH 질의는 자기보다 앞의 이름만 본다 */
+            cte_scope_t own = {scope->owner, i, scope->parent};
+            cte_scope_t *saved = db->ctes;
+            db->ctes = &own;
+            database_exec_status_t status = relation_build(db, cte, cte->query, cte, out);
+            db->ctes = saved;
+            return status;
+        }
+    }
+    return DATABASE_EXEC_OK;
+}
+
 /* ── 식과 WHERE ── */
 
 /* FROM 원본 하나. 결합 행에서 이 원본의 열은 offset부터 view->column_count칸이다 */
@@ -752,6 +977,11 @@ static database_exec_status_t eval_failure(database_t *db, const sqleval_error_t
         case SQLEVAL_NOT_GROUPED:
             return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_NOT_GROUPED,
                                "GROUP BY에 없는 컬럼은 집계 밖에서 쓸 수 없습니다: %.*s", length, text);
+        case SQLEVAL_SUBQUERY: return db->subquery_status;
+        case SQLEVAL_SUBQUERY_SHAPE:
+            return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_SUBQUERY,
+                               "식 자리의 서브쿼리는 열 하나, 스칼라 서브쿼리는 한 행 이하여야 합니다 (위치 %zu)",
+                               error->offset);
         case SQLEVAL_NOT_CONSTANT:
             return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_NOT_CONSTANT,
                                "이 자리에는 컬럼을 쓸 수 없습니다: %.*s", length, text);
@@ -763,12 +993,14 @@ static database_exec_status_t eval_failure(database_t *db, const sqleval_error_t
     }
 }
 
+static sqleval_status_t subquery_hook(void *ctx, const sqlexpr_t *expr, const sqleval_subquery_t **out);
+
 static bool compile_expr(database_t *db, const sqlexpr_t *expr, const resolver_t *resolver, sqleval_prog_t **prog,
                          database_exec_status_t *status)
 {
     sqleval_error_t error = {SQLEVAL_OK, 0, NULL};
-    sqleval_status_t compiled = sqleval_compile(expr, resolver != NULL ? resolve_column : NULL, NULL, (void *)resolver,
-                                                prog, &error);
+    sqleval_env_t env = {resolver != NULL ? resolve_column : NULL, NULL, (void *)resolver, subquery_hook, db};
+    sqleval_status_t compiled = sqleval_compile(expr, &env, prog, &error);
     if (compiled == SQLEVAL_OK) return true;
     *status = eval_failure(db, &error);
     return false;
@@ -2017,7 +2249,8 @@ static bool compile_in(database_t *db, const sqlexpr_t *expr, const compile_ctx_
                        database_exec_status_t *status)
 {
     sqleval_error_t error = {SQLEVAL_OK, 0, NULL};
-    if (sqleval_compile(expr, cc->resolve, cc->match, cc->ctx, prog, &error) == SQLEVAL_OK) return true;
+    sqleval_env_t env = {cc->resolve, cc->match, cc->ctx, subquery_hook, db};
+    if (sqleval_compile(expr, &env, prog, &error) == SQLEVAL_OK) return true;
     *status = eval_failure(db, &error);
     return false;
 }
@@ -2436,7 +2669,6 @@ static void group_rows_free(group_rows_t *rows)
 }
 
 /* 안정 병합 정렬. cmp는 행 포인터 둘을 비교한다 */
-typedef int (*row_compare_fn)(const void *ctx, const value_t *a, const value_t *b);
 
 static void sort_rows(value_t **rows, value_t **scratch, size_t count, row_compare_fn cmp, const void *ctx)
 {
@@ -2624,6 +2856,7 @@ typedef struct {
     catalog_table_id_t id;
     catalog_table_view_t view;
     heap_t *heap;
+    relation_t *relation;       /* WITH·FROM 서브쿼리 결과면 heap 대신 이것을 훑는다 */
     bool left;
     bool matched;               /* 이번 바깥 행에서 ON을 통과한 행이 있었는지 */
     join_probe_t probes[WHERE_MAX_PROBES];
@@ -2702,15 +2935,32 @@ static database_exec_status_t join_probes(join_t *join, const join_level_t *step
     return DATABASE_EXEC_OK;
 }
 
+/* 실체화한 결과를 훑는다. 값은 빌려 쓴다 */
+static database_exec_status_t scan_relation(join_t *join, join_level_t *step, value_t *row)
+{
+    const relation_t *rel = step->relation;
+    size_t n = rel->column_count;
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    for (size_t r = 0; r < rel->row_count && status == DATABASE_EXEC_OK && !*step->sink.stop; r++) {
+        if (cancel_requested(join->db)) return cancelled_result(join->db);
+        for (size_t c = 0; c < n; c++) row[c] = (value_t){rel->cells[r * n + c].view, false};
+        status = step->sink.fn(step->sink.ctx, row);
+    }
+    memset(row, 0, n * sizeof(*row));
+    return status;
+}
+
 static database_exec_status_t join_run(join_t *join, size_t level)
 {
     if (level == join->level_count) return join->out->fn(join->out->ctx, join->row);
     join_level_t *step = &join->levels[level];
     const source_ref_t *source = &join->sources[level];
     where_t where;
-    database_exec_status_t status = join_probes(join, step, &where);
+    memset(&where, 0, sizeof(where));
     step->matched = false;
-    if (status == DATABASE_EXEC_OK) {
+    database_exec_status_t status = step->relation != NULL ? scan_relation(join, step, join->row + source->offset)
+                                                           : join_probes(join, step, &where);
+    if (status == DATABASE_EXEC_OK && step->relation == NULL) {
         status = scan_rows(join->db, &step->view, step->id, step->heap, &where, join->needed + source->offset,
                            join->row + source->offset, &step->sink);
     }
@@ -2844,15 +3094,29 @@ static database_exec_status_t join_open(database_t *db, const sqlstmt_select_t *
     memset(join, 0, sizeof(*join));
     join->db = db;
     size_t count = select->source_count;
+    /* 해제 크기가 level_count를 따르므로 할당 전에 정한다 */
+    join->level_count = count;
     join->levels = q_calloc(db, count > 0 ? count : 1, sizeof(join_level_t));
     join->sources = q_calloc(db, count > 0 ? count : 1, sizeof(source_ref_t));
     if (join->levels == NULL || join->sources == NULL) return DATABASE_EXEC_NOMEM;
-    join->level_count = count;
     database_exec_status_t status = DATABASE_EXEC_OK;
     for (size_t i = 0; i < count; i++) {
         const sqlstmt_source_t *from = &select->sources[i];
         join_level_t *step = &join->levels[i];
-        if (!lookup_table(db, &from->table, &step->id, &step->view, &status)) return status;
+        if (from->subquery != NULL) {
+            status = relation_build(db, from, from->subquery, NULL, &step->relation);
+        } else {
+            status = cte_relation(db, &from->table, &step->relation);
+        }
+        if (status != DATABASE_EXEC_OK) return status;
+        if (step->relation != NULL) {
+            step->view = (catalog_table_view_t){0};
+            step->view.columns = step->relation->columns;
+            step->view.column_count = step->relation->column_count;
+            step->view.primary_key_column = NO_COLUMN;
+        } else if (!lookup_table(db, &from->table, &step->id, &step->view, &status)) {
+            return status;
+        }
         step->join = join;
         step->level = i;
         step->left = from->join == SQLSTMT_JOIN_LEFT;
@@ -2954,6 +3218,7 @@ static database_exec_status_t select_run(database_t *db, const sqlstmt_select_t 
 
     if (ctx->has_limit && ctx->limit == 0) ctx->done = true;
     for (size_t l = 0; l < join.level_count; l++) {
+        if (join.levels[l].relation != NULL) continue;
         heap_status_t opened = open_heap(db, &join.levels[l].view, join.levels[l].id, &join.levels[l].heap);
         if (opened != HEAP_OK) {
             status = heap_failure(db, opened, "open");
@@ -3152,7 +3417,7 @@ done:
     return status;
 }
 
-static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
+static database_exec_status_t exec_query(database_t *db, const sqlstmt_select_t *select, result_t **out)
 {
     if (select->next != NULL) return exec_compound(db, select, out);
     select_ctx_t ctx;
@@ -3161,6 +3426,17 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     database_exec_status_t status = select_run(db, select, false, &ctx);
     if (status == DATABASE_EXEC_OK) status = select_finish(&ctx, out);
     select_ctx_free(&ctx);
+    return status;
+}
+
+/* WITH 이름은 이 질의(과 안의 서브쿼리)에서만 보인다 */
+static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
+{
+    if (select->cte_count == 0) return exec_query(db, select, out);
+    cte_scope_t scope = {select, select->cte_count, db->ctes};
+    db->ctes = &scope;
+    database_exec_status_t status = exec_query(db, select, out);
+    db->ctes = scope.parent;
     return status;
 }
 
@@ -3925,6 +4201,7 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
         default: status = fail_result(db, RESULT_E_INTERNAL, 21, "문장을 실행하지 못했습니다"); break;
     }
 done:
+    relations_free(db);
     sqlstmt_free(statement);
     q_release(db, parse_peak);
     lexer_free(lexed);

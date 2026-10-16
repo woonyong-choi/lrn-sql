@@ -22,6 +22,7 @@
  *   - LIKE는 대소문자를 구분한다(%·_, ESCAPE 한 글자). SQLite 기본(ASCII 대소문자 무시)과 다르다.
  *   - CAST는 value_cast의 정확한 변환만 받는다(잃는 변환은 형식 오류).
  *   - 집계 COUNT·SUM·AVG·MIN·MAX는 이 모듈이 계산하지 않는다. 실행기가 그룹마다 접어 match로 넘긴다.
+ *   - 서브쿼리는 바깥 열을 보지 않는다(상관 서브쿼리 미지원). 결과는 subquery 훅이 미리 계산해 준다.
  *   - 함수: ABS, LENGTH(글자 수, BLOB은 바이트 수), LOWER, UPPER(ASCII), SUBSTR(x, 시작[, 길이])(글자 단위,
  *     시작이 1보다 작으면 그만큼 길이를 줄인다), TRIM·LTRIM·RTRIM(x[, 문자들]), REPLACE, COALESCE, NULLIF.
  */
@@ -39,6 +40,8 @@ typedef enum {
     SQLEVAL_NOT_CONSTANT,     /* 상수 자리에 열이 나옴 */
     SQLEVAL_AGGREGATE,        /* 집계 함수를 쓸 수 없는 자리(WHERE·GROUP BY·집계 안의 집계 등) */
     SQLEVAL_NOT_GROUPED,      /* 그룹 질의에서 GROUP BY에 없는 열을 집계 밖에서 씀 */
+    SQLEVAL_SUBQUERY,         /* 서브쿼리 실행이 실패함(원인은 subquery 훅을 준 쪽이 기록했다) */
+    SQLEVAL_SUBQUERY_SHAPE,   /* 식 자리 서브쿼리가 열 하나가 아니거나 스칼라 서브쿼리가 두 행 이상 */
     SQLEVAL_LIMIT             /* 값 크기 한도 */
 } sqleval_status_t;
 
@@ -60,14 +63,43 @@ typedef size_t (*sqleval_match_fn)(void *ctx, const sqlexpr_t *expr, value_type_
 typedef size_t (*sqleval_resolve_fn)(void *ctx, const sqlstmt_name_t *qualifier, const sqlstmt_name_t *name,
                                      value_type_t *type);
 
+/*
+ * 서브쿼리 결과(바깥 행에 기대지 않는 서브쿼리만). 훅을 준 쪽이 만들어 프로그램보다 오래 쥔다.
+ *   (query): 행이 없으면 NULL, 한 행이면 그 값(first). 두 행 이상이면 SUBQUERY_SHAPE.
+ *   EXISTS (query): row_count > 0.
+ *   x IN (query): set은 NULL 아닌 값을 sqleval_compare 순서로 정렬·중복 제거한 것. 3치 논리는 IN 목록과 같다
+ *     (맞으면 참, 아니고 NULL이 있으면 NULL, 아니면 거짓. 결과가 비었으면 x가 NULL이어도 거짓).
+ */
+typedef struct {
+    value_type_t type;            /* 첫 열의 형식 */
+    size_t column_count;
+    size_t row_count;
+    const value_view_t *first;    /* 첫 행 첫 열. row_count가 0이면 NULL */
+    const value_view_t *set;      /* IN일 때만 */
+    size_t set_count;
+    bool set_has_null;
+} sqleval_subquery_t;
+
+/* expr(SUBQUERY·EXISTS·IN ( query ))의 결과를 준다. 실패하면 SQLEVAL_SUBQUERY나 SQLEVAL_NOMEM */
+typedef sqleval_status_t (*sqleval_subquery_fn)(void *ctx, const sqlexpr_t *expr, const sqleval_subquery_t **out);
+
+/* 컴파일 환경. resolve·match는 ctx를, subquery는 subquery_ctx를 받는다. 없는 훅은 NULL */
+typedef struct {
+    sqleval_resolve_fn resolve;   /* NULL이면 열을 쓸 수 없다(상수식) */
+    sqleval_match_fn match;
+    void *ctx;
+    sqleval_subquery_fn subquery; /* NULL이면 서브쿼리를 쓸 수 없다 */
+    void *subquery_ctx;
+} sqleval_env_t;
+
 typedef struct sqleval_prog sqleval_prog_t;
 
 /*
- * expr를 컴파일한다. resolve가 NULL이면 열을 쓸 수 없다(상수식). 성공하면 *out을 sqleval_free로 해제한다.
- * 프로그램은 expr를 빌려 쓰므로 expr보다 오래 살면 안 된다.
+ * expr를 컴파일한다. 성공하면 *out을 sqleval_free로 해제한다.
+ * 프로그램은 expr와 서브쿼리 결과를 빌려 쓰므로 그것들보다 오래 살면 안 된다.
  */
-sqleval_status_t sqleval_compile(const sqlexpr_t *expr, sqleval_resolve_fn resolve, sqleval_match_fn match, void *ctx,
-                                 sqleval_prog_t **out, sqleval_error_t *error);
+sqleval_status_t sqleval_compile(const sqlexpr_t *expr, const sqleval_env_t *env, sqleval_prog_t **out,
+                                 sqleval_error_t *error);
 
 /* COUNT·SUM·AVG·MIN·MAX(인자 하나) 호출인지 */
 bool sqleval_is_aggregate(const sqlexpr_t *expr);

@@ -29,11 +29,11 @@ static const char *const RESERVED[] = {
     "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
     "INDEX", "UNIQUE", "AND", "OR", "IN", "BETWEEN", "LIKE", "ESCAPE", "CASE", "WHEN", "THEN",
     "ELSE", "END", "CAST", "AS", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "DISTINCT",
-    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", "RETURNING", "UNION", "ALL", "EXCEPT", "INTERSECT", NULL};
+    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", "RETURNING", "UNION", "ALL", "EXCEPT", "INTERSECT", "WITH", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
-    "RIGHT", "FULL", "NATURAL", "USING", "WINDOW", "OVER", "WITH", NULL};
+    "RIGHT", "FULL", "NATURAL", "USING", "WINDOW", "OVER", "RECURSIVE", NULL};
 
 static bool fail(parser_t *p, sqlstmt_status_t status, sqlstmt_reason_t reason, size_t offset)
 {
@@ -165,9 +165,12 @@ static void name_clear(sqlstmt_name_t *name)
     name->size = 0;
 }
 
+static void select_free(struct sqlstmt_select *query);
+
 static void expr_free(sqlexpr_t *expr)
 {
     if (expr == NULL) return;
+    select_free(expr->subquery);
     for (size_t i = 0; i < expr->arg_count; i++) expr_free(expr->args[i]);
     free(expr->args);
     value_clear(&expr->value);
@@ -194,6 +197,12 @@ static void items_free(sqlstmt_select_item_t *items, size_t count)
 
 static void select_fields_clear(sqlstmt_select_t *q)
 {
+    for (size_t i = 0; i < q->cte_count; i++) {
+        name_clear(&q->ctes[i].name);
+        names_clear(q->ctes[i].columns, q->ctes[i].column_count);
+        select_free(q->ctes[i].query);
+    }
+    free(q->ctes);
     items_free(q->items, q->item_count);
     for (size_t i = 0; i < q->order_count; i++) expr_free(q->order[i].expr);
     for (size_t i = 0; i < q->group_count; i++) expr_free(q->group_by[i]);
@@ -206,12 +215,22 @@ static void select_fields_clear(sqlstmt_select_t *q)
     for (size_t i = 0; i < q->source_count; i++) {
         name_clear(&q->sources[i].table);
         name_clear(&q->sources[i].alias);
+        select_free(q->sources[i].subquery);
         expr_free(q->sources[i].on);
     }
     free(q->sources);
 }
 
 /* 첫 SELECT는 문장 구조 안에 있고 집합 연산으로 이어진 뒤 SELECT들은 따로 할당했다 */
+static void select_clear(sqlstmt_select_t *head);
+
+static void select_free(sqlstmt_select_t *query)
+{
+    if (query == NULL) return;
+    select_clear(query);
+    free(query);
+}
+
 static void select_clear(sqlstmt_select_t *head)
 {
     select_fields_clear(head);
@@ -507,6 +526,10 @@ static sqlexpr_t *make_node(parser_t *p, sqlexpr_kind_t kind, size_t offset, sql
 }
 
 static bool parse_expr(parser_t *p, sqlexpr_t **out);
+static bool parse_subquery(parser_t *p, sqlstmt_select_t **out);
+
+/* 현재 토큰이 괄호 안 질의의 시작인지 */
+static bool starts_query(const lexer_token_t *token) { return word_is(token, "SELECT") || word_is(token, "WITH"); }
 
 /* 깊이를 하나 들어간다. 한도를 넘으면 LIMIT다 */
 static bool enter(parser_t *p)
@@ -614,10 +637,18 @@ static bool parse_primary(parser_t *p, sqlexpr_t **out)
     const lexer_token_t *token = current(p);
     if (token == NULL) return syntax_here(p, SQLSTMT_REASON_EXPECTED_VALUE);
     size_t offset = token->offset;
-    if (punct_is(token, "(")) {
-        if (word_is(peek_next(p), "SELECT")) {
-            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, offset);
+    if (punct_is(token, "(") && starts_query(peek_next(p))) {
+        p->pos++;
+        sqlexpr_t *node = new_expr(p, SQLEXPR_SUBQUERY, offset);
+        if (node == NULL) return false;
+        if (!parse_subquery(p, &node->subquery)) {
+            expr_free(node);
+            return false;
         }
+        *out = node;
+        return true;
+    }
+    if (punct_is(token, "(")) {
         p->pos++;
         sqlexpr_t *inner = NULL;
         if (!parse_expr(p, &inner)) return false;
@@ -659,7 +690,19 @@ static bool parse_primary(parser_t *p, sqlexpr_t **out)
         *out = cast;
         return true;
     }
-    if (word_is(token, "EXISTS")) return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, offset);
+    if (word_is(token, "EXISTS")) {
+        p->pos++;
+        if (!expect_punct(p, "(")) return false;
+        if (!starts_query(current(p))) return syntax_here(p, SQLSTMT_REASON_EXPECTED_KEYWORD);
+        sqlexpr_t *node = new_expr(p, SQLEXPR_EXISTS, offset);
+        if (node == NULL) return false;
+        if (!parse_subquery(p, &node->subquery)) {
+            expr_free(node);
+            return false;
+        }
+        *out = node;
+        return true;
+    }
     if ((token->kind != LEXER_WORD && token->kind != LEXER_QUOTED_IDENT) ||
         (token->kind == LEXER_WORD && (word_in(token, RESERVED) || word_in(token, UNSUPPORTED_WORDS)))) {
         return syntax_here(p, SQLSTMT_REASON_EXPECTED_VALUE);
@@ -829,9 +872,13 @@ static bool parse_predicate(parser_t *p, sqlexpr_t **out)
             expr_free(node);
             return false;
         }
-        if (word_is(current(p), "SELECT")) {
-            expr_free(node);
-            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, here_offset(p));
+        if (starts_query(current(p))) {
+            if (!parse_subquery(p, &node->subquery)) {
+                expr_free(node);
+                return false;
+            }
+            *out = node;
+            return true;
         }
         do {
             sqlexpr_t *item = NULL;
@@ -1069,7 +1116,15 @@ static bool parse_source(parser_t *p, sqlstmt_select_t *query, size_t *capacity,
     sqlstmt_source_t *source = &query->sources[query->source_count++];
     memset(source, 0, sizeof(*source));
     source->join = join;
-    if (!parse_name(p, &source->table, false) || !parse_alias(p, &source->alias)) return false;
+    if (punct_is(current(p), "(")) {
+        if (!starts_query(peek_next(p))) {
+            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+        }
+        p->pos++;
+        if (!parse_subquery(p, &source->subquery) || !parse_alias(p, &source->alias)) return false;
+    } else if (!parse_name(p, &source->table, false) || !parse_alias(p, &source->alias)) {
+        return false;
+    }
     if (join != SQLSTMT_JOIN_INNER && join != SQLSTMT_JOIN_LEFT) return true;
     if (word_is(current(p), "USING")) {
         return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
@@ -1099,9 +1154,6 @@ static bool parse_from(parser_t *p, sqlstmt_select_t *query)
             join = SQLSTMT_JOIN_LEFT;
         } else {
             return true;
-        }
-        if (punct_is(current(p), "(")) {
-            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
         }
         if (!parse_source(p, query, &capacity, join)) return false;
     }
@@ -1153,10 +1205,9 @@ static bool take_set_op(parser_t *p, sqlstmt_set_op_t *op)
     return true;
 }
 
-static bool parse_select(parser_t *p, sqlstmt_t *statement)
+/* SELECT 키워드 뒤의 질의: 핵심·집합 연산·ORDER BY·LIMIT·OFFSET */
+static bool parse_query_body(parser_t *p, sqlstmt_select_t *query)
 {
-    sqlstmt_select_t *query = &statement->select;
-    statement->kind = SQLSTMT_SELECT;
     if (!parse_select_core(p, query)) return false;
     sqlstmt_select_t *tail = query;
     bool has_intersect = false, has_other = false;
@@ -1190,7 +1241,79 @@ static bool parse_select(parser_t *p, sqlstmt_t *statement)
     if (take_word(p, "OFFSET")) {
         if (!parse_expr(p, &query->offset)) return false;
     }
-    return parse_end(p);
+    return true;
+}
+
+/* WITH 목록. WITH 키워드 뒤에서 부른다 */
+static bool parse_ctes(parser_t *p, sqlstmt_select_t *query)
+{
+    if (word_is(current(p), "RECURSIVE")) {
+        return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+    }
+    size_t capacity = 0;
+    do {
+        size_t offset = here_offset(p);
+        void *grown = reserve(p, query->ctes, &capacity, query->cte_count, sizeof(*query->ctes), offset);
+        if (grown == NULL) return false;
+        query->ctes = grown;
+        sqlstmt_cte_t *cte = &query->ctes[query->cte_count++];
+        if (!parse_name(p, &cte->name, false)) return false;
+        for (size_t i = 0; i + 1 < query->cte_count; i++) {
+            if (names_equal(&query->ctes[i].name, &cte->name)) {
+                return fail(p, SQLSTMT_SYNTAX, SQLSTMT_REASON_DUPLICATE_COLUMN, offset);
+            }
+        }
+        if (take_punct(p, "(")) {
+            size_t column_capacity = 0;
+            do {
+                size_t at = here_offset(p);
+                grown = reserve(p, cte->columns, &column_capacity, cte->column_count, sizeof(*cte->columns), at);
+                if (grown == NULL) return false;
+                cte->columns = grown;
+                if (!parse_name(p, &cte->columns[cte->column_count++], false)) return false;
+                for (size_t i = 0; i + 1 < cte->column_count; i++) {
+                    if (names_equal(&cte->columns[i], &cte->columns[cte->column_count - 1])) {
+                        return fail(p, SQLSTMT_SYNTAX, SQLSTMT_REASON_DUPLICATE_COLUMN, at);
+                    }
+                }
+            } while (take_punct(p, ","));
+            if (!expect_punct(p, ")")) return false;
+        }
+        if (!expect_word(p, "AS") || !expect_punct(p, "(")) return false;
+        if (!starts_query(current(p))) return syntax_here(p, SQLSTMT_REASON_EXPECTED_KEYWORD);
+        if (!parse_subquery(p, &cte->query)) return false;
+    } while (take_punct(p, ","));
+    return true;
+}
+
+/* [WITH ...] SELECT ... */
+static bool parse_query(parser_t *p, sqlstmt_select_t *query)
+{
+    if (take_word(p, "WITH") && !parse_ctes(p, query)) return false;
+    if (!expect_word(p, "SELECT")) {
+        if (query->cte_count > 0 && current(p) != NULL && current(p)->kind == LEXER_WORD) {
+            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+        }
+        return false;
+    }
+    return parse_query_body(p, query);
+}
+
+/* ( 다음의 질의와 닫는 ). 여는 괄호는 호출자가 읽었다 */
+static bool parse_subquery(parser_t *p, sqlstmt_select_t **out)
+{
+    if (!enter(p)) return false;
+    sqlstmt_select_t *query = calloc(1, sizeof(*query));
+    bool ok = query != NULL ? parse_query(p, query) && expect_punct(p, ")") : nomem(p, here_offset(p));
+    p->depth--;
+    *out = query;
+    return ok;
+}
+
+static bool parse_select(parser_t *p, sqlstmt_t *statement)
+{
+    statement->kind = SQLSTMT_SELECT;
+    return parse_query(p, &statement->select) && parse_end(p);
 }
 
 static bool parse_update(parser_t *p, sqlstmt_t *statement)
@@ -1507,7 +1630,7 @@ size_t sqlstmt_parse_peak_bytes(const lexer_statement_t *statement, const lexer_
     if (items < 4) items = 4;
     /* INSERT는 이름 배열과 값 배열을 함께 쥔다. 다른 문장은 이 합보다 작다 */
     size_t element = sizeof(sqlstmt_name_t) + sizeof(sqlstmt_select_item_t) + sizeof(sqlstmt_order_t) +
-                     sizeof(sqlstmt_source_t);
+                     sizeof(sqlstmt_source_t) + sizeof(sqlstmt_cte_t);
     if (sizeof(sqlstmt_column_def_t) > element) element = sizeof(sqlstmt_column_def_t);
     if (sizeof(sqlstmt_assignment_t) > element) element = sizeof(sqlstmt_assignment_t);
     size_t total = sizeof(sqlstmt_t) + 3 * items * element;
@@ -1567,8 +1690,7 @@ sqlstmt_status_t sqlstmt_parse(const lexer_statement_t *statement, const lexer_b
     } else if (word_is(first, "INSERT")) {
         parser.pos++;
         ok = parse_insert(&parser, built);
-    } else if (word_is(first, "SELECT")) {
-        parser.pos++;
+    } else if (word_is(first, "SELECT") || word_is(first, "WITH")) {
         ok = parse_select(&parser, built);
     } else if (word_is(first, "UPDATE")) {
         parser.pos++;
