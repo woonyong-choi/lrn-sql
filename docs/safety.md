@@ -69,7 +69,7 @@ ToteDB는 commit 도중 프로세스가 멈추거나 쓰기가 실패해도 다�
 
 ## SQLite와의 강제 종료 비교
 
-`bench/sqlite_workload.py`로 SQLite(DELETE journal, `synchronous=FULL`)와 같은 입력을 비교했다(소스 `7bcc697`, 2026-10-16 측정). 1천·1만·10만 행마다 15번, 행 절반을 바꾸는 UPDATE를 보낸 뒤 0~20ms 안에 SIGKILL하고 다시 열어 UPDATE 전부 또는 전무인지 확인했다. 두 엔진 모두 위반 0이었다. 다시 열어 기본 키 조회 하나에 답할 때까지 p50은 ToteDB 2.2~2.5ms, SQLite 2.5~3.2ms였다.
+`bench/sqlite_workload.py`로 SQLite(DELETE journal, `synchronous=FULL`)와 같은 입력을 비교했다(소스 `f04f93e`, 2026-10-16 측정). 1천·1만·10만 행마다 15번, 행 절반을 바꾸는 UPDATE를 보낸 뒤 0~20ms 안에 SIGKILL하고 다시 열어 UPDATE 전부 또는 전무인지 확인했다. 두 엔진 모두 위반 0이었다. 다시 열어 기본 키 조회 하나에 답할 때까지 p50은 ToteDB 2.2~2.5ms, SQLite 2.5~3.2ms였다.
 
 ```sh
 python3 bench/sqlite_workload.py
