@@ -150,8 +150,13 @@ test-fault: $(BUILD_DIR)/test_fault_runtime $(BUILD_DIR)/fault_fixture
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_fault_runtime.json -- ./$(BUILD_DIR)/test_fault_runtime $(BUILD_DIR)/fault/runtime.trace
 	FAULT_FIXTURE=$(abspath $(BUILD_DIR)/fault_fixture) $(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_fault_fixture.json -- $(PYTEST) -q tests/test_fault_fixture.py --basetemp=$(BUILD_DIR)/fault/fixture-tests -p no:cacheprovider
 
+# SQL 실행기(#198). 파일마다 한 역할이며 공유 타입은 src/sql/database_exec.h에 있다
+DATABASE_EXEC_NAMES = database database_expr database_subquery database_ddl database_insert database_select \
+                      database_group database_join database_update database_check
+DATABASE_EXEC_OBJS = $(addprefix $(BUILD_DIR)/sql/,$(addsuffix .o,$(DATABASE_EXEC_NAMES)))
+DATABASE_EXEC_FAULT_OBJS = $(addprefix $(BUILD_DIR)/sql/,$(addsuffix _fault.o,$(DATABASE_EXEC_NAMES)))
 DATABASE_OBJS = $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store.o $(BUILD_DIR)/storage/transaction.o \
-                $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/sql/database_txn.o \
+                $(DATABASE_EXEC_OBJS) $(BUILD_DIR)/sql/database_txn.o \
                 $(BUILD_DIR)/sql/sql_statement.o $(BUILD_DIR)/sql/sql_eval.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/sql/result.o
 DATABASE_TESTS = test_sql_statement test_heap_store test_database test_database_sqlite test_database_fault test_database_bounded_open test_primary_index
 DATABASE_BINS = $(addprefix $(BUILD_DIR)/,$(DATABASE_TESTS))
@@ -174,7 +179,7 @@ $(BUILD_DIR)/bench_free_space:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 $(BUILD_DIR)/test_database_sqlite: $(BUILD_DIR)/tests/test_database_sqlite.o $(DATABASE_OBJS)
 $(BUILD_DIR)/test_primary_index: $(BUILD_DIR)/tests/test_primary_index.o $(DATABASE_OBJS)
-$(BUILD_DIR)/test_database_fault: $(BUILD_DIR)/tests/test_database_fault.o $(filter-out $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/storage/heap_store.o,$(DATABASE_OBJS)) $(BUILD_DIR)/sql/database_fault.o $(BUILD_DIR)/storage/heap_store_fault.o
+$(BUILD_DIR)/test_database_fault: $(BUILD_DIR)/tests/test_database_fault.o $(filter-out $(DATABASE_EXEC_OBJS) $(BUILD_DIR)/storage/heap_store.o,$(DATABASE_OBJS)) $(DATABASE_EXEC_FAULT_OBJS) $(BUILD_DIR)/storage/heap_store_fault.o
 $(BUILD_DIR)/test_database_bounded_open: $(BUILD_DIR)/tests/test_database_bounded_open.o $(BUILD_DIR)/tests/alloc_audit.o $(DATABASE_AUDIT_OBJS)
 $(DATABASE_BINS):
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -195,7 +200,7 @@ $(BUILD_DIR)/storage/heap_store_test.o: src/storage/heap_store.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=hs_test_malloc -Dcalloc=hs_test_calloc -Drealloc=hs_test_realloc -c -o $@ $<
 
-$(BUILD_DIR)/sql/database_fault.o: src/sql/database.c
+$(DATABASE_EXEC_FAULT_OBJS): $(BUILD_DIR)/sql/%_fault.o: src/sql/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -Dmalloc=db_test_malloc -Dcalloc=db_test_calloc -Drealloc=db_test_realloc -Dfree=db_test_free -c -o $@ $<
 
@@ -288,7 +293,7 @@ clean:
 -include $(STORAGE_OBJS:.o=.d)
 -include $(wildcard $(BUILD_DIR)/tests/*.d $(BUILD_DIR)/storage/*_fault.d $(BUILD_DIR)/sql/lexer*.d)
 -include $(BUILD_DIR)/sql/result.d $(BUILD_DIR)/sql/result_fault.d
--include $(DATABASE_OBJS:.o=.d) $(BUILD_DIR)/sql/database_fault.d $(BUILD_DIR)/sql/sql_statement_fault.d $(BUILD_DIR)/storage/heap_store_test.d
+-include $(DATABASE_OBJS:.o=.d) $(DATABASE_EXEC_FAULT_OBJS:.o=.d) $(BUILD_DIR)/sql/sql_statement_fault.d $(BUILD_DIR)/storage/heap_store_test.d
 -include $(DATABASE_AUDIT_OBJS:.o=.d)
 
 -include $(BUILD_DIR)/storage/transaction.d
