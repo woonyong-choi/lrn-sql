@@ -189,6 +189,11 @@ typedef struct {
     uint32_t body_len;
 } envelope_t;
 
+static const uint8_t ZERO_PAGE[PAGE_FILE_PAGE_BYTES];
+
+/* 0 영역 검사. 바이트 단위 반복 대신 벡터화된 memcmp를 쓴다 */
+static bool all_zero(const uint8_t *bytes, size_t size) { return memcmp(bytes, ZERO_PAGE, size) == 0; }
+
 /* envelope만 검사한다. 손상이면 SLOT_DAMAGED, 알 수 없는 envelope 버전이면 SLOT_UNSUPPORTED. */
 static slot_state_t decode_envelope(const uint8_t *page, uint32_t expect_id, envelope_t *out)
 {
@@ -197,11 +202,9 @@ static slot_state_t decode_envelope(const uint8_t *page, uint32_t expect_id, env
     if (get_u16(page + 4) != ENVELOPE_VERSION) return SLOT_UNSUPPORTED;
     uint32_t body_len = get_u32(page + 16);
     if (get_u32(page + 8) != expect_id || body_len > PAGE_BODY_BYTES) return SLOT_DAMAGED;
-    for (size_t i = 20; i < 28; i++) {
-        if (page[i] != 0) return SLOT_DAMAGED;
-    }
-    for (size_t i = PAGE_ENVELOPE_BYTES + body_len; i < PAGE_FILE_PAGE_BYTES; i++) {
-        if (page[i] != 0) return SLOT_DAMAGED;
+    if (!all_zero(page + 20, 8) || !all_zero(page + PAGE_ENVELOPE_BYTES + body_len,
+                                             PAGE_FILE_PAGE_BYTES - PAGE_ENVELOPE_BYTES - body_len)) {
+        return SLOT_DAMAGED;
     }
     out->kind = (page_kind_t)get_u16(page + 6);
     out->table_id = get_u32(page + 12);
@@ -209,13 +212,7 @@ static slot_state_t decode_envelope(const uint8_t *page, uint32_t expect_id, env
     return SLOT_VALID;
 }
 
-static bool is_blank(const uint8_t *page)
-{
-    for (size_t i = 0; i < PAGE_FILE_PAGE_BYTES; i++) {
-        if (page[i] != 0) return false;
-    }
-    return true;
-}
+static bool is_blank(const uint8_t *page) { return all_zero(page, PAGE_FILE_PAGE_BYTES); }
 
 static uint32_t inline_ids(uint64_t total)
 {
