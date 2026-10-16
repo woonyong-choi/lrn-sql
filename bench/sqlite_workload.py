@@ -311,6 +311,90 @@ def _mutations(
     return observations
 
 
+MIXED_KINDS = (("point", 60), ("range", 10), ("update", 20), ("insert", 7), ("delete", 3))
+
+
+def _mixed_sql(kind: str, count: int, step: int, randomizer: random.Random) -> str:
+    key = randomizer.randint(1, count)
+    if kind == "point":
+        return f"SELECT id, name, note FROM items WHERE id = {key}"
+    if kind == "range":
+        return f"SELECT id, score FROM items WHERE id >= {key} AND id < {key + 50}"
+    if kind == "update":
+        return f"UPDATE items SET score = {step}.25, note = 'mixed-{step}' WHERE id = {key}"
+    if kind == "insert":
+        return _insert_sql(count + 1000 + step, step)
+    return f"DELETE FROM items WHERE id = {key}"
+
+
+# cost: time O(k * q), heap O(k), stack O(1), io O(k * p)
+# vars: k = 혼합 문장 수, q = 문장 실행 비용, p = 문장당 접근 페이지와 fsync
+# basis: estimate
+def _mixed(workers: list[Worker], count: int, config: dict[str, Any]) -> dict[str, Any]:
+    """조회·범위·갱신·삽입·삭제를 정해진 비율로 섞어 자동 commit으로 실행하고 매 문장 결과를 대조한다."""
+    randomizer = random.Random(config["seed"] + count)
+    kinds = [kind for kind, weight in MIXED_KINDS for _ in range(weight)]
+    samples: dict[str, dict[str, list[int]]] = {
+        worker.engine: {kind: [] for kind, _ in MIXED_KINDS} for worker in workers
+    }
+    errors = {worker.engine: 0 for worker in workers}
+    started = time.monotonic()
+    for step in range(config["mixed_operations"]):
+        kind = randomizer.choice(kinds)
+        results = _execute_pair(
+            workers, _mixed_sql(kind, count, step, randomizer), config["statement_timeout_seconds"]
+        )
+        for engine, result in results.items():
+            samples[engine][kind].append(result["ns"])
+            errors[engine] += result["error"] != 0
+    final = _execute_pair(workers, "SELECT * FROM items", config["statement_timeout_seconds"])
+    return {
+        "operations": config["mixed_operations"],
+        "elapsed_seconds": time.monotonic() - started,
+        "latencies_ns": samples,
+        "errors": errors,
+        "final": {engine: _compact(result) for engine, result in final.items()},
+    }
+
+
+def _scalar(result: dict[str, Any]) -> int:
+    return int(result["rows"][0].strip(";").lstrip("I"))
+
+
+# cost: time O(t * (r + q)), heap O(1), stack O(1), io O(t * f)
+# vars: t = 강제 종료 횟수, r = 다시 열기 비용, q = 검증 문장 비용, f = 파일 크기
+# basis: estimate
+def _recovery(engine: str, path: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """진행 중인 변경 문장 도중 프로세스를 SIGKILL로 끝내고, 다시 열어 첫 응답까지의 시간과 원자성을 확인한다."""
+    timeout = config["statement_timeout_seconds"]
+    randomizer = random.Random(config["seed"])
+    trials = []
+    for trial in range(config["recovery_trials"]):
+        worker = Worker(engine, path)
+        before = _scalar(worker.execute("SELECT COUNT(*) FROM items", timeout))
+        marked = _scalar(worker.execute("SELECT COUNT(*) FROM items WHERE bucket < 48", timeout))
+        worker.execute("UPDATE items SET note = NULL WHERE note = 'crash'", timeout)
+        assert worker.process.stdin is not None
+        worker.process.stdin.write(b"UPDATE items SET note = 'crash' WHERE bucket < 48\n")
+        worker.process.stdin.flush()
+        time.sleep(randomizer.uniform(0, 0.02))
+        worker.process.kill()
+        worker.process.wait()
+        size = path.stat().st_size
+        began = time.monotonic_ns()
+        reopened = Worker(engine, path)
+        after = _scalar(reopened.execute("SELECT COUNT(*) FROM items", timeout))
+        reopen_ns = time.monotonic_ns() - began
+        crashed = _scalar(reopened.execute("SELECT COUNT(*) FROM items WHERE note = 'crash'", timeout))
+        reopened.close()
+        if after != before or crashed not in (0, marked):
+            raise RuntimeError(f"{engine} recovery broke atomicity: {before}->{after}, {crashed}/{marked}")
+        trials.append(
+            {"trial": trial, "reopen_ns": reopen_ns, "file_bytes": size, "applied": crashed == marked}
+        )
+    return trials
+
+
 # cost: time O(n * q + b), heap O(n + b), stack O(1), io O(n * p + b)
 # vars: n = 문장 수, q = 엔진 실행 비용, b = 결과 바이트, p = 문장당 접근 페이지
 # basis: estimate
@@ -361,10 +445,12 @@ def _run_case(size: int, repetition: int, config: dict[str, Any]) -> dict[str, A
         result["queries"] = _read_queries(workers, count, config)
         result["complex"] = _complex_queries(workers, config)
         result["mutations"] = _mutations(workers, count, timeout)
-        result["status"] = "verified"
+        result["mixed"] = _mixed(workers, count, config)
     finally:
         for worker in workers:
             worker.close()
+    result["recovery"] = {worker.engine: _recovery(worker.engine, worker.path, config) for worker in workers}
+    result["status"] = "verified"
     return result
 
 
@@ -387,17 +473,12 @@ def _build(config: dict[str, Any]) -> None:
     subprocess.run(command, cwd=ROOT, check=True, capture_output=True, text=True)
 
 
-# cost: time O(b), heap O(b), stack O(1), io 2
-# vars: b = 기존 작업 기록과 측정 원자료 바이트 수
+# cost: time O(b), heap O(b), stack O(1), io 1
+# vars: b = 측정 원자료 바이트 수
 # basis: estimate
-def _save(record: Path, measurement: dict[str, Any]) -> None:
-    document = json.loads(record.read_text())
-    evidence = document.setdefault("local_evidence", {})
-    previous = evidence.get("sqlite_measurement")
-    if previous and previous["config"].get("run_id") != measurement["config"]["run_id"]:
-        evidence.setdefault("sqlite_measurement_history", []).append(previous)
-    evidence["sqlite_measurement"] = measurement
-    record.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+def _save(output: Path, measurement: dict[str, Any]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(measurement, ensure_ascii=False, indent=2) + "\n")
 
 
 def _stats(values: list[int]) -> dict[str, float]:
@@ -439,6 +520,10 @@ def _summarize(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 result["rss_bytes"] for result in results
             )
             entry[engine]["final_disk_bytes"] = results[-1]["disk_bytes"]
+            entry[engine]["mixed"] = {
+                kind: _stats(times) for kind, times in run["mixed"]["latencies_ns"][engine].items() if times
+            }
+            entry[engine]["reopen_after_kill"] = _stats([trial["reopen_ns"] for trial in run["recovery"][engine]])
         summary.append(entry)
     return summary
 
@@ -516,11 +601,13 @@ def _verify_run(run: dict[str, Any]) -> int:
             if mini[field] != sqlite[field]:
                 raise RuntimeError(f"persisted oracle mismatch: {query['sql']}")
     for query in run["complex"]:
-        if (
-            query["results"]["mini"]["error"] not in (1, 2)
-            or query["results"]["sqlite"]["error"]
-        ):
+        mini, sqlite = query["results"]["mini"], query["results"]["sqlite"]
+        if sqlite["error"] or (query["status"] == "supported") != (mini["error"] == 0):
             raise RuntimeError(f"unexpected feature status: {query['sql']}")
+        if query["status"] == "supported" and mini["rows_sha256"] != sqlite["rows_sha256"]:
+            raise RuntimeError(f"persisted oracle mismatch: {query['sql']}")
+    if run["mixed"]["final"]["mini"]["rows_sha256"] != run["mixed"]["final"]["sqlite"]["rows_sha256"]:
+        raise RuntimeError("mixed workload final state mismatch")
     return 2 * len(run["queries"])
 
 
@@ -551,14 +638,29 @@ def _aggregate_size(runs: list[dict[str, Any]], engine: str) -> dict[str, Any]:
     metrics["final_disk_bytes"] = runs[-1]["mutations"][-1]["results"][engine][
         "disk_bytes"
     ]
+    for kind, _ in MIXED_KINDS:
+        values = [ns for run in runs for ns in run["mixed"]["latencies_ns"][engine][kind]]
+        metrics[f"mixed_{kind}"] = {"samples": len(values), **_stats(values)}
+    mixed_seconds = [sum(sum(v) for v in run["mixed"]["latencies_ns"][engine].values()) / 1e9 for run in runs]
+    metrics["mixed_qps_median"] = statistics.median(
+        run["mixed"]["operations"] / seconds for run, seconds in zip(runs, mixed_seconds)
+    )
+    metrics["mixed_errors"] = sum(run["mixed"]["errors"][engine] for run in runs)
+    trials = [trial for run in runs for trial in run["recovery"][engine]]
+    metrics["reopen_after_kill"] = {
+        "samples": len(trials),
+        "applied": sum(trial["applied"] for trial in trials),
+        "max_file_bytes": max(trial["file_bytes"] for trial in trials),
+        **_stats([trial["reopen_ns"] for trial in trials]),
+    }
     return metrics
 
 
 # cost: time O(b + n log n), heap O(b + n), stack O(1), io 1
 # vars: b = 기록 바이트, n = 원자료 시간 표본 수
 # basis: estimate
-def _analyze(record: Path) -> dict[str, Any]:
-    measurement = json.loads(record.read_text())["local_evidence"]["sqlite_measurement"]
+def _analyze(output: Path) -> dict[str, Any]:
+    measurement = json.loads(output.read_text())
     runs = measurement["runs"]
     config = measurement["config"]
     expected = {
@@ -577,7 +679,9 @@ def _analyze(record: Path) -> dict[str, Any]:
         "independent_row_count_checks": sum(_verify_run(run) for run in runs),
         "paired_inserts": sum(run["load"]["completed_rows"] for run in runs),
         "verified_selects": sum(len(run["queries"]) for run in runs),
-        "unsupported_features": sorted(config["complex_queries"]),
+        "unsupported_features": sorted(
+            {query["name"] for run in runs for query in run["complex"] if query["status"] == "unsupported"}
+        ),
         "capacity_attempts": [
             {
                 "requested": run["requested_rows"],
@@ -608,7 +712,7 @@ def _analyze(record: Path) -> dict[str, Any]:
 # basis: estimate
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--record", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=ROOT / "build/bench/sqlite_workload.json")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--analyze", action="store_true")
@@ -618,7 +722,7 @@ def main() -> int:
     if args.analyze:
         print(
             json.dumps(
-                _analyze(args.record), ensure_ascii=False, sort_keys=True, indent=2
+                _analyze(args.output), ensure_ascii=False, sort_keys=True, indent=2
             )
         )
         return 0
@@ -638,7 +742,7 @@ def main() -> int:
         print(json.dumps(_environment(), ensure_ascii=False))
         return 0
     if args.smoke:
-        config.update(sizes=[30], repetitions=1, query_repetitions=1)
+        config.update(sizes=[30], repetitions=1, query_repetitions=1, mixed_operations=50, recovery_trials=2)
     measurement: dict[str, Any] = {
         "config": config,
         "environment": _environment(),
@@ -655,10 +759,10 @@ def main() -> int:
                     "repetition": repetition,
                     "error": str(error),
                 }
-                _save(args.record, measurement)
+                _save(args.output, measurement)
                 raise
             measurement["summary"] = _summarize(measurement["runs"])
-            _save(args.record, measurement)
+            _save(args.output, measurement)
             print(
                 json.dumps(measurement["summary"][-1], ensure_ascii=False), flush=True
             )
