@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #include "storage/page_file.h"
+
+#include "page_cache.h"
 #include "storage/record_page.h"
 
 _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
@@ -51,6 +53,9 @@ struct page_file {
     size_t aging_len, aging_cap;
     uint32_t *reusable;
     size_t reusable_len, reusable_cap;
+    size_t cache_pages;     /* 이 핸들의 캐시 상한. 계상은 이 값으로 한다 */
+    page_cache_t *cache;    /* 처음 쓰일 때 만든다. 만들지 못하면 NULL로 두고 캐시 없이 동작한다 */
+    bool cache_tried;
 };
 
 static ssize_t libc_pread(int fd, void *buf, size_t size, off_t offset)
@@ -65,6 +70,9 @@ static ssize_t libc_pwrite(int fd, const void *buf, size_t size, off_t offset)
 
 static const page_file_io_t LIBC_IO = {libc_pread, libc_pwrite, fsync, link, unlink};
 static page_file_io_t g_default_io = {libc_pread, libc_pwrite, fsync, link, unlink};
+static size_t g_default_cache_pages = PAGE_FILE_CACHE_PAGES;
+
+void page_file_set_default_cache_pages(size_t pages) { g_default_cache_pages = pages; }
 
 void page_file_set_default_io(const page_file_io_t *io)
 {
@@ -317,6 +325,7 @@ static page_file_t *new_handle(int fd, bool writable)
     file->fd = fd;
     file->writable = writable;
     file->io = g_default_io;
+    file->cache_pages = g_default_cache_pages;
     file->staged_format = PAGE_FILE_FORMAT_VERSION; /* enable_durable 전에는 v1로 쓴다 */
     return file;
 }
@@ -328,6 +337,7 @@ static void free_handle(page_file_t *file)
     free(file->pending);
     free(file->aging);
     free(file->reusable);
+    page_cache_destroy(file->cache);
     free(file);
 }
 
@@ -629,6 +639,33 @@ const char *page_file_partial_path(const page_file_t *file)
 
 /* ── 페이지 읽기·쓰기 ── */
 
+static page_cache_t *cache_of(page_file_t *file)
+{
+    if (!file->cache_tried) {
+        file->cache_tried = true;
+        file->cache = page_cache_create(file->cache_pages);
+    }
+    return file->cache;
+}
+
+/*
+ * 데이터 페이지 한 장을 파일에서 읽어 envelope와 체크섬을 검증한다. 검증에 성공한 본문만 캐시에 넣는다.
+ * 종류와 table ID의 기대값 대조는 호출자가 한다(캐시 적중 경로와 같은 검사를 쓰기 위해서다).
+ */
+static page_file_status_t read_verified(page_file_t *file, uint32_t page_id, uint8_t *page, envelope_t *envelope)
+{
+    page_file_status_t status = read_full(file, page, PAGE_FILE_PAGE_BYTES, (uint64_t)page_id * PAGE_FILE_PAGE_BYTES);
+    if (status != PAGE_FILE_OK) return status;
+    slot_state_t state = decode_envelope(page, page_id, envelope);
+    if (state == SLOT_UNSUPPORTED) return PAGE_FILE_UNSUPPORTED;
+    if (state != SLOT_VALID || envelope->body_len != PAGE_BODY_BYTES) {
+        errno = EBADMSG;
+        return PAGE_FILE_CORRUPT;
+    }
+    page_cache_put(cache_of(file), page_id, (uint16_t)envelope->kind, envelope->table_id, page + PAGE_ENVELOPE_BYTES);
+    return PAGE_FILE_OK;
+}
+
 static bool data_page_in_range(const page_file_t *file, uint32_t page_id)
 {
     return page_id >= PAGE_FILE_CONTROL_PAGES && page_id < file->page_count;
@@ -639,15 +676,20 @@ page_file_status_t page_file_read(page_file_t *file, uint32_t page_id, page_kind
 {
     if (file == NULL || body == NULL || kind == PAGE_KIND_CONTROL) return PAGE_FILE_INVALID;
     if (!data_page_in_range(file, page_id)) return PAGE_FILE_INVALID;
+    uint16_t cached_kind;
+    uint32_t cached_table;
+    if (page_cache_get(cache_of(file), page_id, &cached_kind, &cached_table, body)) {
+        if (cached_kind != kind || cached_table != table_id) {
+            errno = EBADMSG;
+            return PAGE_FILE_CORRUPT;
+        }
+        return PAGE_FILE_OK;
+    }
     uint8_t page[PAGE_FILE_PAGE_BYTES];
-    page_file_status_t status = read_full(file, page, sizeof(page),
-                                          (uint64_t)page_id * PAGE_FILE_PAGE_BYTES);
-    if (status != PAGE_FILE_OK) return status;
     envelope_t envelope;
-    slot_state_t state = decode_envelope(page, page_id, &envelope);
-    if (state == SLOT_UNSUPPORTED) return PAGE_FILE_UNSUPPORTED;
-    if (state != SLOT_VALID || envelope.kind != kind || envelope.table_id != table_id ||
-        envelope.body_len != PAGE_BODY_BYTES) {
+    page_file_status_t status = read_verified(file, page_id, page, &envelope);
+    if (status != PAGE_FILE_OK) return status;
+    if (envelope.kind != kind || envelope.table_id != table_id) {
         errno = EBADMSG;
         return PAGE_FILE_CORRUPT;
     }
@@ -666,10 +708,14 @@ page_file_status_t page_file_write(page_file_t *file, uint32_t page_id, page_kin
     encode_page(page, kind, page_id, table_id, PAGE_BODY_BYTES, body);
     uint64_t offset = (uint64_t)page_id * PAGE_FILE_PAGE_BYTES;
     page_file_status_t status = write_full(file, page, sizeof(page), offset);
-    if (status == PAGE_FILE_OK && offset + PAGE_FILE_PAGE_BYTES > file->file_bytes) {
-        file->file_bytes = offset + PAGE_FILE_PAGE_BYTES;
+    if (status != PAGE_FILE_OK) {
+        /* 일부만 쓰였을 수 있어 디스크 내용을 알 수 없다. 다음 읽기는 파일에서 검증한다 */
+        page_cache_drop(file->cache, page_id);
+        return status;
     }
-    return status;
+    if (offset + PAGE_FILE_PAGE_BYTES > file->file_bytes) file->file_bytes = offset + PAGE_FILE_PAGE_BYTES;
+    page_cache_put(cache_of(file), page_id, (uint16_t)kind, table_id, body);
+    return PAGE_FILE_OK;
 }
 
 page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
@@ -679,15 +725,13 @@ page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
         return PAGE_FILE_INVALID;
     }
     uint8_t page[PAGE_FILE_PAGE_BYTES];
-    page_file_status_t status = read_full(file, page, sizeof(page),
-                                          (uint64_t)page_id * PAGE_FILE_PAGE_BYTES);
-    if (status != PAGE_FILE_OK) return status;
     envelope_t envelope;
-    slot_state_t state = decode_envelope(page, page_id, &envelope);
-    if (state == SLOT_UNSUPPORTED) return PAGE_FILE_UNSUPPORTED;
-    if (state != SLOT_VALID || envelope.body_len != PAGE_BODY_BYTES) {
-        errno = EBADMSG;
-        return PAGE_FILE_CORRUPT;
+    uint16_t cached_kind;
+    if (page_cache_get(cache_of(file), page_id, &cached_kind, &envelope.table_id, page + PAGE_ENVELOPE_BYTES)) {
+        envelope.kind = (page_kind_t)cached_kind;
+    } else {
+        page_file_status_t status = read_verified(file, page_id, page, &envelope);
+        if (status != PAGE_FILE_OK) return status;
     }
     if (envelope.kind != PAGE_KIND_RECORD && envelope.kind != PAGE_KIND_OVERFLOW &&
         envelope.kind != PAGE_KIND_DIRECTORY && envelope.kind != PAGE_KIND_INDEX) {
@@ -960,7 +1004,7 @@ overflow_io_t page_file_overflow_io(page_file_overflow_ctx_t *ctx, page_file_t *
 size_t page_file_handle_bytes(const page_file_t *file)
 {
     if (file == NULL) return 0;
-    size_t total = sizeof(*file);
+    size_t total = sizeof(*file) + page_cache_bytes(file->cache_pages);
     if (file->path != NULL) total += strlen(file->path) + 1;
     if (file->partial_path != NULL) total += strlen(file->partial_path) + 1;
     return total;
@@ -977,5 +1021,11 @@ size_t page_file_open_peak_bytes(const char *path)
 {
     size_t length = path != NULL ? strlen(path) : 0;
     /* 핸들, create의 partial·final·directory 사본(접미사 포함)과 open의 path 사본 */
-    return sizeof(page_file_t) + 4 * (length + sizeof(PARTIAL_SUFFIX) + 1);
+    return sizeof(page_file_t) + page_cache_bytes(g_default_cache_pages) + 4 * (length + sizeof(PARTIAL_SUFFIX) + 1);
+}
+
+page_file_cache_stats_t page_file_cache_stats(const page_file_t *file)
+{
+    page_cache_stats_t stats = page_cache_stats(file != NULL ? file->cache : NULL);
+    return (page_file_cache_stats_t){stats.hits, stats.misses, stats.evictions};
 }

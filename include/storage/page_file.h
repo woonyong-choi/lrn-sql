@@ -76,10 +76,32 @@ typedef struct {
 
 /* 이후 열리는 핸들이 쓰는 I/O 진입점을 바꾼다. NULL이면 libc로 복원한다. 테스트 전용. */
 void page_file_set_default_io(const page_file_io_t *io);
+
+/*
+ * 읽기 캐시. 핸들마다 체크섬을 검증한 데이터 페이지 본문을 최대 PAGE_FILE_CACHE_PAGES장 담는다. 적중한 읽기는
+ * pread와 체크섬 계산 없이 복사만 한다. 쓰기는 pwrite가 성공한 뒤에만 캐시를 갱신하고 실패하면 그 페이지를 뺀다.
+ * 그래서 캐시는 그 핸들이 검증했거나 디스크에 쓴 바이트와 언제나 같다. 손상 페이지는 담지 않는다.
+ * 쓰기 핸들은 파일을 배타 잠금하므로 다른 핸들이 같은 파일을 바꾸는 일은 계약 밖이다.
+ * 프레임 메모리는 처음 쓰일 때 할당하며 할당에 실패하면 그 핸들은 캐시 없이 동작한다.
+ */
+#define PAGE_FILE_CACHE_PAGES 256u
+
+/* 이후 열리는 핸들의 캐시 프레임 수. 0이면 캐시를 쓰지 않는다. 측정·테스트용. */
+void page_file_set_default_cache_pages(size_t pages);
+
+typedef struct {
+    uint64_t hits;       /* 캐시에서 돌려준 데이터 페이지 읽기 */
+    uint64_t misses;     /* 파일에서 읽은 데이터 페이지 읽기 */
+    uint64_t evictions;  /* 용량 때문에 내보낸 프레임 */
+} page_file_cache_stats_t;
+
 /* 현재 기본 I/O 진입점. 옛 파일 읽기(legacy_migrate)가 같은 실패 주입 자리를 쓴다. */
 page_file_io_t page_file_default_io(void);
 
 typedef struct page_file page_file_t;
+
+/* 이 핸들의 캐시 지표. 캐시가 아직 없거나 file이 NULL이면 0이다 */
+page_file_cache_stats_t page_file_cache_stats(const page_file_t *file);
 
 /* 제어 페이지가 담는 현재 상태. */
 typedef struct {

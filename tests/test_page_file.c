@@ -54,6 +54,7 @@ typedef struct {
     bool unlink_fail;
     int misaligned;
     int io_calls;
+    int pread_calls;      /* 페이지 단위 pread 수(open의 8바이트 탐색 제외) */
 } hooks_t;
 
 static hooks_t g_hooks;
@@ -69,7 +70,10 @@ static void check_aligned(size_t size, off_t offset)
 static ssize_t hook_pread(int fd, void *buf, size_t size, off_t offset)
 {
     /* open이 첫 8바이트를 보는 탐색(8바이트)은 예외다. */
-    if (size != 8) check_aligned(size, offset);
+    if (size != 8) {
+        check_aligned(size, offset);
+        g_hooks.pread_calls++;
+    }
     return pread(fd, buf, size, offset);
 }
 
@@ -924,6 +928,127 @@ static void test_page_info_reports_verified_kind(void)
     clean_dir();
 }
 
+/* ══════════════════════════════════════════════════════════════ */
+/* #83: 읽기 캐시는 검증했거나 디스크에 쓴 바이트만 담고 언제나 디스크와 같다. */
+
+#define CACHE_TEST_PAGES 20
+
+static void cache_body(uint8_t *body, unsigned seed)
+{
+    for (size_t i = 0; i < PAGE_BODY_BYTES; i++) body[i] = (uint8_t)(seed * 31u + i * 7u);
+}
+
+/* 서로 다른 본문을 가진 record 페이지 CACHE_TEST_PAGES장을 게시하고 page ID를 돌려준다 */
+static void build_cache_fixture(uint32_t ids[CACHE_TEST_PAGES])
+{
+    page_file_t *file;
+    assert(page_file_create(DB_PATH, &file) == PAGE_FILE_OK);
+    uint8_t body[PAGE_BODY_BYTES];
+    for (unsigned i = 0; i < CACHE_TEST_PAGES; i++) {
+        assert(page_file_alloc(file, &ids[i]) == PAGE_FILE_OK);
+        cache_body(body, i);
+        assert(page_file_write(file, ids[i], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_OK);
+    }
+    assert(page_file_commit(file) == PAGE_FILE_OK);
+    assert(page_file_publish(file) == PAGE_FILE_OK);
+    assert(page_file_close(file) == PAGE_FILE_OK);
+}
+
+static void test_read_cache_matches_disk(void)
+{
+    printf("\n[test_read_cache_matches_disk]\n");
+    fresh_dir();
+    hooks_reset();
+    uint32_t ids[CACHE_TEST_PAGES];
+    build_cache_fixture(ids);
+    uint8_t body[PAGE_BODY_BYTES], expected[PAGE_BODY_BYTES];
+    page_file_t *file;
+
+    /* 적중한 읽기는 pread를 부르지 않는다 */
+    page_file_set_default_cache_pages(CACHE_TEST_PAGES);
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    hooks_reset();
+    assert(page_file_read(file, ids[3], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_OK);
+    int after_miss = g_hooks.pread_calls;
+    page_file_page_info_t info;
+    CHECK(page_file_read(file, ids[3], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_OK &&
+              page_file_page_info(file, ids[3], &info) == PAGE_FILE_OK && info.kind == PAGE_KIND_RECORD &&
+              info.table_id == 7,
+          "적중한 읽기와 종류 조회 성공");
+    CHECK(after_miss == 1 && g_hooks.pread_calls == 1, "적중한 읽기는 pread 없음: miss %d, 합계 %d", after_miss,
+          g_hooks.pread_calls);
+    cache_body(expected, 3);
+    CHECK(memcmp(body, expected, sizeof(body)) == 0, "적중한 본문이 디스크 본문과 같음");
+    CHECK(page_file_read(file, ids[3], PAGE_KIND_INDEX, 7, body) == PAGE_FILE_CORRUPT &&
+              page_file_read(file, ids[3], PAGE_KIND_RECORD, 8, body) == PAGE_FILE_CORRUPT,
+          "적중해도 종류·table ID가 다르면 거절");
+    page_file_cache_stats_t stats = page_file_cache_stats(file);
+    CHECK(stats.hits == 4 && stats.misses == 1, "지표: 적중 %llu, miss %llu", (unsigned long long)stats.hits,
+          (unsigned long long)stats.misses);
+    page_file_close(file);
+
+    /* 용량보다 많은 페이지를 두 번 훑어도 결과가 같다 */
+    page_file_set_default_cache_pages(4);
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    int mismatches = 0;
+    for (unsigned pass = 0; pass < 2; pass++) {
+        for (unsigned k = 0; k < CACHE_TEST_PAGES; k++) {
+            unsigned i = (k * 7u + pass) % CACHE_TEST_PAGES;
+            cache_body(expected, i);
+            if (page_file_read(file, ids[i], PAGE_KIND_RECORD, 7, body) != PAGE_FILE_OK ||
+                memcmp(body, expected, sizeof(body)) != 0) {
+                mismatches++;
+            }
+        }
+    }
+    stats = page_file_cache_stats(file);
+    CHECK(mismatches == 0, "작은 캐시에서 40번 읽기 결과 불일치 %d", mismatches);
+    CHECK(stats.evictions > 0, "용량을 넘으면 내보냄: %llu", (unsigned long long)stats.evictions);
+    page_file_close(file);
+
+    /* pwrite 실패 뒤 다시 읽은 값은 디스크 값이다. 성공한 쓰기는 캐시와 디스크가 같다 */
+    page_file_set_default_cache_pages(CACHE_TEST_PAGES);
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    assert(page_file_read(file, ids[5], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_OK);
+    hooks_reset();
+    g_hooks.pwrite_fail_at = 1;
+    cache_body(body, 99);
+    CHECK(page_file_write(file, ids[5], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_IO, "주입한 pwrite 실패");
+    int reads_before = g_hooks.pread_calls;
+    assert(page_file_read(file, ids[5], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_OK);
+    cache_body(expected, 5);
+    CHECK(memcmp(body, expected, sizeof(body)) == 0 && g_hooks.pread_calls == reads_before + 1,
+          "실패한 쓰기 뒤에는 파일에서 다시 읽은 옛 본문");
+    g_hooks.pwrite_fail_at = 0;
+    cache_body(expected, 42);
+    assert(page_file_write(file, ids[6], PAGE_KIND_RECORD, 7, expected) == PAGE_FILE_OK);
+    reads_before = g_hooks.pread_calls;
+    assert(page_file_read(file, ids[6], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_OK);
+    CHECK(memcmp(body, expected, sizeof(body)) == 0 && g_hooks.pread_calls == reads_before,
+          "성공한 쓰기는 캐시에서 새 본문");
+    page_file_close(file);
+    page_file_set_default_cache_pages(0);
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    CHECK(page_file_read(file, ids[6], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_OK &&
+              memcmp(body, expected, sizeof(body)) == 0,
+          "캐시 없이 다시 열어도 디스크에 같은 본문");
+    page_file_close(file);
+
+    /* 손상 페이지는 캐시에 들어가지 않고 읽을 때마다 거절된다 */
+    page_file_set_default_cache_pages(CACHE_TEST_PAGES);
+    flip_slot(DB_PATH, ids[8], 3000);
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    hooks_reset();
+    CHECK(page_file_read(file, ids[8], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_CORRUPT &&
+              page_file_read(file, ids[8], PAGE_KIND_RECORD, 7, body) == PAGE_FILE_CORRUPT &&
+              page_file_page_info(file, ids[8], &info) == PAGE_FILE_CORRUPT,
+          "손상 페이지는 매번 거절");
+    CHECK(g_hooks.pread_calls == 3, "손상 페이지는 캐시하지 않아 매번 파일을 읽음: %d", g_hooks.pread_calls);
+    page_file_close(file);
+    page_file_set_default_cache_pages(PAGE_FILE_CACHE_PAGES);
+    clean_dir();
+}
+
 int main(void)
 {
     page_file_set_default_io(&HOOKED);
@@ -937,6 +1062,7 @@ int main(void)
     test_corrupt_data_pages_are_detected();
     test_released_pages_survive_for_fallback_generation();
     test_page_info_reports_verified_kind();
+    test_read_cache_matches_disk();
     page_file_set_default_io(NULL);
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);

@@ -72,7 +72,7 @@ $(BUILD_DIR)/tests/%.o: tests/%.c
 
 STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o \
                $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o \
-               $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/catalog_store.o $(BUILD_DIR)/storage/legacy_migrate.o \
+               $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/page_cache.o $(BUILD_DIR)/storage/catalog_store.o $(BUILD_DIR)/storage/legacy_migrate.o \
                $(BUILD_DIR)/storage/pk_tree.o $(BUILD_DIR)/storage/text_tree.o
 BASIC_TESTS = test_all test_record test_record_fault test_overflow \
               test_overflow_fault test_value test_value_fault test_value_legacy_varchar test_parser_boundary \
@@ -435,7 +435,7 @@ $(BUILD_DIR)/test_transaction_fault: $(BUILD_DIR)/tests/test_transaction_fault.o
 $(BUILD_DIR)/test_page_file_durable: $(BUILD_DIR)/tests/test_page_file_durable.o $(STORAGE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD_DIR)/test_durable_pair: $(BUILD_DIR)/tests/test_durable_pair.o $(BUILD_DIR)/storage/durable_pair.o $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/wal.o
+$(BUILD_DIR)/test_durable_pair: $(BUILD_DIR)/tests/test_durable_pair.o $(BUILD_DIR)/storage/durable_pair.o $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/page_cache.o $(BUILD_DIR)/storage/wal.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD_DIR)/test_database_txn: $(BUILD_DIR)/tests/test_database_txn.o $(DATABASE_OBJS)

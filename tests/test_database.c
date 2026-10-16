@@ -758,6 +758,8 @@ static void test_projected_overflow_reads(void)
     page_file_io_t counted = g_page_io;
     counted.pread = count_page_read;
     page_file_set_default_io(&counted);
+    /* 투영이 요청하는 페이지를 pread 수로 세고 overflow 읽기 실패를 주입하므로 읽기 캐시를 끈다 */
+    page_file_set_default_cache_pages(0);
     assert(database_open(DB_PATH, true, &db) == DATABASE_OK);
     g_page_reads = 0;
     expect_text(db, "SELECT id FROM items WHERE id = 1", "[1] 1");
@@ -829,6 +831,7 @@ static void test_projected_overflow_reads(void)
 
     assert(database_close(db) == DATABASE_OK);
     page_file_set_default_io(NULL);
+    page_file_set_default_cache_pages(PAGE_FILE_CACHE_PAGES);
     clean_dir();
 }
 
