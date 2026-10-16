@@ -446,14 +446,28 @@ test-transaction: $(BUILD_DIR)/test_transaction $(BUILD_DIR)/test_transaction_fa
 $(BUILD_DIR)/session_probe: $(BUILD_DIR)/tests/session_probe.o $(BUILD_DIR)/sql/session.o $(DATABASE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-# SQLite 3.51.0과 같은 입력으로 두 연결을 비교한다. 다른 SQLite 버전은 not-run이라 test-all에 넣지 않는다
+# SQLite 3.51.0과 같은 입력으로 두 연결을 비교한다. 시스템 SQLite 버전과 상관없이 기준 버전 소스를 받아
+# (sha256 확인) 공유 라이브러리로 빌드하고 파이썬 sqlite3 모듈이 그것을 쓰게 한다. 네트워크가 필요해 test-all에 넣지 않는다
 SQLITE_DIFF_DIR ?= $(BUILD_DIR)/sqlite-session-diff
+SQLITE_REF_VERSION := 3510000
+SQLITE_REF_URL := https://www.sqlite.org/2025/sqlite-amalgamation-$(SQLITE_REF_VERSION).zip
+SQLITE_REF_SHA256 := 1caf7116f2910600d04473ad69d37ec538fa62fa36adccd37b5e0e43647c98be
+SQLITE_REF_DIR := $(BUILD_DIR)/sqlite-ref
+
+$(SQLITE_REF_DIR)/libsqlite3.so.0:
+	mkdir -p $(SQLITE_REF_DIR)
+	curl -sSfL -o $(SQLITE_REF_DIR)/src.zip $(SQLITE_REF_URL)
+	echo "$(SQLITE_REF_SHA256)  $(SQLITE_REF_DIR)/src.zip" | sha256sum -c --quiet -
+	unzip -qo -d $(SQLITE_REF_DIR) $(SQLITE_REF_DIR)/src.zip
+	gcc -O2 -fPIC -shared -Wl,-soname,libsqlite3.so.0 -o $@ \
+		$(SQLITE_REF_DIR)/sqlite-amalgamation-$(SQLITE_REF_VERSION)/sqlite3.c -lm -lpthread
 
 test-sqlite-session-diff-harness:
 	$(PYTEST) -q tests/test_sqlite_session_diff.py --basetemp=$(BUILD_DIR)/sqlite-session-diff-harness -p no:cacheprovider
 
-test-sqlite-session-diff: $(BUILD_DIR)/session_probe test-sqlite-session-diff-harness
-	$(PYTHON) tests/sqlite_session_diff.py --probe ./$(BUILD_DIR)/session_probe --workdir $(SQLITE_DIFF_DIR)
+test-sqlite-session-diff: $(BUILD_DIR)/session_probe test-sqlite-session-diff-harness $(SQLITE_REF_DIR)/libsqlite3.so.0
+	LD_LIBRARY_PATH=$(abspath $(SQLITE_REF_DIR)) $(PYTHON) tests/sqlite_session_diff.py \
+		--probe ./$(BUILD_DIR)/session_probe --workdir $(SQLITE_DIFF_DIR)
 
 test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli test-database test-corrupt-open test-transaction test-session test-lock-waiters test-ack-queue test-ack-queue-python
 
