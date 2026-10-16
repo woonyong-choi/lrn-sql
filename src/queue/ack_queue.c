@@ -1,9 +1,9 @@
 /*
- * ack_queue.c — 선택형 ACK 큐(#140). database의 공개 SQL과 트랜잭션 API만 쓴다.
+ * ack_queue.c — 선택형 ACK 큐(#140). 세션(session.h)의 SQL과 트랜잭션 API만 쓴다.
  *
  * 테이블 ackq_<name>: id(identity), state(0 READY 1 LEASED 2 ACKED 3 FAILED), ready_at, lease_until(밀리초),
  * fence(claim마다 +1), attempts(claim 횟수), idem(idempotency key, 없으면 ''), payload(BLOB), note(마지막 이유).
- * ORDER BY·LIMIT·AND·UPDATE 계산식이 없어서 상태별 메타데이터를 한 행씩 읽어 호출자 쪽에서 id가 가장 작은 k개를 고른다.
+ * 상태별 조회는 state 보조 색인(같은 상태 안에서 id 순서)과 ORDER BY id LIMIT으로 맞는 행 k개만 읽는다.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -28,8 +28,6 @@ typedef struct {
     int64_t fence;
     int64_t attempts;
 } meta_t;
-
-typedef bool (*meta_filter_t)(const meta_t *meta, void *ctx);
 
 /* id 오름차순으로 가장 작은 cap개만 보관한다. */
 typedef struct {
@@ -103,14 +101,17 @@ static ackq_status_t add_ms(uint64_t base, uint64_t delta, int64_t *out)
     return ACKQ_OK;
 }
 
-/* 메타데이터 SELECT를 한 행씩 읽어 filter를 통과한 행을 top에 넣는다. */
-static ackq_status_t scan_meta(ackq_t *queue, ackq_scope_t *scope, const char *where, const value_view_t *param,
-                               meta_filter_t filter, void *ctx, topk_t *top)
+/*
+ * 메타데이터 SELECT의 행을 top에 넣는다. where는 " WHERE ... ORDER BY id LIMIT ?"이고 마지막 매개변수가 LIMIT다.
+ * state 색인이 기본 키 순서라 상태 조건과 ORDER BY id LIMIT은 맞는 행 k개만 읽고 멈춘다.
+ */
+static ackq_status_t scan_meta(ackq_t *queue, ackq_scope_t *scope, const char *where, const value_view_t *params,
+                               size_t param_count, topk_t *top)
 {
     char sql[ACKQ_SQL_MAX];
     result_t *result = NULL;
     snprintf(sql, sizeof(sql), "SELECT " META_COLS " FROM %s%s", queue->table, where);
-    ackq_status_t status = ackq_run(queue, scope, false, sql, param, param != NULL ? 1 : 0, &result, NULL);
+    ackq_status_t status = ackq_run(queue, scope, false, sql, params, param_count, &result, NULL);
     if (status != ACKQ_OK) return status;
     result_row_t row;
     result_next_t next;
@@ -120,7 +121,7 @@ static ackq_status_t scan_meta(ackq_t *queue, ackq_scope_t *scope, const char *w
             status = ACKQ_INTERNAL;
             continue;
         }
-        if (filter == NULL || filter(&meta, ctx)) topk_add(top, &meta);
+        topk_add(top, &meta);
     }
     ackq_status_t finished = ackq_finish_rows(next, result);
     result_release(&result);
@@ -500,15 +501,13 @@ typedef struct {
 } claim_filter_t;
 
 /* READY는 시도 횟수와 무관하게 때가 되면 claim한다. 횟수를 다 쓴 작업은 nack·만료 때 이미 FAILED가 된다. */
-static bool ready_due(const meta_t *meta, void *ctx)
+static bool ready_due(const meta_t *meta, const claim_filter_t *filter)
 {
-    const claim_filter_t *filter = ctx;
     return meta->ready_at <= filter->now;
 }
 
-static bool lease_expired(const meta_t *meta, void *ctx)
+static bool lease_expired(const meta_t *meta, const claim_filter_t *filter)
 {
-    const claim_filter_t *filter = ctx;
     bool attempts_left = filter->max_attempts == 0 || meta->attempts < (int64_t)filter->max_attempts;
     return meta->lease_until <= filter->now && attempts_left;
 }
@@ -535,13 +534,18 @@ static ackq_status_t claim_one(ackq_t *queue, ackq_scope_t *scope, const meta_t 
 static ackq_status_t claim_in(ackq_t *queue, ackq_scope_t *scope, size_t max_items, int64_t now, int64_t lease_until,
                               ackq_claim_t *items, size_t *count)
 {
-    claim_filter_t filter = {now, queue->max_attempts};
     topk_t top = {calloc(max_items, sizeof(meta_t)), 0, max_items};
     if (top.items == NULL) return ACKQ_NOMEM;
-    value_view_t ready = ackq_int(ACKQ_STATE_READY);
-    value_view_t leased = ackq_int(ACKQ_STATE_LEASED);
-    ackq_status_t status = scan_meta(queue, scope, " WHERE state = ?", &ready, ready_due, &filter, &top);
-    if (status == ACKQ_OK) status = scan_meta(queue, scope, " WHERE state = ?", &leased, lease_expired, &filter, &top);
+    /* 때가 된 READY와 시도 횟수가 남은 만료 LEASED에서 각각 가장 작은 id k개를 읽어 합친다 */
+    value_view_t ready[3] = {ackq_int(ACKQ_STATE_READY), ackq_int(now), ackq_int((int64_t)max_items)};
+    value_view_t leased[5] = {ackq_int(ACKQ_STATE_LEASED), ackq_int(now), ackq_int(queue->max_attempts),
+                              ackq_int(queue->max_attempts), ackq_int((int64_t)max_items)};
+    ackq_status_t status = scan_meta(queue, scope, " WHERE state = ? AND ready_at <= ? ORDER BY id LIMIT ?", ready, 3, &top);
+    if (status == ACKQ_OK) {
+        status = scan_meta(queue, scope,
+                           " WHERE state = ? AND lease_until <= ? AND (? = 0 OR attempts < ?) ORDER BY id LIMIT ?",
+                           leased, 5, &top);
+    }
     for (size_t i = 0; status == ACKQ_OK && i < top.count; i++) {
         status = claim_one(queue, scope, &top.items[i], lease_until, &items[i]);
         if (status == ACKQ_OK) *count = i + 1;
@@ -726,13 +730,6 @@ ackq_status_t ackq_update(ackq_t *queue, session_t *session, uint64_t id, uint64
 
 /* ── 회복·정리·조회 ── */
 
-static bool any_lease(const meta_t *meta, void *ctx)
-{
-    (void)meta;
-    (void)ctx;
-    return true;
-}
-
 static ackq_status_t return_one(ackq_t *queue, ackq_scope_t *scope, const meta_t *meta)
 {
     char sql[ACKQ_SQL_MAX];
@@ -749,8 +746,7 @@ static ackq_status_t return_leases(ackq_t *queue, session_t *session, size_t lim
 {
     if (processed != NULL) *processed = 0;
     if (queue == NULL || limit == 0 || limit > ACKQ_MAX_CLAIM_BATCH) return ACKQ_INVALID;
-    uint64_t now = ackq_now(queue);
-    claim_filter_t filter = {(int64_t)now, 0};   /* 시도 횟수 조건 없이 만료만 본다 */
+    int64_t now = (int64_t)ackq_now(queue);
     topk_t top = {calloc(limit, sizeof(meta_t)), 0, limit};
     if (top.items == NULL) return ACKQ_NOMEM;
     ackq_scope_t scope;
@@ -759,9 +755,10 @@ static ackq_status_t return_leases(ackq_t *queue, session_t *session, size_t lim
         free(top.items);
         return status;
     }
-    value_view_t leased = ackq_int(ACKQ_STATE_LEASED);
-    status = scan_meta(queue, &scope, " WHERE state = ?", &leased, only_expired ? lease_expired : any_lease, &filter,
-                       &top);
+    /* 시도 횟수 조건 없이 만료만 본다(release는 만료와 무관). 시도 횟수를 다 쓴 작업은 return_one이 FAILED로 끝낸다 */
+    value_view_t params[3] = {ackq_int(ACKQ_STATE_LEASED), ackq_int(only_expired ? now : INT64_MAX),
+                              ackq_int((int64_t)limit)};
+    status = scan_meta(queue, &scope, " WHERE state = ? AND lease_until <= ? ORDER BY id LIMIT ?", params, 3, &top);
     size_t done = 0;
     for (size_t i = 0; status == ACKQ_OK && i < top.count; i++) {
         status = return_one(queue, &scope, &top.items[i]);
@@ -795,10 +792,10 @@ ackq_status_t ackq_purge(ackq_t *queue, session_t *session, bool include_failed,
         free(top.items);
         return status;
     }
-    value_view_t acked = ackq_int(ACKQ_STATE_ACKED);
-    value_view_t failed = ackq_int(ACKQ_STATE_FAILED);
-    status = scan_meta(queue, &scope, " WHERE state = ?", &acked, NULL, NULL, &top);
-    if (status == ACKQ_OK && include_failed) status = scan_meta(queue, &scope, " WHERE state = ?", &failed, NULL, NULL, &top);
+    value_view_t acked[2] = {ackq_int(ACKQ_STATE_ACKED), ackq_int((int64_t)limit)};
+    value_view_t failed[2] = {ackq_int(ACKQ_STATE_FAILED), ackq_int((int64_t)limit)};
+    status = scan_meta(queue, &scope, " WHERE state = ? ORDER BY id LIMIT ?", acked, 2, &top);
+    if (status == ACKQ_OK && include_failed) status = scan_meta(queue, &scope, " WHERE state = ? ORDER BY id LIMIT ?", failed, 2, &top);
     size_t done = 0;
     snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE id = ?", queue->table);
     for (size_t i = 0; status == ACKQ_OK && i < top.count; i++) {
@@ -820,18 +817,20 @@ ackq_status_t ackq_stats(ackq_t *queue, session_t *session, ackq_stats_t *stats)
     ackq_scope_t scope;
     ackq_status_t status = ackq_scope_open(queue, session, false, &scope);
     if (status != ACKQ_OK) return status;
-    snprintf(sql, sizeof(sql), "SELECT state FROM %s", queue->table);
+    snprintf(sql, sizeof(sql), "SELECT state, COUNT(*) FROM %s GROUP BY state", queue->table);
     ackq_stats_t counted = {0};
     status = ackq_run(queue, &scope, false, sql, NULL, 0, &result, NULL);
     if (status == ACKQ_OK) {
         result_row_t row;
         result_next_t next;
         while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {
-            int64_t state = row.cell_count > 0 && row.cells[0].type == VALUE_INTEGER ? row.cells[0].integer : -1;
-            if (state == ACKQ_STATE_READY) counted.ready++;
-            else if (state == ACKQ_STATE_LEASED) counted.leased++;
-            else if (state == ACKQ_STATE_ACKED) counted.acked++;
-            else if (state == ACKQ_STATE_FAILED) counted.failed++;
+            bool shaped = row.cell_count == 2 && row.cells[0].type == VALUE_INTEGER && row.cells[1].type == VALUE_INTEGER;
+            int64_t state = shaped ? row.cells[0].integer : -1;
+            uint64_t n = shaped ? (uint64_t)row.cells[1].integer : 0;
+            if (state == ACKQ_STATE_READY) counted.ready = n;
+            else if (state == ACKQ_STATE_LEASED) counted.leased = n;
+            else if (state == ACKQ_STATE_ACKED) counted.acked = n;
+            else if (state == ACKQ_STATE_FAILED) counted.failed = n;
             else status = ACKQ_INTERNAL;
         }
         ackq_status_t finished = ackq_finish_rows(next, result);
@@ -882,8 +881,8 @@ ackq_status_t ackq_list(ackq_t *queue, session_t *session, uint64_t after_id, si
         free(top.items);
         return status;
     }
-    value_view_t after = ackq_int((int64_t)after_id);
-    status = scan_meta(queue, &scope, " WHERE id > ?", &after, NULL, NULL, &top);
+    value_view_t params[2] = {ackq_int((int64_t)after_id), ackq_int((int64_t)limit)};
+    status = scan_meta(queue, &scope, " WHERE id > ? ORDER BY id LIMIT ?", params, 2, &top);
     size_t filled = 0;
     for (size_t i = 0; status == ACKQ_OK && i < top.count; i++) {
         status = fill_item(queue, &scope, &top.items[i], with_payload, &items[i]);

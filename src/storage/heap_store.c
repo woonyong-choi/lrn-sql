@@ -1439,9 +1439,23 @@ static pk_tree_io_t batch_index_io(heap_batch_t *batch)
 
 static bool same_locator(heap_locator_t a, heap_locator_t b);
 
-static heap_status_t encode_secondary_key(const value_view_t *value, bool unique,
-                                          heap_locator_t locator, uint8_t key[TEXT_TREE_KEY_MAX_BYTES],
-                                          size_t *key_bytes)
+/* 정수를 순서 보존 8바이트(부호 비트를 뒤집은 big-endian)로 붙인다 */
+static size_t put_ordered_integer(uint8_t *key, int64_t integer)
+{
+    uint64_t bits = (uint64_t)integer ^ (UINT64_C(1) << 63);
+    for (size_t i = 0; i < 8; i++) key[i] = (uint8_t)(bits >> (56u - 8u * i));
+    return 8;
+}
+
+/* 비고유 색인 키의 꼬리. ordered면 정수 기본 키, 아니면 행 위치다. 유일 색인은 꼬리가 없다 */
+typedef struct {
+    bool unique;
+    const value_view_t *primary;   /* ordered일 때만 */
+    heap_locator_t locator;
+} secondary_tail_t;
+
+static heap_status_t encode_secondary_key(const value_view_t *value, secondary_tail_t tail,
+                                          uint8_t key[TEXT_TREE_KEY_MAX_BYTES], size_t *key_bytes)
 {
     size_t used = 0;
     if (value->type == VALUE_INTEGER || value->type == VALUE_REAL) {
@@ -1463,13 +1477,19 @@ static heap_status_t encode_secondary_key(const value_view_t *value, bool unique
         key[used++] = 0;
         key[used++] = 0;
     } else return HEAP_INVALID;
-    if (!unique) {
+    if (tail.unique) {
+        /* 꼬리 없음 */
+    } else if (tail.primary != NULL) {
+        if (tail.primary->type != VALUE_INTEGER) return HEAP_CORRUPT;   /* 기본 키는 NULL일 수 없다 */
+        if (used + 8u > TEXT_TREE_KEY_MAX_BYTES) return HEAP_LIMIT;
+        used += put_ordered_integer(key + used, tail.primary->integer);
+    } else {
         if (used + 6u > TEXT_TREE_KEY_MAX_BYTES) return HEAP_LIMIT;
         for (size_t i = 0; i < 4; i++) {
-            key[used++] = (uint8_t)(locator.directory_index >> (24u - 8u * i));
+            key[used++] = (uint8_t)(tail.locator.directory_index >> (24u - 8u * i));
         }
-        key[used++] = (uint8_t)(locator.slot >> 8);
-        key[used++] = (uint8_t)locator.slot;
+        key[used++] = (uint8_t)(tail.locator.slot >> 8);
+        key[used++] = (uint8_t)tail.locator.slot;
     }
     *key_bytes = used;
     return HEAP_OK;
@@ -1480,7 +1500,9 @@ bool heap_secondary_key_fits(const value_view_t *value)
     if (value == NULL || value->type == VALUE_NULL) return false;
     uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
     size_t key_bytes;
-    return encode_secondary_key(value, false, (heap_locator_t){0, 0}, key, &key_bytes) == HEAP_OK;
+    /* 꼬리는 기본 키(8바이트)가 위치(6바이트)보다 길다. 더 긴 쪽으로 판정한다 */
+    static const value_view_t widest = {VALUE_INTEGER, 0, 0.0, NULL, 0};
+    return encode_secondary_key(value, (secondary_tail_t){false, &widest, {0, 0}}, key, &key_bytes) == HEAP_OK;
 }
 
 // cost: time O(d·log c + m), heap O(1), stack O(d), io O(d + m/c)
@@ -1495,7 +1517,7 @@ heap_status_t heap_secondary_visit_equal(heap_t *heap, heap_secondary_spec_t spe
     if (spec.root == PAGE_FILE_NO_PAGE) return heap->root == PAGE_FILE_NO_PAGE ? HEAP_OK : HEAP_CORRUPT;
     uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
     size_t key_bytes;
-    heap_status_t encoded = encode_secondary_key(value, true, (heap_locator_t){0, 0}, key, &key_bytes);
+    heap_status_t encoded = encode_secondary_key(value, (secondary_tail_t){true, NULL, {0, 0}}, key, &key_bytes);
     if (encoded != HEAP_OK) return encoded;
     pk_tree_io_t io = index_read_io(heap);
     uint32_t stamp;
@@ -1540,7 +1562,7 @@ heap_status_t heap_batch_secondary_find(heap_batch_t *batch, size_t index, const
     if (value->type == VALUE_NULL || batch->secondary_roots[index] == PAGE_FILE_NO_PAGE) return HEAP_NOT_FOUND;
     uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
     size_t key_bytes;
-    heap_status_t encoded = encode_secondary_key(value, true, (heap_locator_t){0, 0}, key, &key_bytes);
+    heap_status_t encoded = encode_secondary_key(value, (secondary_tail_t){true, NULL, {0, 0}}, key, &key_bytes);
     if (encoded == HEAP_LIMIT) return HEAP_NOT_FOUND;
     if (encoded != HEAP_OK) return encoded;
     pk_tree_io_t io = batch_index_io(batch);
@@ -1567,7 +1589,10 @@ heap_status_t heap_batch_configure_secondary(heap_batch_t *batch, const heap_sec
     }
     pk_tree_io_t io = index_read_io(batch->heap);
     for (size_t i = 0; i < count; i++) {
-        if (specs[i].column >= batch->heap->column_count) {
+        /* ordered 꼬리는 정수 기본 키가 있는 heap의 비고유 색인에만 쓴다 */
+        bool bad_order = specs[i].ordered && (specs[i].unique || batch->heap->key_type != VALUE_INTEGER ||
+                                              batch->heap->key_column >= batch->heap->column_count);
+        if (specs[i].column >= batch->heap->column_count || bad_order) {
             free(copied);
             free(roots);
             acct_release(&batch->ledger, bytes);
@@ -1594,14 +1619,22 @@ heap_status_t heap_batch_configure_secondary(heap_batch_t *batch, const heap_sec
     return HEAP_OK;
 }
 
-static heap_status_t secondary_put_one(heap_batch_t *batch, size_t index,
-                                       const value_view_t *value, heap_locator_t locator)
+static secondary_tail_t secondary_tail(const heap_batch_t *batch, size_t index, const value_view_t *primary,
+                                       heap_locator_t locator)
+{
+    const heap_secondary_spec_t *spec = &batch->secondary[index];
+    return (secondary_tail_t){spec->unique, spec->ordered ? primary : NULL, locator};
+}
+
+/* value는 색인 열의 값, primary는 같은 행의 기본 키 값이다 */
+static heap_status_t secondary_put_one(heap_batch_t *batch, size_t index, const value_view_t *value,
+                                       const value_view_t *primary, heap_locator_t locator)
 {
     if (value->type == VALUE_NULL) return HEAP_OK;
     uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
     size_t key_bytes;
-    heap_status_t status = encode_secondary_key(value, batch->secondary[index].unique,
-                                                locator, key, &key_bytes);
+    heap_status_t status = encode_secondary_key(value, secondary_tail(batch, index, primary, locator), key,
+                                                &key_bytes);
     if (status != HEAP_OK) return status;
     pk_tree_io_t io = batch_index_io(batch);
     uint32_t *root = &batch->secondary_roots[index];
@@ -1619,7 +1652,8 @@ heap_status_t heap_batch_secondary_insert(heap_batch_t *batch, const value_view_
     if (batch == NULL || batch->finished || batch->failed || values == NULL ||
         count != batch->heap->column_count) return HEAP_INVALID;
     for (size_t i = 0; i < batch->secondary_count; i++) {
-        heap_status_t status = secondary_put_one(batch, i, &values[batch->secondary[i].column], locator);
+        heap_status_t status = secondary_put_one(batch, i, &values[batch->secondary[i].column],
+                                                 &values[batch->heap->key_column], locator);
         if (status != HEAP_OK) return fail(batch, status);
     }
     return HEAP_OK;
@@ -1636,8 +1670,8 @@ heap_status_t heap_batch_secondary_remove(heap_batch_t *batch, const value_view_
         if (value->type == VALUE_NULL) continue;
         uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
         size_t key_bytes;
-        heap_status_t status = encode_secondary_key(value, batch->secondary[i].unique,
-                                                    locator, key, &key_bytes);
+        heap_status_t status = encode_secondary_key(value, secondary_tail(batch, i, &values[batch->heap->key_column],
+                                                                          locator), key, &key_bytes);
         if (status != HEAP_OK) return fail(batch, status);
         heap_locator_t removed;
         pk_status_t result = text_tree_remove(&io, batch->heap->table_id,
@@ -1682,7 +1716,8 @@ heap_status_t heap_batch_secondary_build(heap_batch_t *batch, size_t index, heap
             status = next;
             break;
         }
-        status = secondary_put_one(batch, index, &row[batch->secondary[index].column].view, locator);
+        status = secondary_put_one(batch, index, &row[batch->secondary[index].column].view,
+                                   &row[batch->heap->key_column].view, locator);
         for (size_t column = 0; column < source->column_count; column++) value_clear(&row[column]);
     }
     heap_cursor_close(cursor);
