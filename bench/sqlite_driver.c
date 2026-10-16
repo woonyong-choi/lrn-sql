@@ -206,18 +206,38 @@ static uint64_t now_ns(void)
     return (uint64_t)time.tv_sec * UINT64_C(1000000000) + (uint64_t)time.tv_nsec;
 }
 
+/*
+ * 이 프로세스의 최고 RSS. Linux의 ru_maxrss는 fork 전 부모(측정 Python)의 최고치를 이어받으므로
+ * exec 뒤 새로 시작하는 /proc/self/status의 VmHWM을 쓴다.
+ */
+static uint64_t peak_rss_bytes(void)
+{
+#ifdef __linux__
+    FILE *status = fopen("/proc/self/status", "r");
+    if (status == NULL) exit(2);
+    char line[256];
+    unsigned long long kib = 0;
+    while (fgets(line, sizeof(line), status) != NULL) {
+        if (sscanf(line, "VmHWM: %llu kB", &kib) == 1) break;
+    }
+    fclose(status);
+    if (kib == 0) exit(2);
+    return (uint64_t)kib * 1024;
+#else
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) != 0) exit(2);
+    return (uint64_t)usage.ru_maxrss;  /* macOS는 바이트 단위다 */
+#endif
+}
+
 /* cost: time O(b), heap O(1), stack O(1), io O(b) */
 /* vars: b = 결과 프로토콜 바이트 수 */
 /* basis: estimate */
 static void emit_response(response_t *response, uint64_t elapsed, const char *path)
 {
-    struct rusage usage;
     struct stat info;
-    if (getrusage(RUSAGE_SELF, &usage) != 0 || stat(path, &info) != 0) exit(2);
-    uint64_t rss = (uint64_t)usage.ru_maxrss;
-#ifndef __APPLE__
-    rss *= 1024;
-#endif
+    if (stat(path, &info) != 0) exit(2);
+    uint64_t rss = peak_rss_bytes();
     printf("%d %" PRIu64 " %zu %zu %" PRIu64 " %" PRIu64 " %lld\n",
            response->error, elapsed, response->count, response->columns,
            response->affected, rss, (long long)info.st_size);
