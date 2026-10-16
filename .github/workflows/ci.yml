@@ -76,6 +76,8 @@ jobs:
           psql postgresql://compat:compat@localhost:5432/compat_test -c \
             "CREATE DATABASE sqldiff TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C' ENCODING 'UTF8'"
           make SANITIZE= test-sql-diff SQLDIFF_DSN=postgresql://compat:compat@localhost:5432/sqldiff
+      - name: Compare two-session behavior with SQLite 3.51.0
+        run: make SANITIZE= BUILD_DIR=build-sqlite test-sqlite-session-diff
 
   figures:
     runs-on: ubuntu-latest
