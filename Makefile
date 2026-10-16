@@ -71,7 +71,7 @@ $(BUILD_DIR)/tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 STORAGE_OBJS = $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o \
-               $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o \
+               $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/checksum.o $(BUILD_DIR)/storage/value.o $(BUILD_DIR)/storage/catalog.o \
                $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/page_cache.o $(BUILD_DIR)/storage/catalog_store.o $(BUILD_DIR)/storage/legacy_migrate.o \
                $(BUILD_DIR)/storage/pk_tree.o $(BUILD_DIR)/storage/text_tree.o
 BASIC_TESTS = test_all test_record test_record_fault test_overflow \
@@ -87,8 +87,8 @@ $(BUILD_DIR)/test_http_input: $(BUILD_DIR)/tests/test_http_input.o $(OBJS)
 $(BUILD_DIR)/test_io: $(BUILD_DIR)/tests/test_io.o $(OBJS)
 $(BUILD_DIR)/test_io_lock: $(BUILD_DIR)/tests/test_io_lock.o $(OBJS)
 $(BUILD_DIR)/test_record: $(BUILD_DIR)/tests/test_record.o $(BUILD_DIR)/storage/record.o $(BUILD_DIR)/storage/record_page.o
-$(BUILD_DIR)/test_overflow: $(BUILD_DIR)/tests/test_overflow.o $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/record_page.o
-$(BUILD_DIR)/test_overflow_file: $(BUILD_DIR)/tests/test_overflow_file.o $(BUILD_DIR)/storage/overflow.o
+$(BUILD_DIR)/test_overflow: $(BUILD_DIR)/tests/test_overflow.o $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/checksum.o $(BUILD_DIR)/storage/record_page.o
+$(BUILD_DIR)/test_overflow_file: $(BUILD_DIR)/tests/test_overflow_file.o $(BUILD_DIR)/storage/overflow.o $(BUILD_DIR)/storage/checksum.o
 $(BUILD_DIR)/test_value: $(BUILD_DIR)/tests/test_value.o $(BUILD_DIR)/storage/value.o
 $(BUILD_DIR)/test_value_legacy_varchar: $(BUILD_DIR)/tests/test_value_legacy_varchar.o $(OBJS)
 $(BUILD_DIR)/storage/value_varchar_hook.o: src/storage/value.c
@@ -101,7 +101,7 @@ $(BUILD_DIR)/test_value_varchar: $(BUILD_DIR)/tests/test_value_varchar.o $(BUILD
 $(BUILD_DIR)/test_value_sqlite: $(BUILD_DIR)/tests/test_value_sqlite.o $(BUILD_DIR)/storage/value.o
 $(BUILD_DIR)/test_value_sqlite: LDLIBS += -lsqlite3
 $(BUILD_DIR)/test_record_fault: $(BUILD_DIR)/tests/test_record_fault.o $(BUILD_DIR)/storage/record_fault.o $(BUILD_DIR)/storage/record_page_fault.o
-$(BUILD_DIR)/test_overflow_fault: $(BUILD_DIR)/tests/test_overflow_fault.o $(BUILD_DIR)/storage/overflow_fault.o
+$(BUILD_DIR)/test_overflow_fault: $(BUILD_DIR)/tests/test_overflow_fault.o $(BUILD_DIR)/storage/overflow_fault.o $(BUILD_DIR)/storage/checksum.o
 $(BUILD_DIR)/test_value_fault: $(BUILD_DIR)/tests/test_value_fault.o $(BUILD_DIR)/storage/value_fault.o
 $(BUILD_DIR)/test_catalog: $(BUILD_DIR)/tests/test_catalog.o $(BUILD_DIR)/storage/catalog.o
 $(BUILD_DIR)/test_catalog_fault: $(BUILD_DIR)/tests/test_catalog_fault.o $(BUILD_DIR)/storage/catalog_fault.o

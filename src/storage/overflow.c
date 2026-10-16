@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "storage/checksum.h"
 #include "storage/overflow.h"
 
 #define OVERFLOW_HEADER_BYTES 28u
@@ -26,15 +27,11 @@ static uint32_t read_u32(const uint8_t *bytes)
     return value;
 }
 
-/* 체크섬 필드를 뺀 페이지 전체를 덮어 패딩 손상도 잡는다. */
+/* 체크섬 필드를 뺀 페이지 전체의 CRC32C. 패딩 손상도 잡는다. */
 static uint32_t checksum(const uint8_t *page, size_t page_bytes)
 {
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < page_bytes; i++) {
-        if (i >= OVERFLOW_CHECKSUM_OFFSET && i < OVERFLOW_HEADER_BYTES) continue;
-        hash = (hash ^ page[i]) * 16777619u;
-    }
-    return hash;
+    uint32_t crc = crc32c(0, page, OVERFLOW_CHECKSUM_OFFSET);
+    return crc32c(crc, page + OVERFLOW_HEADER_BYTES, page_bytes - OVERFLOW_HEADER_BYTES);
 }
 
 static bool io_valid(const overflow_io_t *io)
@@ -60,7 +57,7 @@ static void encode_page(uint8_t *page, size_t page_bytes, page_header_t header,
                         const uint8_t *chunk)
 {
     memset(page, 0, page_bytes);
-    memcpy(page, "LRO1", 4);
+    memcpy(page, "LRO2", 4);
     write_u32(page + 4, header.index);
     write_u32(page + 8, header.next);
     write_u32(page + 12, header.chunk);
@@ -72,7 +69,7 @@ static void encode_page(uint8_t *page, size_t page_bytes, page_header_t header,
 
 static bool decode_page(const uint8_t *page, size_t page_bytes, page_header_t *header)
 {
-    if (memcmp(page, "LRO1", 4) != 0) return false;
+    if (memcmp(page, "LRO2", 4) != 0) return false;
     header->index = read_u32(page + 4);
     header->next = read_u32(page + 8);
     header->chunk = read_u32(page + 12);
