@@ -2907,7 +2907,8 @@ typedef struct join join_t;
 
 typedef struct {
     join_t *join;
-    size_t level;
+    size_t level;               /* FROM 순서의 원본 번호 */
+    size_t pos;                 /* 실행 순서. RIGHT JOIN이면 첫 두 원본이 바뀐다 */
     catalog_table_id_t id;
     catalog_table_view_t view;
     heap_t *heap;
@@ -2921,7 +2922,8 @@ typedef struct {
 
 struct join {
     database_t *db;
-    join_level_t *levels;
+    join_level_t *levels;       /* FROM 순서 */
+    size_t *order;              /* 실행 순서 → 원본 번호 */
     size_t level_count;
     source_ref_t *sources;
     join_cond_t *conds;
@@ -2960,7 +2962,7 @@ static database_exec_status_t join_accept(void *context, const value_t *row)
     step->matched = true;
     status = conds_hold(join, step->level, true, &holds);
     if (status != DATABASE_EXEC_OK || !holds) return status;
-    return join_run(join, step->level + 1);
+    return join_run(join, step->pos + 1);
 }
 
 /* 탐침 값을 계산해 이 단계의 where를 만든다. NULL이거나 열 형식으로 정확히 바꿀 수 없으면 맞는 행이 없다 */
@@ -3005,9 +3007,10 @@ static database_exec_status_t scan_relation(join_t *join, join_level_t *step, va
     return status;
 }
 
-static database_exec_status_t join_run(join_t *join, size_t level)
+static database_exec_status_t join_run(join_t *join, size_t pos)
 {
-    if (level == join->level_count) return join->out->fn(join->out->ctx, join->row);
+    if (pos == join->level_count) return join->out->fn(join->out->ctx, join->row);
+    size_t level = join->order[pos];
     join_level_t *step = &join->levels[level];
     const source_ref_t *source = &join->sources[level];
     where_t where;
@@ -3024,7 +3027,7 @@ static database_exec_status_t join_run(join_t *join, size_t level)
         /* 맞는 행이 없으면 이 원본의 열을 NULL로 둔 행 하나 */
         bool holds;
         status = conds_hold(join, level, true, &holds);
-        if (status == DATABASE_EXEC_OK && holds) status = join_run(join, level + 1);
+        if (status == DATABASE_EXEC_OK && holds) status = join_run(join, pos + 1);
     }
     return status;
 }
@@ -3047,19 +3050,19 @@ static size_t count_conjuncts(const sqlexpr_t *expr)
     return 1;
 }
 
-/* prog이 쓰는 가장 뒤 단계. 열을 쓰지 않으면 0 */
+/* prog이 쓰는 원본 중 가장 늦게 실행되는 것. 열을 쓰지 않으면 처음 실행되는 원본 */
 static size_t last_level(join_t *join, const sqleval_prog_t *prog, bool *uses_any)
 {
     memset(join->scratch, 0, join->width > 0 ? join->width : 1);
     sqleval_mark_columns(prog, join->scratch, join->width);
     resolver_t all = {join->sources, join->level_count};
-    size_t level = 0;
+    size_t level = join->level_count > 0 ? join->order[0] : 0;
     *uses_any = false;
     for (size_t c = 0; c < join->width; c++) {
         if (!join->scratch[c]) continue;
         *uses_any = true;
         size_t at = source_of(&all, c);
-        if (at > level) level = at;
+        if (join->levels[at].pos > join->levels[level].pos) level = at;
     }
     return level;
 }
@@ -3086,7 +3089,7 @@ static database_exec_status_t try_probe(join_t *join, const sqlexpr_t *expr, con
         if (!compile_expr(join->db, other, resolver, &value, &status)) return status;
         bool uses_any;
         size_t needs = last_level(join, value, &uses_any);
-        if (uses_any && needs >= level) {
+        if (uses_any && join->levels[needs].pos >= step->pos) {
             sqleval_free(value);
             continue;
         }
@@ -3135,6 +3138,7 @@ static void join_free(join_t *join)
     for (size_t i = 0; i < join->cond_count; i++) sqleval_free(join->conds[i].prog);
     q_free(db, join->conds, (join->cond_cap > 0 ? join->cond_cap : 1) * sizeof(join_cond_t));
     q_free(db, join->levels, (join->level_count > 0 ? join->level_count : 1) * sizeof(join_level_t));
+    q_free(db, join->order, (join->level_count > 0 ? join->level_count : 1) * sizeof(size_t));
     q_free(db, join->sources, (join->level_count > 0 ? join->level_count : 1) * sizeof(source_ref_t));
     if (join->row != NULL) clear_cells(join->row, join->width);
     q_free(db, join->row, (join->width > 0 ? join->width : 1) * sizeof(value_t));
@@ -3152,8 +3156,16 @@ static database_exec_status_t join_open(database_t *db, const sqlstmt_select_t *
     /* 해제 크기가 level_count를 따르므로 할당 전에 정한다 */
     join->level_count = count;
     join->levels = q_calloc(db, count > 0 ? count : 1, sizeof(join_level_t));
+    join->order = q_calloc(db, count > 0 ? count : 1, sizeof(size_t));
     join->sources = q_calloc(db, count > 0 ? count : 1, sizeof(source_ref_t));
-    if (join->levels == NULL || join->sources == NULL) return DATABASE_EXEC_NOMEM;
+    if (join->levels == NULL || join->order == NULL || join->sources == NULL) return DATABASE_EXEC_NOMEM;
+    /* A RIGHT JOIN B ON c는 B를 먼저 훑고 A를 LEFT로 붙인다. 행 배치(*의 열 순서)는 FROM 순서 그대로다 */
+    bool right = count > 1 && select->sources[1].join == SQLSTMT_JOIN_RIGHT;
+    for (size_t i = 0; i < count; i++) join->order[i] = i;
+    if (right) {
+        join->order[0] = 1;
+        join->order[1] = 0;
+    }
     database_exec_status_t status = DATABASE_EXEC_OK;
     for (size_t i = 0; i < count; i++) {
         const sqlstmt_source_t *from = &select->sources[i];
@@ -3174,7 +3186,8 @@ static database_exec_status_t join_open(database_t *db, const sqlstmt_select_t *
         }
         step->join = join;
         step->level = i;
-        step->left = from->join == SQLSTMT_JOIN_LEFT;
+        step->pos = right && i < 2 ? 1 - i : i;
+        step->left = from->join == SQLSTMT_JOIN_LEFT || (right && i == 0);
         join->sources[i] = (source_ref_t){&step->view, &from->table, &from->alias, join->width, step->left};
         join->width += step->view.column_count;
         for (size_t k = 0; k < i; k++) {
@@ -3199,7 +3212,9 @@ static database_exec_status_t join_open(database_t *db, const sqlstmt_select_t *
     for (size_t i = 0; i < count && status == DATABASE_EXEC_OK; i++) {
         if (select->sources[i].on == NULL) continue;
         resolver_t visible = {join->sources, i + 1};
-        status = add_conds(join, select->sources[i].on, &visible, i, "ON");
+        /* RIGHT JOIN의 ON은 NULL로 채울 쪽(첫 원본)에서 본다 */
+        size_t at = select->sources[i].join == SQLSTMT_JOIN_RIGHT ? 0 : i;
+        status = add_conds(join, select->sources[i].on, &visible, at, "ON");
     }
     resolver_t all = {join->sources, count};
     if (status == DATABASE_EXEC_OK && select->where != NULL) status = add_conds(join, select->where, &all, SIZE_MAX, "WHERE");

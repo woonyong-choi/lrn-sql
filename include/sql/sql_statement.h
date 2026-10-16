@@ -29,7 +29,8 @@
  *     set_op     = UNION [ALL] SELECT | EXCEPT SELECT | INTERSECT SELECT
  *     item       = * | name.* | expr [[AS] alias]
  *     source     = name [[AS] alias] | ( query ) [[AS] alias]
- *     join       = , source | CROSS JOIN source | [INNER] JOIN source ON expr | LEFT [OUTER] JOIN source ON expr
+ *     join       = , source | CROSS JOIN source | [INNER] JOIN source ON expr | LEFT [OUTER] JOIN source ON expr |
+ *                  RIGHT [OUTER] JOIN source ON expr (첫 결합에서만)
  *   UPDATE name SET column_name = expr {, column_name = expr} [WHERE expr] [returning]
  *   DELETE FROM name [WHERE expr] [returning]
  *     returning  = RETURNING item {, item}   (item은 SELECT 목록과 같다)
@@ -60,7 +61,7 @@
  *   - 식 트리 높이는 512, 목록(인자·IN·여러 행 INSERT의 값)은 65536개까지다. 넘으면 SQLSTMT_LIMIT다.
  *   - FROM 원본은 SQLSTMT_MAX_SOURCES개까지다. 넘으면 SQLSTMT_LIMIT다.
  *
- * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): RIGHT·FULL·NATURAL JOIN, JOIN ... USING, 괄호로 묶은 JOIN,
+ * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): 첫 결합이 아닌 RIGHT JOIN, FULL·NATURAL JOIN, JOIN ... USING, 괄호로 묶은 JOIN,
  * INTERSECT와 UNION·EXCEPT를 괄호 없이 섞기, EXCEPT ALL·INTERSECT ALL, 집합 연산 자리의 괄호 SELECT,
  * WITH RECURSIVE, SELECT가 아닌 문장 앞의 WITH, 창 함수, INSERT ... SELECT,
  * CREATE TABLE ... AS,
@@ -244,14 +245,20 @@ typedef struct {
 } sqlstmt_order_t;
 
 /* FROM 원본의 결합 방식. 첫 원본은 NONE, 쉼표와 CROSS JOIN은 CROSS다 */
-typedef enum { SQLSTMT_JOIN_NONE, SQLSTMT_JOIN_CROSS, SQLSTMT_JOIN_INNER, SQLSTMT_JOIN_LEFT } sqlstmt_join_t;
+typedef enum {
+    SQLSTMT_JOIN_NONE,
+    SQLSTMT_JOIN_CROSS,
+    SQLSTMT_JOIN_INNER,
+    SQLSTMT_JOIN_LEFT,
+    SQLSTMT_JOIN_RIGHT   /* 둘째 원본에만(첫 결합). 그 뒤 자리는 UNSUPPORTED */
+} sqlstmt_join_t;
 
 typedef struct {
     sqlstmt_name_t table;        /* subquery면 size 0 */
     sqlstmt_name_t alias;        /* 없으면 size 0 */
     struct sqlstmt_select *subquery;  /* FROM ( query ) */
     sqlstmt_join_t join;
-    sqlexpr_t *on;               /* INNER·LEFT의 ON 조건. 그 밖에는 NULL */
+    sqlexpr_t *on;               /* INNER·LEFT·RIGHT의 ON 조건. 그 밖에는 NULL */
 } sqlstmt_source_t;
 
 #define SQLSTMT_MAX_SOURCES 64

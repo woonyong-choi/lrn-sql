@@ -245,6 +245,13 @@ CASES = [
             "SELECT b.w, a.v FROM b LEFT JOIN a ON a.k = b.k",
             "SELECT a.v, b.w FROM a LEFT JOIN b ON b.k = a.k AND b.id > 1 WHERE a.id < 4",
             "SELECT a.v FROM a JOIN b ON b.id = a.id JOIN b c ON c.k = b.k WHERE c.id <> b.id",
+            "SELECT a.v, b.w FROM a RIGHT JOIN b ON b.k = a.k",
+            "SELECT * FROM a RIGHT OUTER JOIN b ON b.k = a.k ORDER BY b.id, a.id",
+            "SELECT a.v, b.w FROM a RIGHT JOIN b ON b.k + 0 = a.k AND a.id > 1",
+            "SELECT b.w FROM a RIGHT JOIN b ON b.k = a.k WHERE a.id IS NULL ORDER BY 1",
+            "SELECT a.v, b.w, c.v FROM a RIGHT JOIN b ON b.k = a.k JOIN a c ON c.id = b.id ORDER BY b.id, a.id",
+            "SELECT b.k, COUNT(a.id) FROM a RIGHT JOIN b ON b.k = a.k GROUP BY b.k ORDER BY 1 NULLS FIRST",
+            "SELECT e.id, a.v FROM e RIGHT JOIN a ON a.k = e.k ORDER BY a.v",
             # 빈 테이블
             "SELECT a.v, e.id FROM a JOIN e ON e.k = a.k",
             "SELECT a.v, e.id FROM a LEFT JOIN e ON e.k = a.k",
