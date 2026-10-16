@@ -10,6 +10,7 @@
 #include "storage/page_file.h"
 
 #include "page_cache.h"
+#include "storage/checksum.h"
 #include "storage/record_page.h"
 
 _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
@@ -23,6 +24,7 @@ _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
 #define CHAIN_HEADER_BYTES 8u
 #define CHAIN_IDS ((PAGE_BODY_BYTES - CHAIN_HEADER_BYTES) / 4u)
 #define BYTE_ORDER_MARK 0x01020304u
+#define ENVELOPE_VERSION 2u   /* 2: 체크섬 CRC32C */
 #define PARTIAL_SUFFIX ".partial"
 
 /*
@@ -154,15 +156,10 @@ static uint64_t get_u64(const uint8_t *at)
     return value;
 }
 
-/* 체크섬 필드(28..31)를 뺀 페이지 전체를 덮어 패딩 손상도 잡는다. */
+/* 체크섬 필드(28..31)를 뺀 페이지 전체의 CRC32C. 패딩 손상도 잡는다. */
 static uint32_t page_checksum(const uint8_t *page)
 {
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < PAGE_FILE_PAGE_BYTES; i++) {
-        if (i >= 28 && i < 32) continue;
-        hash = (hash ^ page[i]) * 16777619u;
-    }
-    return hash;
+    return crc32c(crc32c(0, page, 28), page + 32, PAGE_FILE_PAGE_BYTES - 32);
 }
 
 static void encode_page(uint8_t *page, page_kind_t kind, uint32_t page_id, uint32_t table_id,
@@ -170,7 +167,7 @@ static void encode_page(uint8_t *page, page_kind_t kind, uint32_t page_id, uint3
 {
     memset(page, 0, PAGE_FILE_PAGE_BYTES);
     memcpy(page, "LRPG", 4);
-    put_u16(page + 4, 1);
+    put_u16(page + 4, ENVELOPE_VERSION);
     put_u16(page + 6, (uint16_t)kind);
     put_u32(page + 8, page_id);
     put_u32(page + 12, table_id);
@@ -197,7 +194,7 @@ static slot_state_t decode_envelope(const uint8_t *page, uint32_t expect_id, env
 {
     if (memcmp(page, "LRPG", 4) != 0) return SLOT_DAMAGED;
     if (get_u32(page + 28) != page_checksum(page)) return SLOT_DAMAGED;
-    if (get_u16(page + 4) != 1) return SLOT_UNSUPPORTED;
+    if (get_u16(page + 4) != ENVELOPE_VERSION) return SLOT_UNSUPPORTED;
     uint32_t body_len = get_u32(page + 16);
     if (get_u32(page + 8) != expect_id || body_len > PAGE_BODY_BYTES) return SLOT_DAMAGED;
     for (size_t i = 20; i < 28; i++) {

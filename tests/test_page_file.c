@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "storage/checksum.h"
 #include "storage/overflow.h"
 #include "storage/page_file.h"
 #include "storage/record_page.h"
@@ -207,15 +208,10 @@ static int inventory(void)
     return count;
 }
 
-/* 테스트가 독립적으로 구현한 체크섬. 구현과 같은 사양(FNV-1a 32, 28..31 제외)을 다시 계산한다. */
+/* 구현과 같은 사양(CRC32C, 28..31 제외)으로 다시 계산한다. */
 static uint32_t test_checksum(const uint8_t *page)
 {
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < PAGE_FILE_PAGE_BYTES; i++) {
-        if (i >= 28 && i < 32) continue;
-        hash = (hash ^ page[i]) * 16777619u;
-    }
-    return hash;
+    return crc32c(crc32c(0, page, 28), page + 32, PAGE_FILE_PAGE_BYTES - 32);
 }
 
 static void reseal(uint8_t *page)
@@ -292,7 +288,8 @@ static void test_fixture_roundtrip_is_page_size_independent(void)
     CHECK(bytes != NULL && size % PAGE_FILE_PAGE_BYTES == 0, "파일 길이가 8192의 배수 (%zu)", size);
     /* 제어 페이지 envelope: 고정 magic·버전·종류·page ID·길이와 본문 magic */
     CHECK(memcmp(bytes + PAGE_FILE_PAGE_BYTES, "LRPG", 4) == 0, "envelope magic");
-    CHECK(bytes[PAGE_FILE_PAGE_BYTES + 4] == 1 && bytes[PAGE_FILE_PAGE_BYTES + 5] == 0, "envelope 버전 1 LE");
+    CHECK(bytes[PAGE_FILE_PAGE_BYTES + 4] == 2 && bytes[PAGE_FILE_PAGE_BYTES + 5] == 0, "envelope 버전 2(CRC32C) LE");
+    CHECK(crc32c(0, "123456789", 9) == 0xe3069283u, "CRC32C 표준 검사값");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 6] == PAGE_KIND_CONTROL, "종류 제어");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 8] == 1, "제어 slot 1의 page ID");
     uint32_t manifest = bytes[PAGE_FILE_PAGE_BYTES + 32 + 68];
@@ -362,7 +359,7 @@ static void mut_byte_order(uint8_t *b, size_t *s)
 static void mut_envelope_version(uint8_t *b, size_t *s)
 {
     (void)s;
-    b[PAGE_FILE_PAGE_BYTES + 4] = 2;
+    b[PAGE_FILE_PAGE_BYTES + 4] = 3;
     reseal(b + PAGE_FILE_PAGE_BYTES);
 }
 static void mut_file_magic(uint8_t *b, size_t *s)

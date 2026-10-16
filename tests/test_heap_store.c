@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "storage/checksum.h"
 #include "storage/catalog.h"
 #include "storage/catalog_store.h"
 #include "storage/heap_store.h"
@@ -151,15 +152,11 @@ static uint64_t file_hash(void)
     return h;
 }
 
-/* page_file이 쓰는 체크섬(FNV-1a 32, 28..31 제외)을 독립적으로 다시 계산한다. */
+/* page_file이 쓰는 체크섬(CRC32C, 28..31 제외)을 다시 계산한다. */
 static void reseal(uint8_t *page)
 {
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < PAGE_FILE_PAGE_BYTES; i++) {
-        if (i >= 28 && i < 32) continue;
-        hash = (hash ^ page[i]) * 16777619u;
-    }
-    for (unsigned i = 0; i < 4; i++) page[28 + i] = (uint8_t)(hash >> (i * 8));
+    uint32_t sum = crc32c(crc32c(0, page, 28), page + 32, PAGE_FILE_PAGE_BYTES - 32);
+    for (unsigned i = 0; i < 4; i++) page[28 + i] = (uint8_t)(sum >> (i * 8));
 }
 
 /* ── 행 모델 ── */

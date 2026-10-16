@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "storage/checksum.h"
 #include "storage/overflow.h"
 #include "storage/record_page.h"
 
@@ -100,12 +101,7 @@ static void store_u32(uint8_t *bytes, uint32_t value)
 /* 테스트가 일부러 만든 손상 페이지가 checksum만 맞도록 다시 봉인한다. */
 static void reseal(uint8_t *page)
 {
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < PAGE_BYTES; i++) {
-        if (i >= 24 && i < 28) continue;
-        hash = (hash ^ page[i]) * 16777619u;
-    }
-    store_u32(page + 24, hash);
+    store_u32(page + 24, crc32c(crc32c(0, page, 24), page + 28, PAGE_BYTES - 28));
 }
 
 static overflow_ref_t write_value(store_t *store, size_t size, unsigned seed)
