@@ -234,7 +234,8 @@ static result_t *run_bound(database_t *db, const char *sql, const value_view_t *
 static char *query(database_t *db, const char *sql)
 {
     result_t *result = run_bound(db, sql, NULL, 0);
-    char *text = dump(result, true);
+    /* ORDER BY가 있으면 순서도 결과의 일부다 */
+    char *text = dump(result, strstr(sql, "ORDER BY") == NULL);
     result_release(&result);
     return text;
 }
@@ -852,6 +853,62 @@ static void test_argument_errors(void)
     clean_dir();
 }
 
+/* #160·#161: ORDER BY·DISTINCT는 모은 행을 문장 예산 안에서만 쥐고, 넘치면 결과를 자르지 않고 거절한다 */
+static database_exec_status_t run_budgeted(database_t *db, projection_memory_t *memory, const char *sql, result_t **out)
+{
+    mem_ledger_t ledger = {&PROJECTION_MEMORY, memory};
+    database_exec_options_t options = {.ledger = &ledger};
+    *out = NULL;
+    return database_exec_ex(db, &options, (const uint8_t *)sql, strlen(sql), NULL, out);
+}
+
+static void test_order_and_distinct_respect_budget(void)
+{
+    printf("\n[test_order_and_distinct_respect_budget]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE sorted (id INTEGER PRIMARY KEY, grp INTEGER, body TEXT)");
+    for (int i = 1; i <= 300; i++) {
+        char sql[512];
+        snprintf(sql, sizeof(sql), "INSERT INTO sorted VALUES (%d, %d, '%0200d')", i, i % 7 == 0 ? -1 : i % 5, i % 40);
+        exec_ok(db, sql);
+    }
+    expect_text(db, "SELECT id, grp FROM sorted ORDER BY grp DESC, id DESC LIMIT 3", "[3] 299|4/ 289|4/ 284|4");
+    expect_text(db, "SELECT id FROM sorted WHERE grp = -1 ORDER BY id LIMIT 2 OFFSET 1", "[2] 14/ 21");
+    expect_text(db, "SELECT DISTINCT grp FROM sorted ORDER BY grp", "[6] -1/ 0/ 1/ 2/ 3/ 4");
+    expect_text(db, "SELECT id FROM sorted WHERE grp = 9 ORDER BY id", "[0]");
+
+    const char *queries[] = {"SELECT body, id FROM sorted ORDER BY grp DESC, id", "SELECT DISTINCT body FROM sorted"};
+    for (size_t q = 0; q < 2; q++) {
+        projection_memory_t memory = {0};
+        result_t *result = NULL;
+        CHECK(run_budgeted(db, &memory, queries[q], &result) == DATABASE_EXEC_OK && result_kind(result) == RESULT_KIND_ROWS,
+              "%s: 예산 없이 성공", queries[q]);
+        size_t rows = 0;
+        result_row_t row;
+        while (result_next(result, &row) == RESULT_NEXT_ROW) rows++;
+        result_release(&result);
+        CHECK(rows == (q == 0 ? 300u : 40u) && memory.used == 0, "%s: 행 %zu, 남은 계상 %zu", queries[q], rows, memory.used);
+        size_t peak = memory.peak;
+        memory.peak = 0;
+        memory.limit = peak / 2;
+        database_exec_status_t limited = run_budgeted(db, &memory, queries[q], &result);
+        bool refused = limited == DATABASE_EXEC_NOMEM ||
+                       (limited == DATABASE_EXEC_OK && result != NULL && result_kind(result) == RESULT_KIND_ERROR);
+        CHECK(refused, "%s: 예산 %zu(최대 %zu의 절반)에서 결과를 자르지 않고 거절", queries[q], memory.limit, peak);
+        result_release(&result);
+        CHECK(memory.used == 0, "%s: 거절 뒤 계상 정리", queries[q]);
+    }
+    /* 정렬이 없는 LIMIT은 모으지 않고 내보내다 멈춘다 */
+    projection_memory_t whole = {0}, first = {0};
+    result_t *result = NULL;
+    run_budgeted(db, &whole, "SELECT body FROM sorted", &result);
+    result_release(&result);
+    run_budgeted(db, &first, "SELECT body FROM sorted LIMIT 5", &result);
+    result_release(&result);
+    CHECK(first.peak * 2 < whole.peak, "LIMIT 5의 최대 계상 %zu < 전체 %zu의 절반", first.peak, whole.peak);
+    database_close(db);
+}
+
 int main(void)
 {
     test_two_schemas_crud_and_reopen();
@@ -866,6 +923,7 @@ int main(void)
     test_projected_overflow_reads();
     test_open_rejects_other_files_without_change();
     test_argument_errors();
+    test_order_and_distinct_respect_budget();
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
     return g_fail == 0 ? 0 : 1;
