@@ -451,16 +451,31 @@ def _environment() -> dict[str, str]:
         "head": ["git", "rev-parse", "HEAD"],
         "compiler": ["clang", "--version"],
         "sqlite": [str(BUILD / "driver"), "--version"],
-        "cpu_memory": ["sysctl", "-n", "machdep.cpu.brand_string", "hw.memsize"],
     }
     return {
         "platform": platform.platform(),
         "python": sys.version,
+        "cpu_memory": _cpu_memory(),
         **{
             name: subprocess.check_output(command, cwd=ROOT, text=True).strip()
             for name, command in commands.items()
         },
     }
+
+
+# cost: time O(b), heap O(b), stack O(1), io 1
+# vars: b = 장비 정보 출력 바이트 수
+# basis: estimate
+def _cpu_memory() -> str:
+    """CPU 이름과 메모리 바이트 수. macOS는 sysctl, Linux는 /proc에서 읽는다."""
+    if sys.platform == "darwin":
+        command = ["sysctl", "-n", "machdep.cpu.brand_string", "hw.memsize"]
+        return subprocess.check_output(command, text=True).strip()
+    cpu = next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
+                if line.startswith("model name")), "unknown")
+    memory_kb = next((int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines()
+                      if line.startswith("MemTotal:")), 0)
+    return f"{cpu}\n{memory_kb * 1024}"
 
 
 def _self_check() -> None:
