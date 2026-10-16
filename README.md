@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/totedb-icon.png" alt="ToteDB 아이콘: 짙은 남색 토트백" width="160">
+</p>
+
 <h1 align="center">ToteDB</h1>
 
 <p align="center">
