@@ -2,6 +2,7 @@
 #define ACK_QUEUE_INTERNAL_H
 
 #include "queue/ack_queue.h"
+#include "sql/session.h"
 #include "sql/result.h"
 #include "storage/value.h"
 
@@ -9,28 +10,29 @@
 #define ACKQ_SQL_MAX 512u
 
 struct ackq {
-    database_t *db;
+    session_db_t *db;               /* 설치한 데이터베이스. 연산의 세션은 이 데이터베이스의 것이어야 한다 */
     char name[ACKQ_NAME_MAX + 1];
     char table[ACKQ_NAME_MAX + 8];
     uint32_t max_attempts;
     uint32_t begin_timeout_ms;
     uint64_t (*now_ms)(void *ctx);
     void *clock_ctx;
-    database_exec_options_t exec_opts;
-    bool has_exec_opts;
 };
 
-/* 한 연산이 쓰는 트랜잭션. 호출자의 txn이면 own이 false이고 commit하지 않는다. */
+/* 한 연산이 문장을 실행하는 세션. 세션에 열려 있던 트랜잭션(호출자의 것)이면 own이 false이고 commit하지 않는다. */
 typedef struct {
-    database_txn_t *txn;
+    session_t *session;
     bool own;
     bool dirty;   /* 쓰기 문장을 실행했다. 자기 트랜잭션은 dirty일 때만 commit한다 */
 } ackq_scope_t;
 
 uint64_t ackq_now(const ackq_t *queue);
 
-/* 호출자의 txn을 쓰거나(given) 자기 트랜잭션을 연다. write가 false면 given이 NULL일 때 트랜잭션 없이 읽는다. */
-ackq_status_t ackq_scope_open(ackq_t *queue, database_txn_t *given, bool write, ackq_scope_t *scope);
+/*
+ * 세션에 트랜잭션이 열려 있으면 그 안에서, 없으면 write일 때 세션에 자기 트랜잭션을 연다. write가 false이고 열린
+ * 트랜잭션이 없으면 트랜잭션 없이(문장마다 자동 commit) 읽는다.
+ */
+ackq_status_t ackq_scope_open(ackq_t *queue, session_t *session, bool write, ackq_scope_t *scope);
 /* result가 ACKQ_OK이고 dirty이면 commit해 그 결과를 돌려준다. 아니면 rollback하고 result를 그대로 돌려준다. */
 ackq_status_t ackq_scope_close(ackq_scope_t *scope, ackq_status_t result);
 

@@ -232,34 +232,32 @@ static ackq_status_t fetch_created(ackq_t *queue, ackq_scope_t *scope, uint64_t 
 
 /* ── 설치·열기 ── */
 
-static ackq_status_t make_queue(database_t *db, const ackq_options_t *options, ackq_t **out)
+static ackq_status_t make_queue(session_t *session, const ackq_options_t *options, ackq_t **out)
 {
     *out = NULL;
-    if (db == NULL || options == NULL || !valid_name(options->name)) return ACKQ_INVALID;
+    if (session == NULL || options == NULL || !valid_name(options->name)) return ACKQ_INVALID;
     ackq_t *queue = calloc(1, sizeof(*queue));
     if (queue == NULL) return ACKQ_NOMEM;
-    queue->db = db;
+    queue->db = session_database(session);
     snprintf(queue->name, sizeof(queue->name), "%s", options->name);
     snprintf(queue->table, sizeof(queue->table), "ackq_%s", options->name);
     queue->max_attempts = options->max_attempts;
     queue->begin_timeout_ms = options->begin_timeout_ms;
     queue->now_ms = options->now_ms;
     queue->clock_ctx = options->clock_ctx;
-    if (options->ledger != NULL) {
-        queue->exec_opts.ledger = options->ledger;
-        queue->has_exec_opts = true;
-    }
     *out = queue;
     return ACKQ_OK;
 }
 
 /* 테이블과 컬럼이 있는지만 본다. 없으면 NOT_INSTALLED(의미 오류), 그 밖의 오류는 그대로 돌려준다. */
-static ackq_status_t probe_table(ackq_t *queue)
+static ackq_status_t probe_table(ackq_t *queue, session_t *session)
 {
     char sql[ACKQ_SQL_MAX];
     result_t *result = NULL;
     result_error_class_t error_class = RESULT_E_NONE;
-    ackq_scope_t scope = {NULL, false, false};
+    ackq_scope_t scope;
+    ackq_status_t opened = ackq_scope_open(queue, session, false, &scope);
+    if (opened != ACKQ_OK) return opened;
     snprintf(sql, sizeof(sql), "SELECT " META_COLS ", idem, payload, note, created_at FROM %s WHERE id = 0",
              queue->table);
     ackq_status_t status = ackq_run(queue, &scope, false, sql, NULL, 0, &result, &error_class);
@@ -274,13 +272,13 @@ static ackq_status_t probe_table(ackq_t *queue)
     return error_class == RESULT_E_SEMANTIC ? ACKQ_NOT_INSTALLED : status;
 }
 
-ackq_status_t ackq_open(database_t *db, const ackq_options_t *options, ackq_t **out)
+ackq_status_t ackq_open(session_t *session, const ackq_options_t *options, ackq_t **out)
 {
     ackq_t *queue;
     if (out == NULL) return ACKQ_INVALID;
-    ackq_status_t status = make_queue(db, options, &queue);
+    ackq_status_t status = make_queue(session, options, &queue);
     if (status != ACKQ_OK) return status;
-    status = probe_table(queue);
+    status = probe_table(queue, session);
     if (status != ACKQ_OK) {
         free(queue);
         return status;
@@ -289,12 +287,12 @@ ackq_status_t ackq_open(database_t *db, const ackq_options_t *options, ackq_t **
     return ACKQ_OK;
 }
 
-static ackq_status_t create_table(ackq_t *queue)
+static ackq_status_t create_table(ackq_t *queue, session_t *session)
 {
     char sql[ACKQ_SQL_MAX];
     result_t *result = NULL;
     ackq_scope_t scope;
-    ackq_status_t status = ackq_scope_open(queue, NULL, true, &scope);
+    ackq_status_t status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) return status;
     snprintf(sql, sizeof(sql),
              "CREATE TABLE %s (id INTEGER PRIMARY KEY AUTOINCREMENT, state INTEGER NOT NULL, "
@@ -307,17 +305,17 @@ static ackq_status_t create_table(ackq_t *queue)
     return ackq_scope_close(&scope, status);
 }
 
-ackq_status_t ackq_install(database_t *db, const ackq_options_t *options, ackq_t **out)
+ackq_status_t ackq_install(session_t *session, const ackq_options_t *options, ackq_t **out)
 {
     ackq_t *queue;
     if (out == NULL) return ACKQ_INVALID;
-    ackq_status_t status = make_queue(db, options, &queue);
+    ackq_status_t status = make_queue(session, options, &queue);
     if (status != ACKQ_OK) return status;
-    status = probe_table(queue);
+    status = probe_table(queue, session);
     if (status == ACKQ_NOT_INSTALLED) {
-        status = create_table(queue);
+        status = create_table(queue, session);
         /* 다른 설치가 먼저 만들었을 수 있다. 같은 이름의 테이블이 있으면 그것을 쓴다. */
-        if (status != ACKQ_OK) status = probe_table(queue) == ACKQ_OK ? ACKQ_OK : status;
+        if (status != ACKQ_OK) status = probe_table(queue, session) == ACKQ_OK ? ACKQ_OK : status;
     }
     if (status != ACKQ_OK) {
         free(queue);
@@ -423,7 +421,7 @@ static ackq_status_t enqueue_in(ackq_t *queue, ackq_scope_t *scope, const uint8_
     return status;
 }
 
-ackq_status_t ackq_enqueue(ackq_t *queue, database_txn_t *txn, const uint8_t *payload, size_t size,
+ackq_status_t ackq_enqueue(ackq_t *queue, session_t *session, const uint8_t *payload, size_t size,
                            const char *idem_key, uint64_t *id, bool *duplicate)
 {
     size_t key_length = 0;
@@ -437,7 +435,7 @@ ackq_status_t ackq_enqueue(ackq_t *queue, database_txn_t *txn, const uint8_t *pa
         if (status != ACKQ_OK) return status;
     }
     ackq_scope_t scope;
-    status = ackq_scope_open(queue, txn, true, &scope);
+    status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) return status;
     status = enqueue_in(queue, &scope, payload, size, idem_key, id, duplicate);
     status = ackq_scope_close(&scope, status);
@@ -507,7 +505,7 @@ static ackq_status_t claim_in(ackq_t *queue, ackq_scope_t *scope, size_t max_ite
     return status;
 }
 
-ackq_status_t ackq_claim(ackq_t *queue, database_txn_t *txn, size_t max_items, uint64_t lease_ms,
+ackq_status_t ackq_claim(ackq_t *queue, session_t *session, size_t max_items, uint64_t lease_ms,
                          ackq_claim_t *items, size_t *count)
 {
     if (count != NULL) *count = 0;
@@ -518,7 +516,7 @@ ackq_status_t ackq_claim(ackq_t *queue, database_txn_t *txn, size_t max_items, u
     ackq_status_t status = add_ms(now, lease_ms, &lease_until);
     if (status != ACKQ_OK || !ackq_to_i64(now, &now_value)) return status != ACKQ_OK ? status : ACKQ_LIMIT;
     ackq_scope_t scope;
-    status = ackq_scope_open(queue, txn, true, &scope);
+    status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) return status;
     status = claim_in(queue, &scope, max_items, now_value, lease_until, items, count);
     if (status == ACKQ_OK) status = ackq_scope_close(&scope, status);
@@ -531,7 +529,7 @@ ackq_status_t ackq_claim(ackq_t *queue, database_txn_t *txn, size_t max_items, u
     return status;
 }
 
-ackq_status_t ackq_claim_id(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t lease_ms, ackq_claim_t *item)
+ackq_status_t ackq_claim_id(ackq_t *queue, session_t *session, uint64_t id, uint64_t lease_ms, ackq_claim_t *item)
 {
     if (queue == NULL || item == NULL || id == 0 || lease_ms == 0) return ACKQ_INVALID;
     *item = (ackq_claim_t){0};
@@ -540,7 +538,7 @@ ackq_status_t ackq_claim_id(ackq_t *queue, database_txn_t *txn, uint64_t id, uin
     ackq_status_t status = add_ms(now, lease_ms, &lease_until);
     if (status != ACKQ_OK || !ackq_to_i64(now, &now_value)) return status != ACKQ_OK ? status : ACKQ_LIMIT;
     ackq_scope_t scope;
-    status = ackq_scope_open(queue, txn, true, &scope);
+    status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) return status;
     meta_t meta;
     status = fetch_meta(queue, &scope, id, &meta);
@@ -581,12 +579,12 @@ static ackq_status_t set_terminal(ackq_t *queue, ackq_scope_t *scope, uint64_t i
 }
 
 /* ack·fail 공통: 같은 claim이 LEASED면 target으로 바꾸고, 이미 target이면 중복 요청이라 OK다. */
-static ackq_status_t finish_claim(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t fence,
+static ackq_status_t finish_claim(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence,
                                   ackq_state_t target, const char *note)
 {
     if (queue == NULL || id == 0 || fence == 0 || !fits_i64(fence)) return ACKQ_INVALID;
     ackq_scope_t scope;
-    ackq_status_t status = ackq_scope_open(queue, txn, true, &scope);
+    ackq_status_t status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) return status;
     meta_t meta;
     status = fetch_meta(queue, &scope, id, &meta);
@@ -599,17 +597,17 @@ static ackq_status_t finish_claim(ackq_t *queue, database_txn_t *txn, uint64_t i
     return ackq_scope_close(&scope, status);
 }
 
-ackq_status_t ackq_ack(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t fence)
+ackq_status_t ackq_ack(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence)
 {
-    return finish_claim(queue, txn, id, fence, ACKQ_STATE_ACKED, "");
+    return finish_claim(queue, session, id, fence, ACKQ_STATE_ACKED, "");
 }
 
-ackq_status_t ackq_fail(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t fence, const char *reason)
+ackq_status_t ackq_fail(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence, const char *reason)
 {
     size_t length;
     ackq_status_t status = check_text(reason, ACKQ_NOTE_MAX, true, &length);
     if (status != ACKQ_OK) return status;
-    return finish_claim(queue, txn, id, fence, ACKQ_STATE_FAILED, reason != NULL ? reason : "");
+    return finish_claim(queue, session, id, fence, ACKQ_STATE_FAILED, reason != NULL ? reason : "");
 }
 
 static ackq_status_t nack_in(ackq_t *queue, ackq_scope_t *scope, const meta_t *meta, uint64_t fence,
@@ -636,7 +634,7 @@ static ackq_status_t nack_in(ackq_t *queue, ackq_scope_t *scope, const meta_t *m
     return run_one_row(queue, scope, sql, params, 3);
 }
 
-ackq_status_t ackq_nack(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t fence, uint64_t retry_delay_ms,
+ackq_status_t ackq_nack(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence, uint64_t retry_delay_ms,
                         const char *reason, bool *terminal)
 {
     size_t length;
@@ -645,7 +643,7 @@ ackq_status_t ackq_nack(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_
     ackq_status_t status = check_text(reason, ACKQ_NOTE_MAX, true, &length);
     if (status != ACKQ_OK) return status;
     ackq_scope_t scope;
-    status = ackq_scope_open(queue, txn, true, &scope);
+    status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) return status;
     meta_t meta;
     status = fetch_meta(queue, &scope, id, &meta);
@@ -655,7 +653,7 @@ ackq_status_t ackq_nack(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_
     return ackq_scope_close(&scope, status);
 }
 
-ackq_status_t ackq_update(ackq_t *queue, database_txn_t *txn, uint64_t id, uint64_t fence, const uint8_t *payload,
+ackq_status_t ackq_update(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence, const uint8_t *payload,
                           size_t size)
 {
     char sql[ACKQ_SQL_MAX];
@@ -663,7 +661,7 @@ ackq_status_t ackq_update(ackq_t *queue, database_txn_t *txn, uint64_t id, uint6
     ackq_status_t status = check_payload(payload, size);
     if (status != ACKQ_OK) return status;
     ackq_scope_t scope;
-    status = ackq_scope_open(queue, txn, true, &scope);
+    status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) return status;
     meta_t meta;
     status = fetch_meta(queue, &scope, id, &meta);
@@ -701,7 +699,7 @@ static ackq_status_t return_one(ackq_t *queue, ackq_scope_t *scope, const meta_t
     return run_one_row(queue, scope, sql, &param, 1);
 }
 
-static ackq_status_t return_leases(ackq_t *queue, database_txn_t *txn, size_t limit, bool only_expired,
+static ackq_status_t return_leases(ackq_t *queue, session_t *session, size_t limit, bool only_expired,
                                    size_t *processed)
 {
     if (processed != NULL) *processed = 0;
@@ -711,7 +709,7 @@ static ackq_status_t return_leases(ackq_t *queue, database_txn_t *txn, size_t li
     topk_t top = {calloc(limit, sizeof(meta_t)), 0, limit};
     if (top.items == NULL) return ACKQ_NOMEM;
     ackq_scope_t scope;
-    ackq_status_t status = ackq_scope_open(queue, txn, true, &scope);
+    ackq_status_t status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) {
         free(top.items);
         return status;
@@ -729,17 +727,17 @@ static ackq_status_t return_leases(ackq_t *queue, database_txn_t *txn, size_t li
     return ackq_scope_close(&scope, status);
 }
 
-ackq_status_t ackq_recover(ackq_t *queue, database_txn_t *txn, size_t limit, size_t *recovered)
+ackq_status_t ackq_recover(ackq_t *queue, session_t *session, size_t limit, size_t *recovered)
 {
-    return return_leases(queue, txn, limit, true, recovered);
+    return return_leases(queue, session, limit, true, recovered);
 }
 
-ackq_status_t ackq_release_leases(ackq_t *queue, database_txn_t *txn, size_t limit, size_t *released)
+ackq_status_t ackq_release_leases(ackq_t *queue, session_t *session, size_t limit, size_t *released)
 {
-    return return_leases(queue, txn, limit, false, released);
+    return return_leases(queue, session, limit, false, released);
 }
 
-ackq_status_t ackq_purge(ackq_t *queue, database_txn_t *txn, bool include_failed, size_t limit, size_t *purged)
+ackq_status_t ackq_purge(ackq_t *queue, session_t *session, bool include_failed, size_t limit, size_t *purged)
 {
     char sql[ACKQ_SQL_MAX];
     if (purged != NULL) *purged = 0;
@@ -747,7 +745,7 @@ ackq_status_t ackq_purge(ackq_t *queue, database_txn_t *txn, bool include_failed
     topk_t top = {calloc(limit, sizeof(meta_t)), 0, limit};
     if (top.items == NULL) return ACKQ_NOMEM;
     ackq_scope_t scope;
-    ackq_status_t status = ackq_scope_open(queue, txn, true, &scope);
+    ackq_status_t status = ackq_scope_open(queue, session, true, &scope);
     if (status != ACKQ_OK) {
         free(top.items);
         return status;
@@ -768,14 +766,14 @@ ackq_status_t ackq_purge(ackq_t *queue, database_txn_t *txn, bool include_failed
     return ackq_scope_close(&scope, status);
 }
 
-ackq_status_t ackq_stats(ackq_t *queue, database_txn_t *txn, ackq_stats_t *stats)
+ackq_status_t ackq_stats(ackq_t *queue, session_t *session, ackq_stats_t *stats)
 {
     char sql[ACKQ_SQL_MAX];
     result_t *result = NULL;
     if (queue == NULL || stats == NULL) return ACKQ_INVALID;
     *stats = (ackq_stats_t){0};
     ackq_scope_t scope;
-    ackq_status_t status = ackq_scope_open(queue, txn, false, &scope);
+    ackq_status_t status = ackq_scope_open(queue, session, false, &scope);
     if (status != ACKQ_OK) return status;
     snprintf(sql, sizeof(sql), "SELECT state FROM %s", queue->table);
     ackq_stats_t counted = {0};
@@ -823,7 +821,7 @@ static ackq_status_t fill_item(ackq_t *queue, ackq_scope_t *scope, const meta_t 
     return status;
 }
 
-ackq_status_t ackq_list(ackq_t *queue, database_txn_t *txn, uint64_t after_id, size_t limit, bool with_payload,
+ackq_status_t ackq_list(ackq_t *queue, session_t *session, uint64_t after_id, size_t limit, bool with_payload,
                         ackq_item_t *items, size_t *count)
 {
     if (count != NULL) *count = 0;
@@ -834,7 +832,7 @@ ackq_status_t ackq_list(ackq_t *queue, database_txn_t *txn, uint64_t after_id, s
     topk_t top = {calloc(limit, sizeof(meta_t)), 0, limit};
     if (top.items == NULL) return ACKQ_NOMEM;
     ackq_scope_t scope;
-    ackq_status_t status = ackq_scope_open(queue, txn, false, &scope);
+    ackq_status_t status = ackq_scope_open(queue, session, false, &scope);
     if (status != ACKQ_OK) {
         free(top.items);
         return status;

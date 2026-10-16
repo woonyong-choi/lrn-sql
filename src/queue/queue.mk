@@ -1,11 +1,12 @@
 # 선택형 ACK 큐(#140) 빌드 규칙. Makefile이 -include로 읽는다. DB 코어 빌드에는 큐가 포함되지 않는다.
+# 큐는 세션(session.o)으로 문장을 실행한다.
 # DB 코어(DATABASE_OBJS)는 큐 객체를 링크하지 않는다. 큐를 쓰는 바이너리만 QUEUE_OBJS를 더한다.
 
 QUEUE_OBJS = $(BUILD_DIR)/queue/ack_queue.o $(BUILD_DIR)/queue/ack_queue_sql.o
 QUEUE_TESTS = test_ack_queue test_ack_queue_fault test_ack_queue_capi
 QUEUE_BINS = $(addprefix $(BUILD_DIR)/,$(QUEUE_TESTS))
 
-$(QUEUE_BINS): $(BUILD_DIR)/%: $(BUILD_DIR)/tests/%.o $(QUEUE_OBJS) $(DATABASE_OBJS)
+$(QUEUE_BINS): $(BUILD_DIR)/%: $(BUILD_DIR)/tests/%.o $(QUEUE_OBJS) $(BUILD_DIR)/sql/session.o $(DATABASE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test-ack-queue: $(QUEUE_BINS)
@@ -21,7 +22,7 @@ test-ack-queue: $(QUEUE_BINS)
 QUEUE_SHARED_EXT = $(if $(filter Darwin,$(UNAME_S)),dylib,so)
 QUEUE_SHARED_LIB = $(BUILD_DIR)/queue-shared/liblrnackq.$(QUEUE_SHARED_EXT)
 QUEUE_SHARED_SRCS = $(patsubst $(BUILD_DIR)/%.o,$(SRC_DIR)/%.c,$(DATABASE_OBJS)) \
-                    src/queue/ack_queue.c src/queue/ack_queue_sql.c src/queue/ack_queue_capi.c
+                    src/sql/session.c src/queue/ack_queue.c src/queue/ack_queue_sql.c src/queue/ack_queue_capi.c
 
 $(QUEUE_SHARED_LIB): $(QUEUE_SHARED_SRCS) $(wildcard include/*/*.h) $(wildcard src/queue/*.h)
 	@mkdir -p $(dir $@)

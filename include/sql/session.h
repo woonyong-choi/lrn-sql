@@ -119,6 +119,8 @@ session_status_t session_pool_open_transactional(session_pool_t *pool, const cha
                                                  database_status_t *database_status);
 /* 상태 확인용 핸들. 호출자가 닫으면 안 된다. 세션 밖에서 직접 exec하면 직렬화·회계 계약을 우회한다. */
 database_t *session_db_handle(session_db_t *db);
+/* 세션이 속한 데이터베이스. 같은 데이터베이스의 세션인지 확인하는 데 쓴다. */
+session_db_t *session_database(const session_t *session);
 
 /* max_sessions를 넘으면 SESSION_LIMIT, 세션 구조체를 shared에 reserve하지 못하면 SESSION_NOMEM이다. */
 session_status_t session_open(session_db_t *db, session_t **out);

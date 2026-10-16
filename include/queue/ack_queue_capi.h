@@ -12,7 +12,10 @@
  * 스레드: 모든 호출은 lrndb_t의 mutex로 직렬화된다. 이 라이브러리는 mutex를 쥔 채 다른 writer를 기다리지 않는다.
  * 트랜잭션 시작과 큐의 자기 트랜잭션은 기다리지 않고 LRN_BUSY를 돌려주므로 호출자가 mutex 밖에서 다시 시도한다.
  *
- * 반환값: 0(LRN_OK)과 ackq_status_t의 숫자(1~15)가 그대로 쓰인다. 그 밖의 LRN_* 값은 아래에 있다.
+ * 세션: 문장과 큐 연산은 session.h의 세션으로 실행한다. 트랜잭션 밖의 호출은 연결 하나에 하나인 자동 commit 세션을,
+ * 트랜잭션 안의 호출은 트랜잭션마다 따로 연 세션을 쓴다. 연결의 세션 풀은 한도가 없다.
+ *
+ * 반환값: 0(LRN_OK)과 ackq_status_t의 숫자(1~16)가 그대로 쓰인다. 그 밖의 LRN_* 값은 아래에 있다.
  */
 #define LRN_OK 0
 #define LRN_EMPTY 50         /* claim할 작업이 없다 */
@@ -56,6 +59,12 @@ size_t lrn_max_result_bytes(void);
 int lrndb_open(const char *path, int create, lrndb_t **out);
 /* 살아 있는 큐 핸들(lrnq_t)이나 트랜잭션(lrntxn_t)이 있으면 ACKQ_BUSY이고 핸들은 그대로다. 먼저 닫는다. */
 int lrndb_close(lrndb_t **db);
+/*
+ * 지금 실행 중인 문장이나 큐 연산 하나를 취소한다. mutex를 쥐지 않으므로 다른 스레드에서 부른다. 취소된 문장은
+ * RESULT_E_CANCELLED 오류 결과(큐 연산은 ACKQ_CANCELLED)이며 게시를 시작한 문장은 실제 결과로 끝난다. 끝나는 순간과
+ * 겹친 요청은 같은 세션의 다음 문장 하나에 적용될 수 있다(session_cancel 계약).
+ */
+void lrndb_cancel(lrndb_t *db);
 
 /*
  * SQL 문장 하나를 실행한다. txn이 NULL이 아니면 그 트랜잭션 안에서 실행한다. 성공하면 *out에 결과를 인코딩한 버퍼를

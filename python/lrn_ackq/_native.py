@@ -114,6 +114,8 @@ def _declare(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.lrn_max_result_bytes.restype = size
     lib.lrndb_open.argtypes = [c.c_char_p, c.c_int, pptr]
     lib.lrndb_close.argtypes = [pptr]
+    lib.lrndb_cancel.argtypes = [ptr]
+    lib.lrndb_cancel.restype = None
     lib.lrndb_exec.argtypes = [ptr, ptr, c.c_char_p, c.POINTER(Param), size, pptr, c.POINTER(size)]
     lib.lrndb_begin.argtypes = [ptr, pptr]
     lib.lrndb_commit.argtypes = [pptr]

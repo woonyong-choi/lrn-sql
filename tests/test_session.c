@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "sql/session.h"
+#include "storage/page_file.h"
 
 /*
  * 세션·자원 수명 계약 검사. DB 단독 경로(공개 session API만 사용)를 확인한다. 큐가 없으므로 이 파일은 큐를 거친
@@ -373,6 +374,56 @@ static void test_query_limit_boundary(void)
         }
     }
     clean_dir();
+}
+
+/* #79: 읽기 캐시 프레임은 데이터베이스의 상주 몫이라 shared 예산에 들어가고, 그 몫 때문에 경계에서 열기가 거절된다 */
+static size_t create_peak_with_cache(size_t pages, size_t *resident)
+{
+    page_file_set_default_cache_pages(pages);
+    fresh_dir();
+    session_limits_t limits = big_limits();
+    session_pool_t *pool;
+    assert(session_pool_open(&limits, &pool) == SESSION_OK);
+    size_t pool_only = pool_stats(pool).shared_used;
+    session_db_t *db;
+    database_status_t ds;
+    assert(session_pool_create_database(pool, DB_PATH, &db, &ds) == SESSION_OK);
+    *resident = pool_stats(pool).shared_used - pool_only;
+    size_t peak = pool_stats(pool).shared_peak;
+    assert(session_pool_close_database(db, &ds) == SESSION_OK);
+    assert(session_pool_close(pool) == SESSION_OK);
+    clean_dir();
+    return peak;
+}
+
+static void test_cache_counts_in_shared_budget(void)
+{
+    printf("읽기 캐시가 shared 예산에 든다\n");
+    size_t none, few, full;
+    size_t peak_none = create_peak_with_cache(0, &none);
+    create_peak_with_cache(16, &few);
+    size_t peak_full = create_peak_with_cache(PAGE_FILE_CACHE_PAGES, &full);
+    CHECK(none < few && few < full && full - none >= (size_t)PAGE_FILE_CACHE_PAGES * PAGE_FILE_PAGE_BYTES / 2,
+          "캐시 0·16·%u장 상주 몫 %zu < %zu < %zu", PAGE_FILE_CACHE_PAGES, none, few, full);
+    /* 캐시 없이 열리는 한도라도 캐시를 켜면 거절된다 */
+    session_limits_t limits = big_limits();
+    limits.shared_limit = peak_full - 1;
+    CHECK(peak_none <= limits.shared_limit, "캐시 없는 열기 최대 %zu <= 한도 %zu", peak_none, limits.shared_limit);
+    for (int cached = 0; cached < 2; cached++) {
+        page_file_set_default_cache_pages(cached ? PAGE_FILE_CACHE_PAGES : 0);
+        fresh_dir();
+        session_pool_t *pool;
+        assert(session_pool_open(&limits, &pool) == SESSION_OK);
+        session_db_t *db = NULL;
+        database_status_t ds;
+        session_status_t st = session_pool_create_database(pool, DB_PATH, &db, &ds);
+        CHECK(cached ? st == SESSION_NOMEM : st == SESSION_OK, "캐시 %s: 한도 %zu에서 열기 %s", cached ? "켬" : "끔",
+              limits.shared_limit, cached ? "거절" : "허용");
+        if (st == SESSION_OK) assert(session_pool_close_database(db, &ds) == SESSION_OK);
+        assert(session_pool_close(pool) == SESSION_OK);
+        clean_dir();
+    }
+    page_file_set_default_cache_pages(PAGE_FILE_CACHE_PAGES);
 }
 
 static void test_shared_limit(void)
@@ -794,6 +845,7 @@ int main(void)
     test_cancel_option();
     test_query_limit_boundary();
     test_shared_limit();
+    test_cache_counts_in_shared_budget();
     test_result_counts_against_limits();
     test_alloc_failure_sweep();
     test_threads();

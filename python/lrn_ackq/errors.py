@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __all__ = [
     "BusyError",
+    "CancelledError",
     "ConflictError",
     "DatabaseOpenError",
     "InternalError",
@@ -92,6 +93,10 @@ class InternalError(LrnAckqError):
     """라이브러리가 기대하지 못한 응답."""
 
 
+class CancelledError(LrnAckqError):
+    """Database.cancel로 큐 연산이 취소됐다. 자기 트랜잭션이면 반영하지 않았다."""
+
+
 class DatabaseOpenError(LrnAckqError):
     """database 열기 실패(없음·잠김·손상·형식 미지원)."""
 
@@ -121,6 +126,7 @@ _BY_STATUS: dict[int, type[LrnAckqError]] = {
     13: PoisonedError,
     14: TransactionFailedError,
     15: InternalError,
+    16: CancelledError,
     101: DatabaseOpenError,
     102: DatabaseOpenError,
     103: DatabaseOpenError,
