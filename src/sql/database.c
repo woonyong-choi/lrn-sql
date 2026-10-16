@@ -1379,6 +1379,16 @@ static database_exec_status_t scan_keys(database_t *db, heap_t *heap, size_t n, 
     return status;
 }
 
+/* RETURNING: 바뀐 행마다 목록을 계산해 결과 행으로 모은다. 목록이 없으면 명령 결과를 만든다 */
+typedef struct returning returning_t;
+static database_exec_status_t returning_open(database_t *db, const sqlstmt_returning_t *spec,
+                                             const catalog_table_view_t *view, const sqlstmt_name_t *table,
+                                             returning_t **out);
+static database_exec_status_t returning_row(returning_t *ret, const value_t *row);
+static database_exec_status_t returning_finish(database_t *db, returning_t *ret, const char *tag, uint64_t affected,
+                                               result_t **success);
+static void returning_close(database_t *db, returning_t *ret);
+
 static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t *insert, result_t **out)
 {
     database_exec_status_t status = DATABASE_EXEC_OK;
@@ -1386,6 +1396,9 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
     catalog_table_view_t view;
     if (!lookup_table(db, &insert->table, &id, &view, &status)) return status;
     size_t n = view.column_count;
+    returning_t *ret = NULL;
+    status = returning_open(db, &insert->returning, &view, &insert->table, &ret);
+    if (status != DATABASE_EXEC_OK) return status;
 
     size_t cells_bytes = n * sizeof(value_t), source_bytes = n * sizeof(size_t), views_bytes = n * sizeof(value_view_t);
     value_t *cells = q_calloc(db, n, sizeof(*cells));
@@ -1536,15 +1549,15 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
             status = heap_failure(db, inserted, "insert");
             goto done;
         }
+        status = returning_row(ret, cells);
+        if (status != DATABASE_EXEC_OK) goto done;
     }
     if (catalog_set_row_count(work.cat, id, view.row_count + insert->row_count) != CATALOG_OK) {
         status = fail_result(db, RESULT_E_LIMIT, 14, "행 수 한도를 넘습니다");
         goto done;
     }
-    if (open_command(db, "INSERT", insert->row_count, &success) != RESULT_OK) {
-        status = DATABASE_EXEC_NOMEM;
-        goto done;
-    }
+    status = returning_finish(db, ret, "INSERT", insert->row_count, &success);
+    if (status != DATABASE_EXEC_OK) goto done;
     status = publish(db, &work, id, batch, NULL, 0, success, out);
     success = NULL;
     batch = NULL;
@@ -1556,6 +1569,7 @@ done:
     result_release(&success);
     if (earlier != NULL) owned_clear(db, earlier, earlier_count);
     q_free(db, earlier, earlier_bytes);
+    returning_close(db, ret);
     q_free(db, views, views_bytes);
     if (cells != NULL) owned_clear(db, cells, n);
     q_free(db, cells, cells_bytes);
@@ -1584,8 +1598,11 @@ typedef struct {
     database_t *db;
     select_out_t *outs;
     size_t out_count;
+    size_t outs_bytes;
     select_key_t *keys;
     size_t key_count;
+    size_t keys_bytes;
+    result_column_t *columns;   /* out_count개 결과 열 */
     bool distinct;
     bool buffered;              /* ORDER BY·DISTINCT는 모아서 정렬한다 */
     bool has_limit;
@@ -1603,6 +1620,42 @@ typedef struct {
 } select_ctx_t;
 
 static size_t select_width(const select_ctx_t *ctx) { return ctx->out_count + ctx->key_count; }
+
+/* 출력 열이 정해진 뒤 결과 열·계산 자리·결과 builder를 만든다 */
+static database_exec_status_t select_prepare(select_ctx_t *ctx)
+{
+    database_t *db = ctx->db;
+    ctx->columns = q_malloc(db, (ctx->out_count > 0 ? ctx->out_count : 1) * sizeof(result_column_t));
+    ctx->cells = q_calloc(db, ctx->out_count > 0 ? ctx->out_count : 1, sizeof(value_t));
+    ctx->views = q_malloc(db, (ctx->out_count > 0 ? ctx->out_count : 1) * sizeof(value_view_t));
+    if (ctx->columns == NULL || ctx->cells == NULL || ctx->views == NULL) return DATABASE_EXEC_NOMEM;
+    for (size_t i = 0; i < ctx->out_count; i++) ctx->columns[i] = ctx->outs[i].meta;
+    result_builder_spec_t spec = {ctx->columns, ctx->out_count, NULL};
+    result_status_t created = result_builder_create_ex(&spec, &db->ledger, &ctx->builder);
+    if (created == RESULT_NOMEM) return DATABASE_EXEC_NOMEM;
+    if (created != RESULT_OK) return fail_result(db, RESULT_E_LIMIT, 15, "결과 컬럼 한도를 넘습니다");
+    return DATABASE_EXEC_OK;
+}
+
+static void select_rows_free(select_ctx_t *ctx);
+
+static void select_ctx_free(select_ctx_t *ctx)
+{
+    database_t *db = ctx->db;
+    size_t slots = ctx->out_count > 0 ? ctx->out_count : 1;
+    result_builder_destroy(&ctx->builder);
+    select_rows_free(ctx);
+    if (ctx->cells != NULL) owned_clear(db, ctx->cells, ctx->out_count);
+    q_free(db, ctx->cells, slots * sizeof(value_t));
+    q_free(db, ctx->views, slots * sizeof(value_view_t));
+    q_free(db, ctx->columns, slots * sizeof(result_column_t));
+    for (size_t i = 0; ctx->outs != NULL && i < ctx->out_count; i++) sqleval_free(ctx->outs[i].prog);
+    q_free(db, ctx->outs, ctx->outs_bytes);
+    for (size_t k = 0; ctx->keys != NULL && k < ctx->key_count; k++) sqleval_free(ctx->keys[k].prog);
+    q_free(db, ctx->keys, ctx->keys_bytes);
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->db = db;
+}
 
 static void select_rows_free(select_ctx_t *ctx)
 {
@@ -1978,8 +2031,8 @@ static result_column_t column_meta(const resolver_t *resolver, size_t column)
 }
 
 /* 선택 목록을 출력 열로 펼친다. *는 모든 원본의 열, t.*는 그 원본의 열이다 */
-static database_exec_status_t plan_outputs(database_t *db, const sqlstmt_select_t *select, const compile_ctx_t *cc,
-                                           select_ctx_t *ctx, size_t *outs_bytes)
+static database_exec_status_t plan_outputs(database_t *db, const sqlstmt_select_item_t *items, size_t item_count,
+                                           const compile_ctx_t *cc, select_ctx_t *ctx)
 {
     const resolver_t *resolver = cc->table;
     size_t width = resolver->count > 0 ? resolver->sources[resolver->count - 1].offset +
@@ -1987,8 +2040,8 @@ static database_exec_status_t plan_outputs(database_t *db, const sqlstmt_select_
                                        : 0;
     database_exec_status_t status = DATABASE_EXEC_OK;
     size_t total = 0;
-    for (size_t i = 0; i < select->item_count; i++) {
-        const sqlstmt_select_item_t *item = &select->items[i];
+    for (size_t i = 0; i < item_count; i++) {
+        const sqlstmt_select_item_t *item = &items[i];
         if (!item->star) {
             total++;
             continue;
@@ -2008,11 +2061,11 @@ static database_exec_status_t plan_outputs(database_t *db, const sqlstmt_select_
         }
         total += resolver->sources[at].view->column_count;
     }
-    *outs_bytes = (total > 0 ? total : 1) * sizeof(select_out_t);
+    ctx->outs_bytes = (total > 0 ? total : 1) * sizeof(select_out_t);
     ctx->outs = q_calloc(db, total > 0 ? total : 1, sizeof(select_out_t));
     if (ctx->outs == NULL) return DATABASE_EXEC_NOMEM;
-    for (size_t i = 0; i < select->item_count && status == DATABASE_EXEC_OK; i++) {
-        const sqlstmt_select_item_t *item = &select->items[i];
+    for (size_t i = 0; i < item_count && status == DATABASE_EXEC_OK; i++) {
+        const sqlstmt_select_item_t *item = &items[i];
         if (item->star) {
             size_t from = 0, to = width;
             if (item->qualifier.size > 0) {
@@ -2058,10 +2111,10 @@ static database_exec_status_t plan_outputs(database_t *db, const sqlstmt_select_
 
 /* ORDER BY를 정렬 키로 바꾼다. 정수 리터럴은 선택 목록 번호, 한정 없는 이름이 별칭과 같으면 그 출력 열이다 */
 static database_exec_status_t plan_keys(database_t *db, const sqlstmt_select_t *select, const compile_ctx_t *cc,
-                                        select_ctx_t *ctx, size_t *keys_bytes)
+                                        select_ctx_t *ctx)
 {
     database_exec_status_t status = DATABASE_EXEC_OK;
-    *keys_bytes = (select->order_count > 0 ? select->order_count : 1) * sizeof(select_key_t);
+    ctx->keys_bytes = (select->order_count > 0 ? select->order_count : 1) * sizeof(select_key_t);
     ctx->keys = q_calloc(db, select->order_count > 0 ? select->order_count : 1, sizeof(select_key_t));
     if (ctx->keys == NULL) return DATABASE_EXEC_NOMEM;
     for (size_t k = 0; k < select->order_count && status == DATABASE_EXEC_OK; k++) {
@@ -2833,8 +2886,6 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     memset(&plan, 0, sizeof(plan));
     group_rows_t groups = {db, &plan, NULL, 0, 0};
     sqleval_prog_t *having = NULL;
-    size_t outs_bytes = 0, keys_bytes = 0, cells_bytes = 0, views_bytes = 0, columns_bytes = 0;
-    result_column_t *columns = NULL;
     join_t join;
     database_exec_status_t status = join_open(db, select, &join);
     if (status != DATABASE_EXEC_OK) goto done;
@@ -2847,9 +2898,9 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         if (status != DATABASE_EXEC_OK) goto done;
         cc = (compile_ctx_t){group_resolve, group_match, &plan, &resolver};
     }
-    status = plan_outputs(db, select, &cc, &ctx, &outs_bytes);
+    status = plan_outputs(db, select->items, select->item_count, &cc, &ctx);
     if (status != DATABASE_EXEC_OK) goto done;
-    status = plan_keys(db, select, &cc, &ctx, &keys_bytes);
+    status = plan_keys(db, select, &cc, &ctx);
     if (status != DATABASE_EXEC_OK) goto done;
     if (select->having != NULL) {
         if (!compile_in(db, select->having, &cc, &having, &status)) goto done;
@@ -2865,17 +2916,8 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     ctx.distinct = select->distinct;
     ctx.buffered = select->distinct || ctx.key_count > 0;
 
-    columns_bytes = ctx.out_count * sizeof(result_column_t);
-    cells_bytes = ctx.out_count * sizeof(value_t);
-    views_bytes = ctx.out_count * sizeof(value_view_t);
-    columns = q_malloc(db, columns_bytes);
-    ctx.cells = q_calloc(db, ctx.out_count, sizeof(value_t));
-    ctx.views = q_malloc(db, views_bytes);
-    if (columns == NULL || ctx.cells == NULL || ctx.views == NULL) {
-        status = DATABASE_EXEC_NOMEM;
-        goto done;
-    }
-    for (size_t i = 0; i < ctx.out_count; i++) columns[i] = ctx.outs[i].meta;
+    status = select_prepare(&ctx);
+    if (status != DATABASE_EXEC_OK) goto done;
     /* 읽을 칸: 그룹이면 GROUP BY·집계 인자가, 아니면 출력·정렬 식이 쓰는 칸과 조건·탐침이 쓰는 칸 */
     bool *needed = join.needed;
     if (grouped) {
@@ -2895,16 +2937,6 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         }
     }
 
-    result_builder_spec_t spec = {columns, ctx.out_count, NULL};
-    result_status_t created = result_builder_create_ex(&spec, &db->ledger, &ctx.builder);
-    if (created == RESULT_NOMEM) {
-        status = DATABASE_EXEC_NOMEM;
-        goto done;
-    }
-    if (created != RESULT_OK) {
-        status = fail_result(db, RESULT_E_LIMIT, 15, "결과 컬럼 한도를 넘습니다");
-        goto done;
-    }
     if (ctx.has_limit && ctx.limit == 0) ctx.done = true;
     for (size_t l = 0; l < join.level_count; l++) {
         heap_status_t opened = open_heap(db, &join.levels[l].view, join.levels[l].id, &join.levels[l].heap);
@@ -2933,21 +2965,63 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     }
     *out = rows;
 done:
-    result_builder_destroy(&ctx.builder);
     group_rows_free(&groups);
-    select_rows_free(&ctx);
+    select_ctx_free(&ctx);
     sqleval_free(having);
-    if (ctx.cells != NULL) owned_clear(db, ctx.cells, ctx.out_count);
-    q_free(db, ctx.cells, cells_bytes);
-    q_free(db, ctx.views, views_bytes);
-    q_free(db, columns, columns_bytes);
-    for (size_t i = 0; ctx.outs != NULL && i < ctx.out_count; i++) sqleval_free(ctx.outs[i].prog);
-    q_free(db, ctx.outs, outs_bytes);
-    for (size_t k = 0; ctx.keys != NULL && k < ctx.key_count; k++) sqleval_free(ctx.keys[k].prog);
-    q_free(db, ctx.keys, keys_bytes);
     group_plan_free(db, &plan);
     join_free(&join);
     return status;
+}
+
+/* ── RETURNING ── */
+
+struct returning {
+    select_ctx_t ctx;
+    source_ref_t source;
+    resolver_t resolver;
+};
+
+static database_exec_status_t returning_open(database_t *db, const sqlstmt_returning_t *spec,
+                                             const catalog_table_view_t *view, const sqlstmt_name_t *table,
+                                             returning_t **out)
+{
+    *out = NULL;
+    if (spec->count == 0) return DATABASE_EXEC_OK;
+    returning_t *ret = q_calloc(db, 1, sizeof(*ret));
+    if (ret == NULL) return DATABASE_EXEC_NOMEM;
+    ret->ctx.db = db;
+    ret->source = (source_ref_t){view, table, NULL, 0, false};
+    ret->resolver = (resolver_t){&ret->source, 1};
+    compile_ctx_t cc = {resolve_column, NULL, &ret->resolver, &ret->resolver};
+    database_exec_status_t status = plan_outputs(db, spec->items, spec->count, &cc, &ret->ctx);
+    if (status == DATABASE_EXEC_OK) status = select_prepare(&ret->ctx);
+    if (status != DATABASE_EXEC_OK) {
+        returning_close(db, ret);
+        return status;
+    }
+    *out = ret;
+    return DATABASE_EXEC_OK;
+}
+
+static database_exec_status_t returning_row(returning_t *ret, const value_t *row)
+{
+    return ret != NULL ? select_emit(&ret->ctx, row) : DATABASE_EXEC_OK;
+}
+
+static database_exec_status_t returning_finish(database_t *db, returning_t *ret, const char *tag, uint64_t affected,
+                                               result_t **success)
+{
+    if (ret == NULL) return open_command(db, tag, affected, success) == RESULT_OK ? DATABASE_EXEC_OK : DATABASE_EXEC_NOMEM;
+    result_status_t finished = result_builder_finish(&ret->ctx.builder, success);
+    if (finished == RESULT_NOMEM) return DATABASE_EXEC_NOMEM;
+    return finished == RESULT_OK ? DATABASE_EXEC_OK : fail_result(db, RESULT_E_LIMIT, 17, "결과를 만들지 못했습니다");
+}
+
+static void returning_close(database_t *db, returning_t *ret)
+{
+    if (ret == NULL) return;
+    select_ctx_free(&ret->ctx);
+    q_free(db, ret, sizeof(*ret));
 }
 
 /* ── UPDATE · DELETE ── */
@@ -3210,6 +3284,9 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
     size_t n = view.column_count;
     source_ref_t source = {&view, &update->table, NULL, 0, false};
     resolver_t resolver = {&source, 1};
+    returning_t *ret = NULL;
+    status = returning_open(db, &update->returning, &view, &update->table, &ret);
+    if (status != DATABASE_EXEC_OK) return status;
     size_t assign_count = update->assignment_count;
     size_t columns_bytes = (assign_count > 0 ? assign_count : 1) * sizeof(size_t);
     size_t progs_bytes = (assign_count > 0 ? assign_count : 1) * sizeof(sqleval_prog_t *);
@@ -3268,10 +3345,8 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
                              scan_all ? keep_other_key : NULL, &other);
     if (status != DATABASE_EXEC_OK) goto done;
     if (matches.count == 0) {
-        if (open_command(db, "UPDATE", 0, &success) != RESULT_OK) {
-            status = DATABASE_EXEC_NOMEM;
-            goto done;
-        }
+        status = returning_finish(db, ret, "UPDATE", 0, &success);
+        if (status != DATABASE_EXEC_OK) goto done;
         *out = success;
         success = NULL;
         goto done;
@@ -3381,11 +3456,16 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
             status = heap_failure(db, changed, "update");
             goto done;
         }
+        if (ret != NULL) {
+            /* 바뀐 행: 옛 행 값과 새 값을 빌려 쓴다 */
+            for (size_t i = 0; i < n; i++) row[i] = (value_t){views[i], false};
+            status = returning_row(ret, row);
+            memset(row, 0, n * sizeof(*row));
+            if (status != DATABASE_EXEC_OK) goto done;
+        }
     }
-    if (open_command(db, "UPDATE", matches.count, &success) != RESULT_OK) {
-        status = DATABASE_EXEC_NOMEM;
-        goto done;
-    }
+    status = returning_finish(db, ret, "UPDATE", matches.count, &success);
+    if (status != DATABASE_EXEC_OK) goto done;
     status = publish(db, &work, id, batch, NULL, 0, success, out);
     success = NULL;
     batch = NULL;
@@ -3408,6 +3488,7 @@ done:
     q_free(db, progs, progs_bytes);
     q_free(db, targets, columns_bytes);
     where_clear(db, &where);
+    returning_close(db, ret);
     return status;
 }
 
@@ -3420,10 +3501,13 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
     size_t n = view.column_count;
     source_ref_t source = {&view, &del->table, NULL, 0, false};
     resolver_t resolver = {&source, 1};
-
+    returning_t *ret = NULL;
+    status = returning_open(db, &del->returning, &view, &del->table, &ret);
+    if (status != DATABASE_EXEC_OK) return status;
     size_t row_bytes = n * sizeof(value_t);
     value_t *row = q_calloc(db, n, sizeof(*row));
-    bool keep_values = catalog_index_count(base_catalog(db), id) > 0;
+    /* 보조 색인을 지우거나 RETURNING으로 돌려줄 때는 지울 행의 값을 쥔다 */
+    bool keep_values = catalog_index_count(base_catalog(db), id) > 0 || ret != NULL;
     size_t views_bytes = keep_values ? n * sizeof(value_view_t) : 0;
     value_view_t *views = keep_values ? q_malloc(db, views_bytes) : NULL;
     heap_t *heap = NULL;
@@ -3446,10 +3530,8 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
     status = collect_matches(db, &view, id, heap, &where, row, keep_values, false, &matches, NULL, NULL);
     if (status != DATABASE_EXEC_OK) goto done;
     if (matches.count == 0) {
-        if (open_command(db, "DELETE", 0, &success) != RESULT_OK) {
-            status = DATABASE_EXEC_NOMEM;
-            goto done;
-        }
+        status = returning_finish(db, ret, "DELETE", 0, &success);
+        if (status != DATABASE_EXEC_OK) goto done;
         *out = success;
         success = NULL;
         goto done;
@@ -3482,15 +3564,15 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
             status = heap_failure(db, removed, "delete");
             goto done;
         }
+        status = returning_row(ret, matches.items[m].cells);
+        if (status != DATABASE_EXEC_OK) goto done;
     }
     if (catalog_set_row_count(work.cat, id, view.row_count - matches.count) != CATALOG_OK) {
         status = fail_result(db, RESULT_E_INTERNAL, 18, "행 수를 갱신하지 못했습니다");
         goto done;
     }
-    if (open_command(db, "DELETE", matches.count, &success) != RESULT_OK) {
-        status = DATABASE_EXEC_NOMEM;
-        goto done;
-    }
+    status = returning_finish(db, ret, "DELETE", matches.count, &success);
+    if (status != DATABASE_EXEC_OK) goto done;
     status = publish(db, &work, id, batch, NULL, 0, success, out);
     success = NULL;
     batch = NULL;
@@ -3505,6 +3587,7 @@ done:
     q_free(db, row, row_bytes);
     q_free(db, views, views_bytes);
     where_clear(db, &where);
+    returning_close(db, ret);
     return status;
 }
 

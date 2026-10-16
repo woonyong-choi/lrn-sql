@@ -29,12 +29,12 @@ static const char *const RESERVED[] = {
     "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
     "INDEX", "UNIQUE", "AND", "OR", "IN", "BETWEEN", "LIKE", "ESCAPE", "CASE", "WHEN", "THEN",
     "ELSE", "END", "CAST", "AS", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "DISTINCT",
-    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", NULL};
+    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", "RETURNING", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
     "ALL", "RIGHT", "FULL", "NATURAL",
-    "UNION", "EXCEPT", "INTERSECT", "RETURNING", "ON", "USING", "WINDOW", "OVER", "WITH", NULL};
+    "UNION", "EXCEPT", "INTERSECT", "USING", "WINDOW", "OVER", "WITH", NULL};
 
 static bool fail(parser_t *p, sqlstmt_status_t status, sqlstmt_reason_t reason, size_t offset)
 {
@@ -183,6 +183,16 @@ static void names_clear(sqlstmt_name_t *names, size_t count)
     free(names);
 }
 
+static void items_free(sqlstmt_select_item_t *items, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        expr_free(items[i].expr);
+        name_clear(&items[i].qualifier);
+        name_clear(&items[i].alias);
+    }
+    free(items);
+}
+
 void sqlstmt_free(sqlstmt_t *statement)
 {
     if (statement == NULL) return;
@@ -206,14 +216,10 @@ void sqlstmt_free(sqlstmt_t *statement)
             }
             free(statement->insert.values);
             name_clear(&statement->insert.table);
+            items_free(statement->insert.returning.items, statement->insert.returning.count);
             break;
         case SQLSTMT_SELECT:
-            for (size_t i = 0; i < statement->select.item_count; i++) {
-                expr_free(statement->select.items[i].expr);
-                name_clear(&statement->select.items[i].qualifier);
-                name_clear(&statement->select.items[i].alias);
-            }
-            free(statement->select.items);
+            items_free(statement->select.items, statement->select.item_count);
             for (size_t i = 0; i < statement->select.order_count; i++) expr_free(statement->select.order[i].expr);
             for (size_t i = 0; i < statement->select.group_count; i++) expr_free(statement->select.group_by[i]);
             free(statement->select.group_by);
@@ -237,10 +243,12 @@ void sqlstmt_free(sqlstmt_t *statement)
             free(statement->update.assignments);
             expr_free(statement->update.where);
             name_clear(&statement->update.table);
+            items_free(statement->update.returning.items, statement->update.returning.count);
             break;
         case SQLSTMT_DELETE:
             expr_free(statement->del.where);
             name_clear(&statement->del.table);
+            items_free(statement->del.returning.items, statement->del.returning.count);
             break;
         case SQLSTMT_DROP_TABLE:
             name_clear(&statement->drop.table);
@@ -957,13 +965,15 @@ static bool parse_drop(parser_t *p, sqlstmt_t *statement)
     return parse_end(p);
 }
 
+static bool parse_returning(parser_t *p, sqlstmt_returning_t *returning);
+
 static bool parse_delete(parser_t *p, sqlstmt_t *statement)
 {
     statement->kind = SQLSTMT_DELETE;
     if (!expect_word(p, "FROM")) return false;
     if (!parse_name(p, &statement->del.table, false)) return false;
     if (!parse_where(p, &statement->del.where)) return false;
-    return parse_end(p);
+    return parse_returning(p, &statement->del.returning) && parse_end(p);
 }
 
 /* [AS] alias. AS가 없으면 예약어가 아닌 이름만 별칭이다 */
@@ -1015,6 +1025,20 @@ static bool parse_order(parser_t *p, sqlstmt_select_t *query)
             else return syntax_here(p, SQLSTMT_REASON_EXPECTED_KEYWORD);
             p->pos++;
         }
+    } while (take_punct(p, ","));
+    return true;
+}
+
+static bool parse_returning(parser_t *p, sqlstmt_returning_t *returning)
+{
+    if (!take_word(p, "RETURNING")) return true;
+    size_t capacity = 0;
+    do {
+        void *grown = reserve(p, returning->items, &capacity, returning->count, sizeof(*returning->items),
+                              here_offset(p));
+        if (grown == NULL) return false;
+        returning->items = grown;
+        if (!parse_select_item(p, &returning->items[returning->count++])) return false;
     } while (take_punct(p, ","));
     return true;
 }
@@ -1131,7 +1155,7 @@ static bool parse_update(parser_t *p, sqlstmt_t *statement)
         if (!expect_punct(p, "=") || !parse_expr(p, &assignment->value)) return false;
     } while (take_punct(p, ","));
     if (!parse_where(p, &update->where)) return false;
-    return parse_end(p);
+    return parse_returning(p, &update->returning) && parse_end(p);
 }
 
 static bool parse_insert(parser_t *p, sqlstmt_t *statement)
@@ -1186,7 +1210,7 @@ static bool parse_insert(parser_t *p, sqlstmt_t *statement)
         }
         insert->row_count++;
     } while (take_punct(p, ","));
-    return parse_end(p);
+    return parse_returning(p, &insert->returning) && parse_end(p);
 failed:
     /* 해제는 row_count × value_count를 따르므로 끝나지 않은 행의 값은 여기서 지운다 */
     for (size_t i = insert->row_count * insert->value_count; i < total; i++) {

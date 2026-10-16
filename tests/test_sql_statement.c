@@ -417,6 +417,25 @@ static void parameters(void)
     assert(out == NULL && live_allocations == 0);
 }
 
+static void returning_forms(void)
+{
+    sqlstmt_t *statement = parse_ok("INSERT INTO t (a) VALUES (1), (2) RETURNING *, a + 1 AS b, t.*");
+    const sqlstmt_returning_t *r = &statement->insert.returning;
+    assert(statement->insert.row_count == 2 && r->count == 3 && r->items[0].star && r->items[0].qualifier.size == 0);
+    assert(name_is(&r->items[1].alias, "b") && r->items[2].star && name_is(&r->items[2].qualifier, "t"));
+    free_clean(statement);
+    statement = parse_ok("UPDATE t SET a = a + 1 WHERE b = 2 RETURNING a");
+    assert(statement->update.where != NULL && statement->update.returning.count == 1 &&
+           is_column(statement->update.returning.items[0].expr, "a"));
+    free_clean(statement);
+    statement = parse_ok("DELETE FROM t RETURNING a, b");
+    assert(statement->del.where == NULL && statement->del.returning.count == 2);
+    free_clean(statement);
+    statement = parse_ok("DELETE FROM t WHERE a = 1");
+    assert(statement->del.returning.count == 0 && statement->del.returning.items == NULL);
+    free_clean(statement);
+}
+
 static void join_forms(void)
 {
     sqlstmt_t *statement = parse_ok("SELECT * FROM a, b x CROSS JOIN c JOIN d ON d.k = a.k INNER JOIN e AS y ON TRUE "
@@ -716,7 +735,7 @@ static void select_and_where_errors(void)
     expect_syntax("SELECT a FROM t HAVING", SQLSTMT_REASON_UNEXPECTED_END, 22);
     expect_syntax("SELECT * FROM t JOIN u", SQLSTMT_REASON_UNEXPECTED_END, 22);
     expect_syntax("SELECT * FROM t LEFT u ON 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 21);
-    expect_unsupported("SELECT * FROM t CROSS JOIN u ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 29);
+    expect_syntax("SELECT * FROM t CROSS JOIN u ON 1", SQLSTMT_REASON_TRAILING_TOKENS, 29);
     expect_unsupported("SELECT * FROM t RIGHT JOIN u ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t NATURAL JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t JOIN u USING (a)", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 23);
@@ -727,7 +746,9 @@ static void select_and_where_errors(void)
     expect_unsupported("SELECT * FROM t WHERE EXISTS (SELECT 1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 22);
     expect_unsupported("SELECT * FROM t.u", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 15);
     expect_syntax("DELETE FROM t ORDER BY a", SQLSTMT_REASON_TRAILING_TOKENS, 14);
-    expect_unsupported("UPDATE t SET a = 1 RETURNING a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 19);
+    expect_syntax("UPDATE t SET a = 1 RETURNING", SQLSTMT_REASON_UNEXPECTED_END, 28);
+    expect_syntax("DELETE FROM t RETURNING a,", SQLSTMT_REASON_UNEXPECTED_END, 26);
+    expect_syntax("INSERT INTO t VALUES (1) RETURNING a b c", SQLSTMT_REASON_TRAILING_TOKENS, 39);
 }
 
 static void update_delete_drop_errors(void)
@@ -917,6 +938,7 @@ int main(void)
     parameters();
     select_forms();
     join_forms();
+    returning_forms();
     update_delete_drop();
     transaction_control();
     create_errors();
