@@ -687,6 +687,38 @@ static void test_primary_key_range(void)
     clean_dir();
 }
 
+/* #64: SELECT 결과는 열 이름·형식·NULL 가능 여부를 잃지 않는다. LEFT JOIN의 오른쪽 열은 NULL 가능이 된다 */
+static void expect_columns(database_t *db, const char *sql, const char *expected)
+{
+    result_t *result = run_bound(db, sql, NULL, 0);
+    char got[256];
+    size_t used = 0;
+    got[0] = '\0';
+    for (size_t i = 0; i < result_column_count(result); i++) {
+        const result_column_t *column = result_column(result, i);
+        used += (size_t)snprintf(got + used, sizeof(got) - used, "%s%.*s:%d%s", i ? "," : "", (int)column->name_len,
+                                 (const char *)column->name, (int)column->type, column->is_nullable ? "?" : "");
+    }
+    CHECK(strcmp(got, expected) == 0, "%s\n      기대: %s\n      실제: %s", sql, expected, got);
+    result_release(&result);
+}
+
+static void test_result_column_metadata(void)
+{
+    printf("\n[test_result_column_metadata]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE p (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, score REAL, pic BLOB)");
+    exec_ok(db, "CREATE TABLE o (oid INTEGER PRIMARY KEY, pid INTEGER NOT NULL)");
+    expect_columns(db, "SELECT * FROM p", "id:1,name:3,score:2?,pic:4?");
+    expect_columns(db, "SELECT p.id, o.oid, o.pid FROM p LEFT JOIN o ON o.pid = p.id", "id:1,oid:1?,pid:1?");
+    /* 계산한 열(식·집계·GROUP BY 출력)은 NULL일 수 있다고 보수적으로 표시한다. NULL 가능은 "NULL일 수 있다"는 뜻이다 */
+    expect_columns(db, "SELECT name AS who, score * 2 AS doubled, COUNT(*) AS n FROM p GROUP BY name, score",
+                   "who:3?,doubled:2?,n:1?");
+    expect_columns(db, "SELECT NULL AS nothing, 'x' AS t", "nothing:0?,t:3?");
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+
 static void test_text_primary_key_index(void)
 {
     printf("\n[test_text_primary_key_index]\n");
@@ -1124,6 +1156,7 @@ int main(void)
     test_many_rows_updates_and_deletes_across_pages();
     test_identity_and_primary_key_rules();
     test_text_primary_key_index();
+    test_result_column_metadata();
     test_primary_key_range();
     test_secondary_index_crud();
     test_secondary_index_many_duplicates();

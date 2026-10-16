@@ -2987,8 +2987,11 @@ static size_t star_source(const resolver_t *resolver, const sqlstmt_name_t *qual
 static result_column_t column_meta(const resolver_t *resolver, size_t column)
 {
     const source_ref_t *source = &resolver->sources[source_of(resolver, column)];
-    const catalog_column_t *def = &source->view->columns[column - source->offset];
-    return (result_column_t){(const uint8_t *)def->name, def->name_bytes, def->type, !def->not_null || source->nullable};
+    size_t at = column - source->offset;
+    const catalog_column_t *def = &source->view->columns[at];
+    /* 기본 키는 NOT NULL을 적지 않아도(AUTOINCREMENT) 저장된 값이 NULL일 수 없다 */
+    bool stored_nullable = !def->not_null && at != source->view->primary_key_column;
+    return (result_column_t){(const uint8_t *)def->name, def->name_bytes, def->type, stored_nullable || source->nullable};
 }
 
 /* 선택 목록을 출력 열로 펼친다. *는 모든 원본의 열, t.*는 그 원본의 열이다 */

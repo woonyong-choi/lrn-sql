@@ -41,14 +41,31 @@ class Closable(Protocol):
         """자원을 놓는다."""
 
 
+_TYPE_NAMES = {1: "INTEGER", 2: "REAL", 3: "TEXT", 4: "BLOB"}
+
+
+@dataclass(frozen=True)
+class Column:
+    """결과 열 하나. type은 INTEGER·REAL·TEXT·BLOB이며 식의 형식을 정하지 못했으면 None이다."""
+
+    name: str
+    type: str | None
+    nullable: bool
+
+
 @dataclass(frozen=True)
 class Result:
-    """문장 실행 결과. 행이 있으면 columns·rows, 명령이면 tag·affected_rows."""
+    """문장 실행 결과. 행이 있으면 column_info·rows, 명령이면 tag·affected_rows."""
 
-    columns: tuple[str, ...] = ()
+    column_info: tuple[Column, ...] = ()
     rows: tuple[tuple[SqlValue, ...], ...] = ()
     tag: str = ""
     affected_rows: int = 0
+
+    @property
+    def columns(self) -> tuple[str, ...]:
+        """열 이름."""
+        return tuple(column.name for column in self.column_info)
 
 
 def status_name(status: int) -> str:
@@ -154,11 +171,15 @@ def decode_result(data: bytes) -> Result:
         raise SqlError(
             reader.text() or f"sql error class {error_class}", error_class=error_class, error_code=error_code
         )
-    columns = tuple(reader.text() for _ in range(int(reader.unpack("<I"))))
+    columns = []
+    for _ in range(int(reader.unpack("<I"))):
+        name = reader.text()
+        kind = int(reader.unpack("<B"))
+        columns.append(Column(name, _TYPE_NAMES.get(kind), bool(reader.unpack("<B"))))
     rows: list[tuple[SqlValue, ...]] = []
     while int(reader.unpack("<B")) == 1:
         rows.append(tuple(_decode_cell(reader) for _ in columns))
-    return Result(columns=columns, rows=tuple(rows))
+    return Result(column_info=tuple(columns), rows=tuple(rows))
 
 
 def run_sql(
