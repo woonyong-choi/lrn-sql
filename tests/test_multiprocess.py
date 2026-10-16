@@ -1,4 +1,4 @@
-"""여러 프로세스가 같은 파일을 쓰는 동작을 시험한다(#199). 합성 데이터만 쓴다.
+"""여러 프로세스가 같은 파일을 쓰고 읽는 동작을 시험한다(#199, #200). 합성 데이터만 쓴다.
 
 worker는 spawn으로 띄운 별도 프로세스이고 각자 파일을 연다. 작업 하나를 claim하고, 처리 기록을 업무 테이블에 넣고,
 ack하는 것을 한 트랜잭션으로 확정한다. 처리 기록의 기본 키가 작업 id이므로 같은 작업을 두 번 처리하면 commit이
@@ -172,3 +172,78 @@ def test_killed_writer_leaves_no_half_applied_transaction(tmp_path: Path) -> Non
     assert rows == total
     survivor.execute("INSERT INTO log (worker, n, pad) VALUES (0, 0, X'00')")
     survivor.close()
+
+
+def _hold_big_transaction(path: str, started: multiprocessing.Event, release: multiprocessing.Event) -> None:
+    db = Database(path, create=False, busy_timeout_s=60)
+    with db.begin() as txn:
+        for i in range(200):
+            txn.execute("INSERT INTO big (id, pad) VALUES (?, ?)", (1000 + i, b"y" * 20000))
+        started.set()
+        release.wait(timeout=60)
+    db.close()
+
+
+def test_reads_do_not_wait_for_another_process_writing(tmp_path: Path) -> None:
+    path = tmp_path / "read.totedb"
+    db = Database(path)
+    db.execute("CREATE TABLE big (id INTEGER PRIMARY KEY, pad BLOB)")
+    db.execute("INSERT INTO big VALUES (1, X'00')")
+    started, release = SPAWN.Event(), SPAWN.Event()
+    writer = SPAWN.Process(target=_hold_big_transaction, args=(str(path), started, release))
+    writer.start()
+    try:
+        assert started.wait(timeout=60)
+        # writer가 4MB를 쓴 거래를 쥐고 있는 동안 조회는 기다리지 않고 commit 전 상태를 읽는다
+        slowest = 0.0
+        for _ in range(50):
+            began = time.perf_counter()
+            assert db.execute("SELECT COUNT(*) FROM big").rows == ((1,),)
+            slowest = max(slowest, time.perf_counter() - began)
+        assert slowest < 0.5, f"가장 느린 조회 {slowest:.3f}s"
+    finally:
+        release.set()
+        writer.join(timeout=60)
+    assert writer.exitcode == 0
+    assert db.execute("SELECT COUNT(*) FROM big").rows == ((201,),)
+    db.close()
+
+
+def _read_until(path: str, stop: multiprocessing.Event) -> None:
+    db = Database(path, create=False)
+    while not stop.is_set():
+        db.execute("SELECT COUNT(*) FROM t")
+    db.close()
+
+
+def _commit_many(db: Database, start: int, count: int) -> float:
+    began = time.perf_counter()
+    for i in range(start, start + count):
+        db.execute("INSERT INTO t VALUES (?, ?)", (i, b"z" * 200))
+    return time.perf_counter() - began
+
+
+def test_writer_keeps_committing_while_readers_read_continuously(tmp_path: Path) -> None:
+    path = tmp_path / "starve.totedb"
+    db = Database(path)
+    db.execute("CREATE TABLE t (x INTEGER, pad BLOB)")
+    with db.begin() as txn:
+        for i in range(3000):
+            txn.execute("INSERT INTO t VALUES (?, ?)", (-i - 1, b"z" * 200))
+    alone = _commit_many(db, 0, 40)
+    stop = SPAWN.Event()
+    readers = [SPAWN.Process(target=_read_until, args=(str(path), stop)) for _ in range(4)]
+    for reader in readers:
+        reader.start()
+    try:
+        time.sleep(0.5)
+        shared = _commit_many(db, 40, 40)
+    finally:
+        stop.set()
+        for reader in readers:
+            reader.join(timeout=60)
+    assert [reader.exitcode for reader in readers] == [0, 0, 0, 0]
+    assert db.execute("SELECT COUNT(*) FROM t WHERE x >= 0").rows == ((80,),)
+    # 게시 대기 표시가 새 reader를 멈춰 writer가 틈을 얻는다. 표시가 없으면 쉬지 않고 읽는 reader 사이에서 굶는다
+    assert shared < alone * 6 + 1.0, f"혼자 {alone:.2f}s, reader 4개와 함께 {shared:.2f}s"
+    db.close()

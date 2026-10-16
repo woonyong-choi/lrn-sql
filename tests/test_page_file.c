@@ -494,6 +494,7 @@ static void test_invalid_files_are_rejected_without_change(void)
     size_t original_size;
     uint8_t *original = slurp(DB_PATH, &original_size);
     assert(original != NULL);
+    int files_before = inventory();  /* DB 파일과 게시 때 생긴 writer 잠금 파일 */
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         uint8_t *bytes = malloc(original_size);
@@ -515,7 +516,7 @@ static void test_invalid_files_are_rejected_without_change(void)
         }
         CHECK(file_hash(DB_PATH) == before, "%s: 원본 hash 변경 없음", cases[i].name);
         CHECK(next_fd() == fd_before, "%s: fd 누수 없음", cases[i].name);
-        CHECK(inventory() == 1, "%s: 디렉터리에 다른 파일이 생기지 않음", cases[i].name);
+        CHECK(inventory() == files_before, "%s: 디렉터리에 다른 파일이 생기지 않음", cases[i].name);
     }
     free(original);
     clean_dir();
@@ -770,8 +771,7 @@ static void test_locking_and_unpublished_files(void)
     int fd_base = next_fd();
     page_file_t *a, *b;
     assert(page_file_create(DB_PATH, &a) == PAGE_FILE_OK);
-    CHECK(page_file_open(PARTIAL_PATH, false, &b, NULL) == PAGE_FILE_LOCKED && errno == EWOULDBLOCK,
-          "작성 중인 partial은 잠겨 있다");
+    CHECK(page_file_open(PARTIAL_PATH, false, &b, NULL) == PAGE_FILE_NO_CONTROL, "작성 중인 partial은 게시 전이라 열리지 않음");
     page_file_close(a);
 
     /* 게시하지 않고 닫으면 partial이 지워진다 */
@@ -789,21 +789,32 @@ static void test_locking_and_unpublished_files(void)
           "제어 페이지가 비어 있는 미완성 파일은 열리지 않음");
     unlink(DB_PATH);
 
-    /* 게시된 파일: 쓰기 핸들은 배타, 읽기 핸들끼리는 공유 */
+    /* 게시된 파일: writer는 하나, reader는 writer와 함께 열린다(#200) */
     fresh_dir();
     build_fixture();
     CHECK(page_file_open(DB_PATH, true, &a, NULL) == PAGE_FILE_OK, "쓰기 핸들");
     CHECK(page_file_open(DB_PATH, true, &b, NULL) == PAGE_FILE_LOCKED, "두 번째 쓰기 핸들 거절");
-    CHECK(page_file_open(DB_PATH, false, &b, NULL) == PAGE_FILE_LOCKED, "쓰기 중에는 읽기 핸들도 거절");
-    page_file_close(a);
+    CHECK(exists(DB_PATH "-lock"), "writer 잠금 파일");
     page_file_t *r1 = NULL, *r2 = NULL;
     CHECK(page_file_open(DB_PATH, false, &r1, NULL) == PAGE_FILE_OK &&
-              page_file_open(DB_PATH, false, &r2, NULL) == PAGE_FILE_OK, "읽기 핸들은 공유");
-    CHECK(page_file_open(DB_PATH, true, &a, NULL) == PAGE_FILE_LOCKED, "읽기 중에는 쓰기 핸들 거절");
+              page_file_open(DB_PATH, false, &r2, NULL) == PAGE_FILE_OK, "쓰기 핸들이 열려 있어도 읽기 핸들은 공유");
     CHECK(page_file_write(r1, 2, PAGE_KIND_RECORD, 7, (uint8_t[PAGE_BODY_BYTES]){0}) == PAGE_FILE_INVALID,
           "읽기 핸들은 쓰지 못함");
+    /* reader가 읽는 동안(공유 잠금)은 게시하지 않는다. 그 세대의 페이지가 읽는 도중 다시 쓰이지 않게 하기 위해서다 */
+    uint64_t before = page_file_control(a)->generation;
+    page_file_set_default_publish_timeout(0);
+    page_file_t *quick = NULL;
+    page_file_close(a);
+    assert(page_file_open(DB_PATH, true, &quick, NULL) == PAGE_FILE_OK);
+    page_file_set_default_publish_timeout(PAGE_FILE_PUBLISH_TIMEOUT_MS);
+    CHECK(page_file_commit(quick) == PAGE_FILE_LOCKED &&
+              page_file_last_commit_outcome(quick) == PAGE_FILE_COMMIT_NOT_APPLIED,
+          "reader가 읽는 동안 게시는 기다린다(대기 상한 0이면 LOCKED, 미적용)");
     page_file_close(r1);
     page_file_close(r2);
+    CHECK(page_file_commit(quick) == PAGE_FILE_OK && page_file_control(quick)->generation == before + 1,
+          "reader가 끝나면 게시한다");
+    page_file_close(quick);
 
     /* 다른 프로세스가 열고 SIGKILL로 죽으면 잠금이 풀린다 (pid 숫자는 보지 않는다) */
     int ready[2];
@@ -824,6 +835,29 @@ static void test_locking_and_unpublished_files(void)
     int wait_status;
     waitpid(child, &wait_status, 0);
     CHECK(page_file_open(DB_PATH, true, &a, NULL) == PAGE_FILE_OK, "SIGKILL 뒤에는 열림");
+
+    /* 읽던 reader 프로세스가 SIGKILL로 죽으면 게시가 다시 진행된다(#200) */
+    child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        page_file_t *reader;
+        if (page_file_open(DB_PATH, false, &reader, NULL) != PAGE_FILE_OK) _exit(2);
+        char ok = 1;
+        if (write(ready[1], &ok, 1) != 1) _exit(3);
+        for (;;) pause();
+    }
+    assert(read(ready[0], &ok, 1) == 1 && ok == 1);
+    page_file_close(a);
+    page_file_set_default_publish_timeout(0);
+    page_file_status_t reopened = page_file_open(DB_PATH, true, &a, NULL);
+    page_file_set_default_publish_timeout(PAGE_FILE_PUBLISH_TIMEOUT_MS);
+    /* 자식은 부모가 쓰기로 연 핸들을 물려받았지만 fork 직후 그 fd 사본을 닫았으므로 부모가 닫은 writer 잠금이 남지 않는다 */
+    CHECK(reopened == PAGE_FILE_OK, "자식이 물려받은 fd가 부모의 writer 잠금을 붙잡지 않음 (%d)", (int)reopened);
+    assert(reopened == PAGE_FILE_OK);
+    CHECK(page_file_commit(a) == PAGE_FILE_LOCKED, "reader가 읽는 동안 게시 대기");
+    kill(child, SIGKILL);
+    waitpid(child, &wait_status, 0);
+    CHECK(page_file_commit(a) == PAGE_FILE_OK, "reader가 죽은 뒤 게시");
     page_file_close(a);
     close(ready[0]);
     close(ready[1]);
@@ -1428,6 +1462,8 @@ static void test_short_io_and_eintr(void)
 
 int main(void)
 {
+    /* 잠금 충돌은 기다리지 않고 곧바로 LOCKED로 확인한다 */
+    page_file_set_default_lock_timeout(0);
     page_file_set_default_io(&HOOKED);
     fill_big();
     test_fixture_roundtrip_is_page_size_independent();

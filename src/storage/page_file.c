@@ -1,6 +1,8 @@
 #include <errno.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
@@ -28,6 +30,7 @@ _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
 #define BYTE_ORDER_MARK 0x01020304u
 #define ENVELOPE_VERSION 2u   /* 2: 체크섬 CRC32C */
 #define PARTIAL_SUFFIX ".partial"
+#define WRITER_LOCK_SUFFIX "-lock"
 
 /*
  * 제어 본문 배치: magic 8, 형식 u32, 페이지 크기 u32, byte order u32, 세대 u64, page_count u32, 예약 u32(0),
@@ -97,7 +100,12 @@ struct page_file {
     bool cache_tried;
     pid_t owner;            /* 연 프로세스. fork한 자식은 이 핸들을 쓰지 않는다 */
     page_file_lock_t lock;  /* 지금 쥔 잠금 */
-    uint32_t lock_timeout_ms;
+    uint32_t lock_timeout_ms;     /* writer 잠금과 열기의 대기 상한 */
+    uint32_t publish_timeout_ms;  /* 게시 순간의 배타 잠금과 reader 공유 잠금의 대기 상한 */
+    int writer_fd;          /* writer 잠금 파일(<path>-lock). 쓰기 핸들만, 없으면 -1 */
+    int gate_fd;            /* 읽기 핸들이 게시 대기 표시를 보는 잠금 파일 fd. 없으면 -1(쓰기 핸들은 writer_fd를 쓴다) */
+    page_file_t *next_open; /* 열린 핸들 목록(fork한 자식에서 fd 사본을 닫는다) */
+    page_file_t *prev_open;
     bool stale;             /* 버린 변경이 남았다. 다음 잠금에서 디스크의 게시 상태로 다시 읽는다 */
 };
 
@@ -115,10 +123,13 @@ static const page_file_io_t LIBC_IO = {libc_pread, libc_pwrite, fsync, link, unl
 static page_file_io_t g_default_io = {libc_pread, libc_pwrite, fsync, link, unlink};
 static size_t g_default_cache_pages = PAGE_FILE_CACHE_PAGES;
 static uint32_t g_default_lock_timeout_ms = PAGE_FILE_LOCK_TIMEOUT_MS;
+static uint32_t g_default_publish_timeout_ms = PAGE_FILE_PUBLISH_TIMEOUT_MS;
 
 void page_file_set_default_cache_pages(size_t pages) { g_default_cache_pages = pages; }
 
 void page_file_set_default_lock_timeout(uint32_t timeout_ms) { g_default_lock_timeout_ms = timeout_ms; }
+
+void page_file_set_default_publish_timeout(uint32_t timeout_ms) { g_default_publish_timeout_ms = timeout_ms; }
 
 void page_file_set_default_io(const page_file_io_t *io)
 {
@@ -338,6 +349,53 @@ static page_file_status_t sync_file(page_file_t *file)
     return PAGE_FILE_OK;
 }
 
+/*
+ * 열린 핸들 목록. flock은 열린 파일 설명마다 걸리고 그 설명을 가리키는 fd가 모두 닫혀야 풀린다. fork한 자식이 fd 사본을
+ * 쥐고 있으면 부모가 죽거나 닫아도 잠금이 남는다. 그래서 fork 직후 자식에서 모든 핸들의 fd 사본을 닫는다. 자식의
+ * 핸들은 어차피 PAGE_FILE_FORKED로 쓰지 못한다. 사본을 닫아도 부모의 잠금은 그대로다.
+ */
+static pthread_mutex_t g_open_lock = PTHREAD_MUTEX_INITIALIZER;
+static page_file_t *g_open_handles;
+static pthread_once_t g_atfork_once = PTHREAD_ONCE_INIT;
+
+static void before_fork(void) { pthread_mutex_lock(&g_open_lock); }
+
+static void after_fork_parent(void) { pthread_mutex_unlock(&g_open_lock); }
+
+static void after_fork_child(void)
+{
+    for (page_file_t *file = g_open_handles; file != NULL; file = file->next_open) {
+        if (file->fd >= 0) close(file->fd);
+        if (file->writer_fd >= 0) close(file->writer_fd);
+        if (file->gate_fd >= 0) close(file->gate_fd);
+        file->fd = -1;
+        file->writer_fd = -1;
+        file->gate_fd = -1;
+    }
+    pthread_mutex_init(&g_open_lock, NULL);
+}
+
+static void install_fork_handler(void) { pthread_atfork(before_fork, after_fork_parent, after_fork_child); }
+
+static void remember_handle(page_file_t *file)
+{
+    pthread_once(&g_atfork_once, install_fork_handler);
+    pthread_mutex_lock(&g_open_lock);
+    file->next_open = g_open_handles;
+    if (g_open_handles != NULL) g_open_handles->prev_open = file;
+    g_open_handles = file;
+    pthread_mutex_unlock(&g_open_lock);
+}
+
+static void forget_handle(page_file_t *file)
+{
+    pthread_mutex_lock(&g_open_lock);
+    if (file->prev_open != NULL) file->prev_open->next_open = file->next_open;
+    else if (g_open_handles == file) g_open_handles = file->next_open;
+    if (file->next_open != NULL) file->next_open->prev_open = file->prev_open;
+    pthread_mutex_unlock(&g_open_lock);
+}
+
 static page_file_t *new_handle(int fd, bool writable)
 {
     page_file_t *file = calloc(1, sizeof(*file));
@@ -348,11 +406,18 @@ static page_file_t *new_handle(int fd, bool writable)
     file->cache_pages = g_default_cache_pages;
     file->owner = getpid();
     file->lock_timeout_ms = g_default_lock_timeout_ms;
+    file->publish_timeout_ms = g_default_publish_timeout_ms;
+    file->writer_fd = -1;
+    file->gate_fd = -1;
+    remember_handle(file);
     return file;
 }
 
 static void free_handle(page_file_t *file)
 {
+    forget_handle(file);
+    if (file->writer_fd >= 0) close(file->writer_fd);
+    if (file->gate_fd >= 0) close(file->gate_fd);
     free(file->path);
     free(file->partial_path);
     free(file->state);
@@ -383,10 +448,9 @@ static uint64_t monotonic_us(void)
     return (uint64_t)now.tv_sec * 1000000u + (uint64_t)now.tv_nsec / 1000u;
 }
 
-/* 바쁘면 100µs에서 2ms까지 늘려 쉬며 다시 시도한다. 대기 상한을 넘으면 LOCKED다 */
-static page_file_status_t lock_fd(int fd, page_file_lock_t mode, uint32_t timeout_ms)
+/* 바쁘면 100µs에서 2ms까지 늘려 쉬며 다시 시도한다. 대기 상한을 넘으면 LOCKED다. operation은 LOCK_SH·LOCK_EX */
+static page_file_status_t lock_fd(int fd, int operation, uint32_t timeout_ms)
 {
-    int operation = mode == PAGE_FILE_LOCK_EXCLUSIVE ? LOCK_EX : LOCK_SH;
     uint64_t deadline = monotonic_us() + (uint64_t)timeout_ms * 1000u;
     long pause_us = 100;
     for (;;) {
@@ -400,6 +464,81 @@ static page_file_status_t lock_fd(int fd, page_file_lock_t mode, uint32_t timeou
         struct timespec pause = {0, pause_us * 1000};
         nanosleep(&pause, NULL);
         if (pause_us < 2000) pause_us *= 2;
+    }
+}
+
+/*
+ * writer 잠금 파일(<db_path>-lock)을 열어 배타 잠금을 잡는다. 쓰기 거래를 파일 전체에서 하나로 줄인다(#200). 잠근 뒤 그
+ * 경로가 여전히 같은 파일인지 확인하고, 누가 지우거나 바꿨으면 새로 열어 다시 잡는다. 두 writer가 서로 다른 잠금 파일을
+ * 잡지 않게 하기 위해서다. *writer_fd가 -1이면 연다. 실패하면 잠금을 쥐지 않는다(fd는 남겨 다음에 쓴다).
+ */
+static page_file_status_t lock_writer(const char *db_path, int *writer_fd, uint32_t timeout_ms)
+{
+    size_t length = strlen(db_path);
+    char lock_path[PATH_MAX];
+    if (length + sizeof(WRITER_LOCK_SUFFIX) > sizeof(lock_path)) return PAGE_FILE_INVALID;
+    memcpy(lock_path, db_path, length);
+    memcpy(lock_path + length, WRITER_LOCK_SUFFIX, sizeof(WRITER_LOCK_SUFFIX));
+    for (;;) {
+        if (*writer_fd < 0) {
+            *writer_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+            if (*writer_fd < 0) return PAGE_FILE_IO;
+        }
+        page_file_status_t status = lock_fd(*writer_fd, LOCK_EX, timeout_ms);
+        if (status != PAGE_FILE_OK) return status;
+        struct stat held, named;
+        if (fstat(*writer_fd, &held) == 0 && stat(lock_path, &named) == 0 && held.st_dev == named.st_dev &&
+            held.st_ino == named.st_ino) {
+            return PAGE_FILE_OK;
+        }
+        close(*writer_fd);
+        *writer_fd = -1;
+    }
+}
+
+/*
+ * 게시 대기 표시(writer 우선). writer는 게시 잠금을 기다리기 전에 잠금 파일 첫 바이트를 1로, 게시가 끝나면 0으로 쓴다.
+ * reader는 공유 잠금을 잡기 전에 표시를 보고 1이면 기다린다. 쉬지 않고 읽는 reader들 사이에서 게시할 틈이 없어 writer가
+ * 굶지 않게 하기 위해서다. 표시를 남긴 writer가 죽었으면 writer 잠금이 비어 있으므로 그 표시는 무시한다.
+ */
+static void set_publish_intent(const page_file_t *file, bool pending)
+{
+    uint8_t mark = pending ? 1 : 0;
+    if (file->writer_fd >= 0 && pwrite(file->writer_fd, &mark, 1, 0) != 1) {
+        /* 표시는 공정성만 돕는다. 쓰지 못해도 게시 잠금이 정확성을 지킨다 */
+    }
+}
+
+static int gate_of(page_file_t *file)
+{
+    if (file->writer_fd >= 0) return file->writer_fd;
+    if (file->gate_fd < 0 && file->path != NULL) {
+        char lock_path[PATH_MAX];
+        if (snprintf(lock_path, sizeof(lock_path), "%s%s", file->path, WRITER_LOCK_SUFFIX) < (int)sizeof(lock_path)) {
+            file->gate_fd = open(lock_path, O_RDONLY | O_CLOEXEC);
+        }
+    }
+    return file->gate_fd;
+}
+
+/* 게시 대기 표시가 있으면 deadline까지 기다린다. 표시를 쓴 writer가 없으면(잠금이 비어 있으면) 곧바로 돌아간다 */
+static void wait_for_publisher(page_file_t *file, uint32_t timeout_ms)
+{
+    int gate = gate_of(file);
+    if (gate < 0) return;
+    uint64_t deadline = monotonic_us() + (uint64_t)timeout_ms * 1000u;
+    long pause_us = 50;
+    for (;;) {
+        uint8_t mark = 0;
+        if (pread(gate, &mark, 1, 0) != 1 || mark == 0) return;
+        if (gate != file->writer_fd && flock(gate, LOCK_SH | LOCK_NB) == 0) {
+            flock(gate, LOCK_UN);  /* writer 잠금이 비어 있다. 죽은 writer가 남긴 표시다 */
+            return;
+        }
+        if (monotonic_us() >= deadline) return;
+        struct timespec pause = {0, pause_us * 1000};
+        nanosleep(&pause, NULL);
+        if (pause_us < 1000) pause_us *= 2;
     }
 }
 
@@ -454,8 +593,9 @@ page_file_status_t page_file_create(const char *path, page_file_t **out)
     }
     file->path = final_path;
     file->partial_path = partial;
-    page_file_status_t status = lock_fd(fd, PAGE_FILE_LOCK_EXCLUSIVE, file->lock_timeout_ms);
-    if (status == PAGE_FILE_OK) file->lock = PAGE_FILE_LOCK_EXCLUSIVE;
+    /* 게시 전 파일은 이 핸들만 안다. writer 잠금은 게시 직전에 잡는다(page_file_publish) */
+    file->lock = PAGE_FILE_LOCK_EXCLUSIVE;
+    page_file_status_t status = PAGE_FILE_OK;
     uint8_t zero[PAGE_FILE_PAGE_BYTES] = {0};
     for (uint32_t slot = 0; status == PAGE_FILE_OK && slot < PAGE_FILE_CONTROL_PAGES; slot++) {
         status = write_full(file, zero, sizeof(zero), (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
@@ -513,9 +653,21 @@ page_file_status_t page_file_publish(page_file_t *file)
     if (forked(file)) return PAGE_FILE_FORKED;
     page_file_status_t status = sync_file(file);
     if (status != PAGE_FILE_OK) return status;
+    /*
+     * 이름이 보이는 순간부터 이 핸들이 writer다. 다른 writer가 그 사이 끼어들지 않게 link 전에 writer 잠금을 잡는다.
+     * 게시에 실패하면 이번에 만든 잠금 파일은 지운다. 그 사이 다른 핸들이 열었어도 lock_writer가 경로를 다시 확인한다.
+     */
+    char lock_path[PATH_MAX];
+    snprintf(lock_path, sizeof(lock_path), "%s%s", file->path, WRITER_LOCK_SUFFIX);
+    bool made_lock = access(lock_path, F_OK) != 0;
+    status = lock_writer(file->path, &file->writer_fd, file->lock_timeout_ms);
+    if (status != PAGE_FILE_OK) return status;
     /* link는 목적지가 이미 있으면 실패한다. rename은 조용히 덮어쓰므로 쓰지 않는다. */
     if (file->io.link(file->partial_path, file->path) != 0) {
         int err = errno;
+        if (made_lock) unlink(lock_path);
+        close(file->writer_fd);
+        file->writer_fd = -1;
         if (err == EEXIST) return PAGE_FILE_EXISTS;
         if (err == ENOTSUP || err == EPERM || err == EXDEV || err == ENOSYS) {
             errno = err;
@@ -663,6 +815,20 @@ static void adopt_published(page_file_t *file, const page_file_control_t *chosen
     file->staged_generation = chosen->catalog_generation;
 }
 
+/* 쓰기로 열기 전 확인: 열기와 같은 규칙으로 게시된 ToteDB 파일인지만 본다. 임시 핸들로 읽고 아무것도 바꾸지 않는다 */
+static page_file_status_t check_published_file(int fd)
+{
+    page_file_t probe = {.fd = fd, .io = g_default_io, .writer_fd = -1};
+    uint8_t pages[2][PAGE_FILE_PAGE_BYTES];
+    page_file_control_t chosen;
+    free_header_t chosen_free;
+    page_file_open_info_t info;
+    uint64_t file_bytes = 0;
+    page_file_status_t status = read_controls(&probe, pages, &chosen, &chosen_free, &info, &file_bytes);
+    if (status == PAGE_FILE_OK) status = verify_published(&probe, pages, &chosen, &chosen_free, &info, file_bytes);
+    return status;
+}
+
 page_file_status_t page_file_open(const char *path, bool writable, page_file_t **out,
                                   page_file_open_info_t *info)
 {
@@ -676,10 +842,21 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
     if (path == NULL || out == NULL) return PAGE_FILE_INVALID;
     int fd = open(path, (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC);
     if (fd < 0) return PAGE_FILE_IO;
-    page_file_status_t status = lock_fd(fd, writable ? PAGE_FILE_LOCK_EXCLUSIVE : PAGE_FILE_LOCK_SHARED,
-                                        g_default_lock_timeout_ms);
+    /*
+     * 읽기 핸들은 파일 공유 잠금을, 쓰기 핸들은 writer 잠금을 쥔 채 게시 상태를 읽는다. 어느 쪽이든 그동안 게시가 없다.
+     * 쓰기 핸들은 먼저 공유 잠금으로 ToteDB 파일인지 확인하고 놓은 뒤 writer 잠금을 잡는다. 다른 형식 파일 옆에 잠금
+     * 파일을 만들지 않고, 공유 잠금을 쥔 채 writer 잠금을 기다리다 게시하려는 writer와 서로 막히지 않게 하기 위해서다.
+     */
+    int writer_fd = -1;
+    page_file_status_t status = lock_fd(fd, LOCK_SH, g_default_lock_timeout_ms);
+    if (status == PAGE_FILE_OK && writable) {
+        status = check_published_file(fd);
+        flock(fd, LOCK_UN);
+        if (status == PAGE_FILE_OK) status = lock_writer(path, &writer_fd, g_default_lock_timeout_ms);
+    }
     if (status != PAGE_FILE_OK) {
         int err = errno;
+        if (writer_fd >= 0) close(writer_fd);
         close(fd);
         errno = err;
         return status;
@@ -689,20 +866,24 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
         struct stat sized;
         if (fstat(fd, &sized) != 0) {
             int err = errno;
+            if (writer_fd >= 0) close(writer_fd);
             close(fd);
             errno = err;
             return PAGE_FILE_IO;
         }
         if (!admit(ctx, sized.st_size > 0 ? (uint64_t)sized.st_size : 0)) {
+            if (writer_fd >= 0) close(writer_fd);
             close(fd);
             return PAGE_FILE_NOMEM;
         }
     }
     page_file_t *file = new_handle(fd, writable);
     if (file == NULL) {
+        if (writer_fd >= 0) close(writer_fd);
         close(fd);
         return PAGE_FILE_NOMEM;
     }
+    file->writer_fd = writer_fd;
     file->path = copy_string(path, NULL);
     if (file->path == NULL) {
         close(fd);
@@ -743,7 +924,7 @@ page_file_status_t page_file_close(page_file_t *file)
     page_file_status_t status = PAGE_FILE_OK;
     /* fork한 자식의 close는 부모가 만드는 partial을 지우지 않는다. fd만 닫아 부모의 잠금도 그대로다 */
     if (!file->published && file->partial_path != NULL && !forked(file)) file->io.unlink(file->partial_path);
-    if (close(file->fd) != 0) status = PAGE_FILE_IO;
+    if (file->fd >= 0 && close(file->fd) != 0) status = PAGE_FILE_IO;
     free_handle(file);
     return status;
 }
@@ -822,13 +1003,17 @@ page_file_status_t page_file_lock(page_file_t *file, page_file_lock_t mode, bool
     if (file->lock != PAGE_FILE_LOCK_NONE || (mode == PAGE_FILE_LOCK_EXCLUSIVE && !file->writable)) {
         return PAGE_FILE_INVALID;
     }
-    page_file_status_t status = lock_fd(file->fd, mode, file->lock_timeout_ms);
+    /* reader는 게시 순간(짧다)만 비켜 주므로 게시 대기 상한까지 기다린다. writer는 다른 쓰기 거래 전체를 기다리므로 핸들 상한이다 */
+    if (mode == PAGE_FILE_LOCK_SHARED) wait_for_publisher(file, file->publish_timeout_ms);
+    page_file_status_t status = mode == PAGE_FILE_LOCK_SHARED
+                                    ? lock_fd(file->fd, LOCK_SH, file->publish_timeout_ms)
+                                    : lock_writer(file->path, &file->writer_fd, file->lock_timeout_ms);
     if (status != PAGE_FILE_OK) return status;
     file->lock = mode;
     status = sync_published(file, changed);
     if (status != PAGE_FILE_OK) {
         int err = errno;
-        flock(file->fd, LOCK_UN);
+        flock(mode == PAGE_FILE_LOCK_SHARED ? file->fd : file->writer_fd, LOCK_UN);
         file->lock = PAGE_FILE_LOCK_NONE;
         errno = err;
     }
@@ -847,7 +1032,7 @@ page_file_status_t page_file_unlock(page_file_t *file)
          file->staged_generation != file->committed.catalog_generation)) {
         file->stale = true;
     }
-    if (flock(file->fd, LOCK_UN) != 0) return PAGE_FILE_IO;
+    if (flock(file->lock == PAGE_FILE_LOCK_SHARED ? file->fd : file->writer_fd, LOCK_UN) != 0) return PAGE_FILE_IO;
     file->lock = PAGE_FILE_LOCK_NONE;
     return PAGE_FILE_OK;
 }
@@ -1336,6 +1521,20 @@ page_file_status_t page_file_commit(page_file_t *file)
         return status;
     }
 
+    /*
+     * 게시 순간에만 파일 배타 잠금을 잡는다. 문장을 읽는 reader(공유 잠금)가 끝나기를 기다리고, 그동안 새 reader는
+     * 기다린다. 읽는 문장 도중에 세대가 바뀌지 않으므로 그 세대가 가리키는 페이지는 문장이 끝날 때까지 다시 쓰이지 않는다.
+     */
+    set_publish_intent(file, true);
+    status = lock_fd(file->fd, LOCK_EX, file->publish_timeout_ms);
+    if (status != PAGE_FILE_OK) {
+        int err = errno;
+        set_publish_intent(file, false);
+        undo_chain(file, &next_chain);
+        free(next_chain.items);
+        errno = err;
+        return status;
+    }
     if (!barrier) header.manifest = file->manifest_len;
     encode_control_header(body, &next, &header);
     for (uint32_t i = 0; i < header.manifest; i++) {
@@ -1352,6 +1551,10 @@ page_file_status_t page_file_commit(page_file_t *file)
     status = write_full(file, page, sizeof(page), (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
     if (status != PAGE_FILE_OK) file->poisoned = true;
     if (status == PAGE_FILE_OK) status = sync_file(file);
+    int err = errno;
+    flock(file->fd, LOCK_UN);
+    set_publish_intent(file, false);
+    errno = err;
     if (status != PAGE_FILE_OK) {
         free(next_chain.items);
         return status;

@@ -136,8 +136,8 @@ page_file_status_t page_file_publish(page_file_t *file);
 
 /*
  * 게시된 파일을 연다. 쓰기 전에는 아무것도 쓰지 않으며 version·길이·header가 맞지 않으면
- * 파일을 바꾸지 않고 거절한다. writable이면 배타, 아니면 공유 잠금을 잡은 채 돌려준다. 다른 핸들이 잠금을 쥐고 있으면
- * 대기 상한(page_file_set_default_lock_timeout)까지 기다리고 넘으면 PAGE_FILE_LOCKED다.
+ * 파일을 바꾸지 않고 거절한다. writable이면 writer 잠금(<path>-lock), 아니면 파일 공유 잠금을 잡은 채 돌려준다. 다른
+ * 핸들이 그 잠금을 쥐고 있으면 대기 상한(page_file_set_default_lock_timeout)까지 기다리고 넘으면 PAGE_FILE_LOCKED다.
  * 두 제어 페이지 어디에도 파일 magic("TOTEDB")이 없는 파일은 PAGE_FILE_UNSUPPORTED다(다른 형식 파일). 제어 페이지
  * 두 장보다 짧은 파일은 앞부분이 0뿐이거나 magic이 있으면 잘린 파일(CORRUPT), 아니면 UNSUPPORTED다. 어떤 경우에도
  * 자동으로 변환하지 않는다.
@@ -267,19 +267,26 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
                                            void *ctx);
 
 /*
- * 여러 프로세스(#199). 같은 컴퓨터의 여러 핸들이 같은 파일을 열고, 쓰기 거래는 한 번에 하나씩 실행한다.
- * - 열기·생성은 잠금을 쥔 채 돌려준다. 함께 쓰려면 page_file_unlock으로 놓고, 읽기 전에 공유, 바꾸기 전에 배타 잠금을
- *   page_file_lock으로 잡는다. 잠금은 열린 파일 설명마다(flock) 걸리므로 같은 프로세스의 두 핸들도 서로를 기다린다.
- * - page_file_lock은 잠금을 얻은 뒤 디스크의 게시 상태를 열기와 같은 규칙(끝나지 않은 commit이면 이전 세대)으로 다시 읽는다.
- *   다른 핸들이 그 사이 게시했으면 제어 상태·빈 목록을 다시 읽고 캐시를 비우며 changed를 true로 알린다.
- * - 잠금이 없으면 읽기도 INVALID다. 다른 핸들의 commit이 놓은 페이지를 두 세대 뒤 다시 쓸 수 있기 때문이다.
- *   할당·해제·쓰기·카탈로그 지정·commit은 배타 잠금이 있어야 한다.
+ * 여러 프로세스(#199, #200). 같은 컴퓨터의 여러 핸들이 같은 파일을 열고, 쓰기 거래는 한 번에 하나씩 실행한다.
+ * - 잠금은 둘이다. writer 잠금은 DB 파일 옆 잠금 파일(<path>-lock)의 배타 flock이고 쓰기 거래 전체 동안 쥔다.
+ *   게시 잠금은 DB 파일의 flock이다. reader는 읽는 동안 공유로, writer는 commit의 제어 쓰기와 fsync 동안만 배타로 쥔다.
+ *   그래서 reader는 쓰기 거래 내내 기다리지 않고 게시하는 순간만 비켜 주며, 읽는 도중에는 세대가 바뀌지 않아 그 세대의
+ *   페이지가 다시 쓰이지 않는다. reader 프로세스가 죽으면 커널이 잠금을 푼다.
+ * - 잠금은 열린 파일 설명마다(flock) 걸리므로 같은 프로세스의 두 핸들도 서로를 기다린다. 잠금 파일은 지우지 않는다.
+ *   잡은 뒤 경로가 같은 파일인지 확인하고, 바뀌었으면 새로 열어 다시 잡는다.
+ * - 열기·생성은 잠금을 쥔 채 돌려준다(쓰기 핸들은 writer 잠금, 읽기 핸들은 공유). 함께 쓰려면 page_file_unlock으로
+ *   놓고, 읽기 전에 SHARED, 바꾸기 전에 EXCLUSIVE를 page_file_lock으로 잡는다.
+ * - page_file_lock은 잠금을 얻은 뒤 디스크의 게시 상태를 열기와 같은 규칙(끝나지 않은 commit이면 이전 세대)으로 다시
+ *   읽는다. 다른 핸들이 그 사이 게시했으면 제어 상태·빈 목록을 다시 읽고 캐시를 비우며 changed를 true로 알린다.
+ * - 잠금이 없으면 읽기도 INVALID다. 할당·해제·쓰기·카탈로그 지정·commit은 EXCLUSIVE가 있어야 한다.
  * - 배타 잠금을 놓을 때 commit하지 않은 변경이 남았으면 버린 것으로 보고 다음 page_file_lock이 디스크 상태로 다시 읽는다.
  * - 핸들은 연 프로세스에서만 쓴다. fork한 자식이 물려받은 핸들은 close 말고 모든 연산이 PAGE_FILE_FORKED이며 파일을
  *   바꾸지 않는다. 자식의 close는 부모의 잠금과 partial 파일을 건드리지 않는다. exec한 자식에게는 fd가 넘어가지 않는다.
- * - 잠금 대기는 바쁜 동안 짧게 쉬며 다시 시도하고, 대기 상한을 넘으면 PAGE_FILE_LOCKED다.
+ * - 대기는 바쁜 동안 짧게 쉬며 다시 시도한다. writer 잠금과 열기는 잠금 대기 상한, reader 공유 잠금과 게시 잠금은 게시
+ *   대기 상한까지 기다리고 넘으면 PAGE_FILE_LOCKED다. 게시 잠금을 얻지 못한 commit은 디스크를 바꾸지 않았다(NOT_APPLIED).
  */
 #define PAGE_FILE_LOCK_TIMEOUT_MS 5000u
+#define PAGE_FILE_PUBLISH_TIMEOUT_MS 30000u
 
 typedef enum {
     PAGE_FILE_LOCK_NONE,
@@ -289,6 +296,8 @@ typedef enum {
 
 /* 이후 열리는 핸들의 잠금 대기 상한(밀리초). 0이면 기다리지 않는다. 기본 PAGE_FILE_LOCK_TIMEOUT_MS. 테스트용 */
 void page_file_set_default_lock_timeout(uint32_t timeout_ms);
+/* 이후 열리는 핸들의 게시 대기 상한(밀리초). 기본 PAGE_FILE_PUBLISH_TIMEOUT_MS. 테스트용 */
+void page_file_set_default_publish_timeout(uint32_t timeout_ms);
 /* 이 핸들의 잠금 대기 상한(밀리초) */
 void page_file_set_lock_timeout(page_file_t *file, uint32_t timeout_ms);
 /* 잠금을 잡고 게시 상태를 디스크와 맞춘다. 이미 잠금을 쥐었으면(승격 포함) INVALID, 게시 전 핸들도 INVALID다.

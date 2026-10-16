@@ -812,6 +812,7 @@ static void test_crash_points(void)
         free(text);
     }
     CHECK(bad == 0 && crashed > 0, "종료 지점 %ld곳 어긋남 %d (종료 %d, 승인 %d)", total + 1, bad, crashed, acknowledged);
+    printf("  종료 지점 %ld곳: 종료 %d, 승인 %d, 부분 반영·승인 유실 %d\n", total + 1, crashed, acknowledged, bad);
 
     /* I/O 실패: 승인 응답이면 새 상태, 확정 실패면 옛 상태, 불확정이면 둘 중 하나 */
     bad = 0;
@@ -849,6 +850,7 @@ static void test_crash_points(void)
         free(text);
     }
     CHECK(bad == 0 && failed > 0, "실패 지점 어긋남 %d (주입 %ld, 불확정 %d)", bad, failed, uncertain);
+    printf("  I/O 실패 지점 %ld곳: 주입 %ld, 불확정 %d, 어긋남 %d\n", total, failed, uncertain, bad);
     free(old_state);
     free(new_state);
     snap_free(&base);
@@ -922,7 +924,7 @@ static void test_two_handles(void)
     exec_ok(b, NULL, "CREATE TABLE w (x INTEGER)");
     exec_ok(b, NULL, "INSERT INTO w VALUES (7)");
     expect(a, NULL, "SELECT * FROM w", "[1] 7");
-    /* 한쪽의 쓰기 거래가 열린 동안 다른 쪽은 기다리지 않고 BUSY다. 1단계라 읽기도 BUSY다 */
+    /* 한쪽의 쓰기 거래가 열린 동안 다른 쪽의 쓰기는 기다리지 않고 BUSY다 */
     txn_begin_options_t o = rw(TXN_GUARANTEE_DURABLE, 0);
     database_txn_t *txn = NULL;
     CHECK(database_txn_begin(a, &o, &txn) == TXN_OK, "a의 쓰기 거래");
@@ -933,9 +935,8 @@ static void test_two_handles(void)
     /* 거래 계층의 자동 commit은 쓰기 시작에서 막혀 writer BUSY(29)다. 읽기는 문장 잠금에서 막혀 30이다 */
     CHECK(strcmp(blocked, "ERR 7/29") == 0, "a가 쓰는 동안 b의 변경은 BUSY: %s", blocked);
     free(blocked);
-    char *read = run(b, NULL, "SELECT * FROM u", NULL, 0);
-    CHECK(strcmp(read, "ERR 7/30") == 0, "a가 쓰는 동안 b의 읽기는 파일 잠금 BUSY: %s", read);
-    free(read);
+    /* a가 쓰는 동안 b의 읽기는 기다리지 않고 a의 commit 전 게시 상태를 읽는다(#200) */
+    expect(b, NULL, "SELECT * FROM u", "[2] 1|'one'/ 2|'two'");
     txn_commit_info_t info;
     CHECK(database_txn_commit(txn, &info) == TXN_OK && info.outcome == TXN_OUTCOME_APPLIED, "a commit");
     database_txn_release(&txn);
@@ -984,20 +985,9 @@ static void writer_child(int worker)
     }
 }
 
-/* writer가 쓰는 동안 읽기는 BUSY(7/30)다. Python 바인딩처럼 짧게 쉬며 다시 시도한다 */
-static char *run_until_free(database_t *db, const char *sql)
-{
-    for (int attempt = 0;; attempt++) {
-        char *line = run(db, NULL, sql, NULL, 0);
-        if (strncmp(line, "ERR 7/", 6) != 0 || attempt == 20000) return line;
-        free(line);
-        usleep(250);
-    }
-}
-
 static int64_t counter_of(database_t *db)
 {
-    char *line = run_until_free(db, "SELECT n FROM c");
+    char *line = run(db, NULL, "SELECT n FROM c", NULL, 0);
     long long n = -1;
     sscanf(line, "[1] %lld", &n);
     free(line);
@@ -1036,7 +1026,7 @@ static void test_processes_killed_while_writing(void)
     waitpid(children[2], &status, 0);
     CHECK(WIFSIGNALED(status), "마지막 writer는 오류 없이 쓰다가 종료됨");
     /* 거래마다 w 한 행과 카운터 1 증가를 함께 확정했다. 반만 적용된 거래가 있으면 둘이 다르다 */
-    char *rows = run_until_free(db, "SELECT COUNT(*) FROM w");
+    char *rows = run(db, NULL, "SELECT COUNT(*) FROM w", NULL, 0);
     char expected[64];
     snprintf(expected, sizeof(expected), "[1] %lld", (long long)counter_of(db));
     CHECK(strcmp(rows, expected) == 0, "w 행 수와 카운터가 같다: %s / %s", rows, expected);
