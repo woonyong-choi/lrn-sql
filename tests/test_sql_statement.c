@@ -499,6 +499,12 @@ static void select_forms(void)
     assert(is_integer(q->limit, 10) && q->offset != NULL);
     free_clean(statement);
 
+    statement = parse_ok("SELECT a, sum(b) FROM t WHERE c > 0 GROUP BY a, c + 1 HAVING count(*) > 1 ORDER BY 2");
+    q = &statement->select;
+    assert(q->group_count == 2 && is_column(q->group_by[0], "a") && q->group_by[1]->op == SQLEXPR_OP_ADD);
+    assert(q->having != NULL && q->having->op == SQLEXPR_OP_GT && q->order_count == 1);
+    free_clean(statement);
+
     statement = parse_ok("SELECT count(*), count(DISTINCT a), f() FROM t");
     q = &statement->select;
     assert(q->items[0].expr->star && q->items[1].expr->distinct && q->items[2].expr->arg_count == 0);
@@ -684,7 +690,8 @@ static void select_and_where_errors(void)
     expect_syntax("SELECT * FROM t LIMIT", SQLSTMT_REASON_UNEXPECTED_END, 21);
     expect_syntax("SELECT a FROM t OFFSET 1 LIMIT 2", SQLSTMT_REASON_TRAILING_TOKENS, 25);
 
-    expect_unsupported("SELECT * FROM t GROUP BY a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
+    expect_syntax("SELECT a FROM t GROUP a", SQLSTMT_REASON_EXPECTED_KEYWORD, 22);
+    expect_syntax("SELECT a FROM t HAVING", SQLSTMT_REASON_UNEXPECTED_END, 22);
     expect_unsupported("SELECT * FROM t JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t, u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 15);
     expect_unsupported("SELECT * FROM t UNION SELECT * FROM u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);

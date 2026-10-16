@@ -22,7 +22,7 @@
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
  *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT]
  *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )}
- *   SELECT [DISTINCT] item {, item} [FROM name [[AS] alias]] [WHERE expr]
+ *   SELECT [DISTINCT] item {, item} [FROM name [[AS] alias]] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
  *     [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
  *     item       = * | name.* | expr [[AS] alias]
  *   UPDATE name SET column_name = expr {, column_name = expr} [WHERE expr]
@@ -51,7 +51,7 @@
  *   - X'hex'는 X와 따옴표 문자열이 붙어 있어야 하며 짝수 개의 16진 숫자여야 한다. 빈 X''는 빈 BLOB이다.
  *   - 식 트리 높이는 512, 목록(인자·IN·여러 행 INSERT의 값)은 65536개까지다. 넘으면 SQLSTMT_LIMIT다.
  *
- * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): GROUP BY·HAVING·JOIN·UNION·EXCEPT·INTERSECT·RETURNING·WITH·
+ * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): JOIN·UNION·EXCEPT·INTERSECT·RETURNING·WITH·
  * 창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS), FROM의 둘 이상 테이블, INSERT ... SELECT, CREATE TABLE ... AS,
  * IF [NOT] EXISTS, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중 PRIMARY KEY 외의 것,
  * 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE, 테이블 이름의 한정(schema.table).
@@ -229,6 +229,9 @@ typedef struct {
     sqlstmt_name_t table;
     sqlstmt_name_t table_alias;
     sqlexpr_t *where;            /* 없으면 NULL */
+    sqlexpr_t **group_by;        /* GROUP BY 식 group_count개 */
+    size_t group_count;
+    sqlexpr_t *having;           /* 없으면 NULL */
     sqlstmt_order_t *order;
     size_t order_count;
     sqlexpr_t *limit;            /* 없으면 NULL */

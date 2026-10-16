@@ -21,6 +21,7 @@
  *   - || 는 TEXT·INTEGER를 받아 TEXT를 만든다(INTEGER는 10진 표기). REAL·BLOB은 형식 오류.
  *   - LIKE는 대소문자를 구분한다(%·_, ESCAPE 한 글자). SQLite 기본(ASCII 대소문자 무시)과 다르다.
  *   - CAST는 value_cast의 정확한 변환만 받는다(잃는 변환은 형식 오류).
+ *   - 집계 COUNT·SUM·AVG·MIN·MAX는 이 모듈이 계산하지 않는다. 실행기가 그룹마다 접어 match로 넘긴다.
  *   - 함수: ABS, LENGTH(글자 수, BLOB은 바이트 수), LOWER, UPPER(ASCII), SUBSTR(x, 시작[, 길이])(글자 단위,
  *     시작이 1보다 작으면 그만큼 길이를 줄인다), TRIM·LTRIM·RTRIM(x[, 문자들]), REPLACE, COALESCE, NULLIF.
  */
@@ -36,6 +37,8 @@ typedef enum {
     SQLEVAL_UNKNOWN_FUNCTION,
     SQLEVAL_ARGUMENT,         /* 함수 인자 수·인자 값 */
     SQLEVAL_NOT_CONSTANT,     /* 상수 자리에 열이 나옴 */
+    SQLEVAL_AGGREGATE,        /* 집계 함수를 쓸 수 없는 자리(WHERE·GROUP BY·집계 안의 집계 등) */
+    SQLEVAL_NOT_GROUPED,      /* 그룹 질의에서 GROUP BY에 없는 열을 집계 밖에서 씀 */
     SQLEVAL_LIMIT             /* 값 크기 한도 */
 } sqleval_status_t;
 
@@ -48,6 +51,12 @@ typedef struct {
 /* 열 이름을 번호로 바꾼다. 없으면 SQLEVAL_NO_COLUMN, 둘 이상과 맞으면 SQLEVAL_AMBIGUOUS. *type은 열 형식 */
 #define SQLEVAL_NO_COLUMN ((size_t)-1)
 #define SQLEVAL_AMBIGUOUS ((size_t)-2)
+#define SQLEVAL_UNGROUPED ((size_t)-3)
+/*
+ * 부분식 치환. 컴파일은 각 노드에서 먼저 match를 부르고, 번호를 돌려주면 그 부분식 전체를 row[번호]로 읽는다
+ * (그룹 질의에서 GROUP BY 식과 집계 호출을 그룹 행의 칸으로 바꿀 때 쓴다). 맞지 않으면 SQLEVAL_NO_COLUMN.
+ */
+typedef size_t (*sqleval_match_fn)(void *ctx, const sqlexpr_t *expr, value_type_t *type);
 typedef size_t (*sqleval_resolve_fn)(void *ctx, const sqlstmt_name_t *qualifier, const sqlstmt_name_t *name,
                                      value_type_t *type);
 
@@ -57,8 +66,11 @@ typedef struct sqleval_prog sqleval_prog_t;
  * expr를 컴파일한다. resolve가 NULL이면 열을 쓸 수 없다(상수식). 성공하면 *out을 sqleval_free로 해제한다.
  * 프로그램은 expr를 빌려 쓰므로 expr보다 오래 살면 안 된다.
  */
-sqleval_status_t sqleval_compile(const sqlexpr_t *expr, sqleval_resolve_fn resolve, void *ctx,
+sqleval_status_t sqleval_compile(const sqlexpr_t *expr, sqleval_resolve_fn resolve, sqleval_match_fn match, void *ctx,
                                  sqleval_prog_t **out, sqleval_error_t *error);
+
+/* COUNT·SUM·AVG·MIN·MAX(인자 하나) 호출인지 */
+bool sqleval_is_aggregate(const sqlexpr_t *expr);
 void sqleval_free(sqleval_prog_t *prog);
 
 /* 정적 결과 형식. 모든 인자가 NULL 리터럴이면 VALUE_NULL이다 */

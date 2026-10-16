@@ -29,11 +29,11 @@ static const char *const RESERVED[] = {
     "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
     "INDEX", "UNIQUE", "AND", "OR", "IN", "BETWEEN", "LIKE", "ESCAPE", "CASE", "WHEN", "THEN",
     "ELSE", "END", "CAST", "AS", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "DISTINCT",
-    "TRUE", "FALSE", "EXISTS", NULL};
+    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
-    "ALL", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL",
+    "ALL", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL",
     "UNION", "EXCEPT", "INTERSECT", "RETURNING", "ON", "USING", "WINDOW", "OVER", "WITH", NULL};
 
 static bool fail(parser_t *p, sqlstmt_status_t status, sqlstmt_reason_t reason, size_t offset)
@@ -215,6 +215,9 @@ void sqlstmt_free(sqlstmt_t *statement)
             }
             free(statement->select.items);
             for (size_t i = 0; i < statement->select.order_count; i++) expr_free(statement->select.order[i].expr);
+            for (size_t i = 0; i < statement->select.group_count; i++) expr_free(statement->select.group_by[i]);
+            free(statement->select.group_by);
+            expr_free(statement->select.having);
             free(statement->select.order);
             expr_free(statement->select.where);
             expr_free(statement->select.limit);
@@ -1032,6 +1035,21 @@ static bool parse_select(parser_t *p, sqlstmt_t *statement)
         }
     }
     if (!parse_where(p, &query->where)) return false;
+    if (take_word(p, "GROUP")) {
+        if (!expect_word(p, "BY")) return false;
+        size_t group_capacity = 0;
+        do {
+            void *grown = reserve(p, query->group_by, &group_capacity, query->group_count, sizeof(*query->group_by),
+                                  here_offset(p));
+            if (grown == NULL) return false;
+            query->group_by = grown;
+            if (!parse_expr(p, &query->group_by[query->group_count])) return false;
+            query->group_count++;
+        } while (take_punct(p, ","));
+    }
+    if (take_word(p, "HAVING")) {
+        if (!parse_expr(p, &query->having)) return false;
+    }
     if (take_word(p, "ORDER")) {
         if (!expect_word(p, "BY") || !parse_order(p, query)) return false;
     }
