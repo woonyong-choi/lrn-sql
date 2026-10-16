@@ -66,18 +66,19 @@ static void put(buffer_t *b, const char *format, ...) __attribute__((format(prin
 
 static void put(buffer_t *b, const char *format, ...)
 {
-    char piece[512];
     va_list args;
     va_start(args, format);
-    int n = vsnprintf(piece, sizeof(piece), format, args);
+    int n = vsnprintf(NULL, 0, format, args);
     va_end(args);
-    assert(n >= 0 && (size_t)n < sizeof(piece));
+    assert(n >= 0);
     if (b->len + (size_t)n + 1 > b->cap) {
         b->cap = (b->cap + (size_t)n + 1) * 2;
         b->text = realloc(b->text, b->cap);
         assert(b->text != NULL);
     }
-    memcpy(b->text + b->len, piece, (size_t)n + 1);
+    va_start(args, format);
+    vsnprintf(b->text + b->len, (size_t)n + 1, format, args);
+    va_end(args);
     b->len += (size_t)n;
 }
 
@@ -583,6 +584,135 @@ static void test_key_index_follows_transactions(void)
 
 /* ── 7. 거절 ── */
 
+/* ── 9. 열린 트랜잭션과 다른 세션의 큰 값 읽기, 회수 뒤 재사용(#91) ── */
+
+static char *big_text(size_t size, unsigned seed)
+{
+    char *text = malloc(size + 1);
+    assert(text != NULL);
+    for (size_t i = 0; i < size; i++) text[i] = (char)('a' + (i * 7 + seed) % 26);
+    text[size] = '\0';
+    return text;
+}
+
+/* format의 %s 하나를 text로 채운다 */
+static char *with_text(const char *format, const char *text)
+{
+    size_t size = strlen(format) + strlen(text) + 1;
+    char *sql = malloc(size);
+    assert(sql != NULL);
+    snprintf(sql, size, format, text);
+    return sql;
+}
+
+static void ok_with(session_t *s, const char *format, const char *text)
+{
+    char *sql = with_text(format, text);
+    ok(s, sql);
+    free(sql);
+}
+
+/* k의 값이 text와 같다(text가 NULL이면 행이 없다) */
+static void expect_value(session_t *s, int key, const char *text, const char *what)
+{
+    char sql[64];
+    snprintf(sql, sizeof(sql), "SELECT v FROM big WHERE k = %d", key);
+    char *line = run(s, sql);
+    char *expected = text != NULL ? with_text("[1] '%s'", text) : strdup("[0]");
+    CHECK(strcmp(line, expected) == 0, "%s: k=%d (길이 %zu, 기대 길이 %zu)", what, key, strlen(line), strlen(expected));
+    free(expected);
+    free(line);
+}
+
+static void expect_pages(env_t *env, const char *what)
+{
+    database_page_check_t pages;
+    database_status_t st = database_check_pages(session_db_handle(env->db), &pages);
+    CHECK(st == DATABASE_OK && pages.orphaned == 0 && pages.conflicts == 0,
+          "%s: 페이지 회계 (상태 %d, 고아 %llu, 충돌 %llu)", what, (int)st, (unsigned long long)pages.orphaned,
+          (unsigned long long)pages.conflicts);
+}
+
+/*
+ * 지원 범위: 읽기 문장 하나와 commit은 직렬로 실행되고, 결과는 문장이 끝날 때 버퍼로 복사된다. 긴 읽기 스냅샷이나
+ * 읽기 전용 트랜잭션은 없다. 그래서 확인하는 것은 (1) 다른 세션의 트랜잭션이 열린 동안 그 트랜잭션이 놓은 체인이
+ * 게시된 상태에서 계속 읽히는지, (2) commit 뒤 받아 둔 결과가 회수·재사용과 무관하게 남는지,
+ * (3) 두 번 이상 commit해 놓은 페이지를 다시 쓴 뒤에도 값과 페이지 회계가 맞는지다.
+ */
+static void test_large_values_across_sessions(void)
+{
+    printf("\n[큰 값: 열린 트랜잭션과 다른 세션의 읽기, 회수 뒤 재사용]\n");
+    create_plain_file();
+    env_t env;
+    assert(open_env(&env, 64u << 20));
+    session_t *a = NULL, *b = NULL;
+    assert(session_open(env.db, &a) == SESSION_OK && session_open(env.db, &b) == SESSION_OK);
+    char *v0 = big_text(20000, 0), *w0 = big_text(9000, 1), *v1 = big_text(30000, 2), *v3 = big_text(12000, 3);
+    ok(a, "CREATE TABLE big (k INTEGER PRIMARY KEY, v TEXT)");
+    ok_with(a, "INSERT INTO big VALUES (1, '%s')", v0);
+    ok_with(a, "INSERT INTO big VALUES (2, '%s')", w0);
+
+    /* a가 옛 체인을 놓고(갱신·삭제) 같은 트랜잭션에서 새 체인을 받는다. b는 게시된 옛 값을 읽는다 */
+    expect(a, "BEGIN", "CMD BEGIN 0");
+    ok_with(a, "UPDATE big SET v = '%s' WHERE k = 1", v1);
+    ok(a, "DELETE FROM big WHERE k = 2");
+    ok_with(a, "INSERT INTO big VALUES (3, '%s')", v3);
+    ok_with(a, "INSERT INTO big VALUES (4, '%s')", v1);
+    expect_value(b, 1, v0, "열린 트랜잭션 동안 b");
+    expect_value(b, 2, w0, "열린 트랜잭션 동안 b");
+    expect_value(b, 3, NULL, "열린 트랜잭션 동안 b");
+    result_t *held = NULL;
+    const char *all = "SELECT v FROM big WHERE k = 1";
+    CHECK(session_exec(b, NULL, (const uint8_t *)all, strlen(all), NULL, &held) == DATABASE_EXEC_OK && held != NULL,
+          "b가 결과를 받아 둔다");
+    expect(a, "COMMIT", "CMD COMMIT 0");
+    expect_value(b, 1, v1, "commit 뒤 b");
+    expect_value(b, 2, NULL, "commit 뒤 b");
+    expect_value(b, 3, v3, "commit 뒤 b");
+    expect_pages(&env, "첫 commit 뒤");
+
+    /* 놓은 페이지가 두 commit 뒤 재사용된다. 매 commit 뒤 값과 회계가 맞아야 한다 */
+    for (int round = 0; round < 6; round++) {
+        char *next = big_text(9000 + (size_t)round * 4000, 10 + (unsigned)round);
+        ok_with(a, "UPDATE big SET v = '%s' WHERE k = 1", next);
+        if (round % 2 == 0) {
+            ok(a, "DELETE FROM big WHERE k = 4");
+            ok_with(a, "INSERT INTO big VALUES (4, '%s')", next);
+        } else {
+            ok(a, "UPDATE big SET v = 'x' WHERE k = 3");
+            ok_with(a, "UPDATE big SET v = '%s' WHERE k = 3", next);
+        }
+        expect_value(b, 1, next, "재사용 중 b");
+        expect_value(b, round % 2 == 0 ? 4 : 3, next, "재사용 중 b");
+        expect_pages(&env, "재사용 중");
+        free(next);
+    }
+    char *held_line = dump(held);
+    char *held_expected = with_text("[1] '%s'", v0);
+    CHECK(strcmp(held_line, held_expected) == 0, "받아 둔 결과는 회수·재사용 뒤에도 commit 전 값");
+    free(held_line);
+    free(held_expected);
+    result_release(&held);
+
+    session_close(a);
+    session_close(b);
+    close_env(&env);
+    assert(open_env(&env, 64u << 20));
+    assert(session_open(env.db, &b) == SESSION_OK);
+    char *last = big_text(9000 + 5 * 4000, 15);
+    expect_value(b, 1, last, "다시 연 뒤");
+    expect_value(b, 3, last, "다시 연 뒤");
+    expect_value(b, 2, NULL, "다시 연 뒤");
+    expect_pages(&env, "다시 연 뒤");
+    free(last);
+    session_close(b);
+    close_env(&env);
+    free(v0);
+    free(w0);
+    free(v1);
+    free(v3);
+}
+
 static void test_rejections(void)
 {
     printf("\n[지원하지 않는 사용]\n");
@@ -632,6 +762,7 @@ int main(void)
     test_budget();
     test_commit_restart();
     test_key_index_follows_transactions();
+    test_large_values_across_sessions();
     test_rejections();
     fresh_dir();
     rmdir(DIR_NAME);
