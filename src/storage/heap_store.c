@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "storage/heap_store.h"
+#include "storage/le.h"
 #include "storage/overflow.h"
 #include "storage/pk_tree.h"
 #include "storage/text_tree.h"
@@ -91,21 +92,6 @@ struct heap_cursor {
 };
 
 /* ── 보조 함수 ── */
-
-static uint32_t get_u32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
-static void put_u32(uint8_t *p, uint32_t v)
-{
-    for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i));
-}
-
-static uint16_t get_u16(const uint8_t *p)
-{
-    return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
-}
 
 /* 계상 helper. 모두 QUERY scope이며 ledger가 없으면 항상 성공한다. */
 static bool acct_reserve(const mem_ledger_t *ledger, size_t bytes)
@@ -299,21 +285,9 @@ static heap_status_t parse_fields(const heap_t *heap, record_slice_t slice, reco
 static overflow_ref_t ref_from(const record_value_t *payload)
 {
     overflow_ref_t ref;
-    ref.head = get_u32(payload->bytes);
-    ref.size_bytes = get_u32(payload->bytes + 4);
+    ref.head = le_get_u32(payload->bytes);
+    ref.size_bytes = le_get_u32(payload->bytes + 4);
     return ref;
-}
-
-static uint64_t get_u64(const uint8_t *p)
-{
-    uint64_t v = 0;
-    for (unsigned i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
-    return v;
-}
-
-static void put_u64(uint8_t *p, uint64_t v)
-{
-    for (unsigned i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
 }
 
 static heap_status_t set_bytes_value(value_type_t type, const uint8_t *bytes, size_t size,
@@ -410,7 +384,7 @@ static heap_status_t decode_row(heap_t *heap, const record_value_t *f, const boo
                 if (value_set_integer(&tmp[i], payload->integer) != VALUE_OK) result = HEAP_CORRUPT;
                 break;
             case VALUE_REAL: {
-                uint64_t bits = get_u64(payload->bytes);
+                uint64_t bits = le_get_u64(payload->bytes);
                 double real;
                 memcpy(&real, &bits, sizeof(real));
                 value_status_t status = value_set_real(&tmp[i], real);
@@ -475,7 +449,7 @@ static heap_status_t read_directory_page(heap_t *heap, uint32_t page, uint8_t *b
 /* 항목 수가 한 페이지의 한도 안이고 항목 뒤가 모두 0인지 검사한다. */
 static heap_status_t check_directory_count(const uint8_t *body, bool hinted, uint32_t *count)
 {
-    *count = get_u32(body + 16);
+    *count = le_get_u32(body + 16);
     size_t width = hinted ? 6u : 4u;
     size_t limit = hinted ? HEAP_HINT_DIRECTORY_ENTRIES : HEAP_DIRECTORY_ENTRIES;
     if (*count > limit) return HEAP_CORRUPT;
@@ -492,11 +466,11 @@ static heap_status_t read_tree_leaf(heap_t *heap, uint32_t page, bool is_last, u
     if (result == HEAP_UNSUPPORTED_LOCATOR) return HEAP_CORRUPT;
     if (result != HEAP_OK) return result;
     bool hinted = memcmp(body, HEAP_HINT_DIRECTORY_MAGIC, 4) == 0 &&
-                  get_u16(body + 4) == HEAP_HINT_DIRECTORY_VERSION;
+                  le_get_u16(body + 4) == HEAP_HINT_DIRECTORY_VERSION;
     bool legacy = memcmp(body, HEAP_DIRECTORY_MAGIC, 4) == 0 &&
-                  get_u16(body + 4) == HEAP_DIRECTORY_VERSION;
+                  le_get_u16(body + 4) == HEAP_DIRECTORY_VERSION;
     if ((!hinted && !legacy) || (*format_known && *has_hints != hinted) ||
-        get_u16(body + 6) != 0 || get_u32(body + 8) != heap->table_id || get_u32(body + 12) != PAGE_FILE_NO_PAGE) {
+        le_get_u16(body + 6) != 0 || le_get_u32(body + 8) != heap->table_id || le_get_u32(body + 12) != PAGE_FILE_NO_PAGE) {
         return HEAP_CORRUPT;
     }
     *has_hints = hinted;
@@ -510,8 +484,8 @@ static heap_status_t read_tree_leaf(heap_t *heap, uint32_t page, bool is_last, u
         !list_reserve16(free_bytes, count, &heap->ledger)) return HEAP_NOMEM;
     for (uint32_t i = 0; i < count; i++) {
         size_t offset = HEAP_DIRECTORY_HEADER_BYTES + (size_t)i * (hinted ? 6u : 4u);
-        entries->items[entries->len++] = get_u32(body + offset);
-        free_bytes->items[free_bytes->len++] = hinted ? get_u16(body + offset + 4u) : 0;
+        entries->items[entries->len++] = le_get_u32(body + offset);
+        free_bytes->items[free_bytes->len++] = hinted ? le_get_u16(body + offset + 4u) : 0;
     }
     return HEAP_OK;
 }
@@ -520,8 +494,8 @@ static heap_status_t read_tree_leaf(heap_t *heap, uint32_t page, bool is_last, u
 static heap_status_t read_tree(heap_t *heap, uint32_t root, const uint8_t *body, u32_list_t *entries,
                                u16_list_t *free_bytes, u32_list_t *dirs, bool *has_hints)
 {
-    if (get_u16(body + 4) != HEAP_TREE_ROOT_VERSION || get_u16(body + 6) != 0 ||
-        get_u32(body + 8) != heap->table_id || get_u32(body + 12) != 0) {
+    if (le_get_u16(body + 4) != HEAP_TREE_ROOT_VERSION || le_get_u16(body + 6) != 0 ||
+        le_get_u32(body + 8) != heap->table_id || le_get_u32(body + 12) != 0) {
         return HEAP_UNSUPPORTED_LOCATOR;
     }
     uint32_t leaves;
@@ -531,7 +505,7 @@ static heap_status_t read_tree(heap_t *heap, uint32_t root, const uint8_t *body,
     if (!list_push(dirs, root, &heap->ledger) || !list_reserve(dirs, leaves, &heap->ledger)) return HEAP_NOMEM;
     bool format_known = false;
     for (uint32_t i = 0; i < leaves && result == HEAP_OK; i++) {
-        uint32_t leaf = get_u32(body + HEAP_DIRECTORY_HEADER_BYTES + (size_t)i * 4);
+        uint32_t leaf = le_get_u32(body + HEAP_DIRECTORY_HEADER_BYTES + (size_t)i * 4);
         dirs->items[dirs->len++] = leaf;
         result = read_tree_leaf(heap, leaf, i + 1 == leaves, entries,
                                 free_bytes, has_hints, &format_known);
@@ -565,11 +539,11 @@ static heap_status_t read_directory(heap_t *heap, const page_file_control_t *con
             break;
         }
         bool hinted = memcmp(body, HEAP_HINT_DIRECTORY_MAGIC, 4) == 0 &&
-                      get_u16(body + 4) == HEAP_HINT_DIRECTORY_VERSION;
+                      le_get_u16(body + 4) == HEAP_HINT_DIRECTORY_VERSION;
         bool legacy = memcmp(body, HEAP_DIRECTORY_MAGIC, 4) == 0 &&
-                      get_u16(body + 4) == HEAP_DIRECTORY_VERSION;
+                      le_get_u16(body + 4) == HEAP_DIRECTORY_VERSION;
         if ((!hinted && !legacy) || (format_known && has_hints != hinted) ||
-            get_u16(body + 6) != 0 || get_u32(body + 8) != heap->table_id) {
+            le_get_u16(body + 6) != 0 || le_get_u32(body + 8) != heap->table_id) {
             result = dirs.len == 0 ? HEAP_UNSUPPORTED_LOCATOR : HEAP_CORRUPT;
             break;
         }
@@ -582,10 +556,10 @@ static heap_status_t read_directory(heap_t *heap, const page_file_control_t *con
             !list_reserve16(&free_bytes, count, ledger)) { result = HEAP_NOMEM; break; }
         for (uint32_t i = 0; i < count; i++) {
             size_t offset = HEAP_DIRECTORY_HEADER_BYTES + (size_t)i * (hinted ? 6u : 4u);
-            entries.items[entries.len++] = get_u32(body + offset);
-            free_bytes.items[free_bytes.len++] = hinted ? get_u16(body + offset + 4u) : 0;
+            entries.items[entries.len++] = le_get_u32(body + offset);
+            free_bytes.items[free_bytes.len++] = hinted ? le_get_u16(body + offset + 4u) : 0;
         }
-        page = get_u32(body + 12);
+        page = le_get_u32(body + 12);
     }
 
     if (result == HEAP_OK) {
@@ -1020,7 +994,7 @@ heap_status_t heap_cursor_next_projected(heap_cursor_t *cursor, const bool *sele
                 cursor_drop_page(cursor);
                 return status;
             }
-            cursor->slot_count = get_u16(cursor->page + RECORD_PAGE_SLOT_COUNT_OFFSET);
+            cursor->slot_count = le_get_u16(cursor->page + RECORD_PAGE_SLOT_COUNT_OFFSET);
             cursor->next_slot = 0;
         }
         while (cursor->next_slot < cursor->slot_count) {
@@ -1158,7 +1132,7 @@ heap_status_t heap_collect_pages_with_indexes(heap_t *heap, const uint32_t *root
         list.items[list.len++] = heap->entries[i];
         result = read_record_page(heap, heap->entries[i], page);
         if (result != HEAP_OK) break;
-        uint16_t slots = get_u16(page + RECORD_PAGE_SLOT_COUNT_OFFSET);
+        uint16_t slots = le_get_u16(page + RECORD_PAGE_SLOT_COUNT_OFFSET);
         for (uint16_t slot = 0; slot < slots && result == HEAP_OK; slot++) {
             record_slice_t slice;
             record_page_status_t got = record_page_get(page, slot, &slice);
@@ -1947,7 +1921,7 @@ static heap_status_t encode_row(heap_batch_t *batch, const value_view_t *values,
             case VALUE_REAL: {
                 uint64_t bits;
                 memcpy(&bits, &v->real, sizeof(bits));
-                put_u64(scratch[i], bits);
+                le_put_u64(scratch[i], bits);
                 *payload = (record_value_t){RECORD_BLOB, 0, scratch[i], REAL_BYTES};
                 break;
             }
@@ -1996,8 +1970,8 @@ static heap_status_t encode_row(heap_batch_t *batch, const value_view_t *values,
         }
         spilled[pick] = ref;
         is_spilled[pick] = true;
-        put_u32(scratch[pick], ref.head);
-        put_u32(scratch[pick] + 4, ref.size_bytes);
+        le_put_u32(scratch[pick], ref.head);
+        le_put_u32(scratch[pick] + 4, ref.size_bytes);
         fields[1 + 2 * pick].integer = KIND_OVERFLOW;
         *payload = (record_value_t){RECORD_BLOB, 0, scratch[pick], OVERFLOW_REF_BYTES};
     }
@@ -2246,12 +2220,12 @@ static heap_status_t write_directory_page(heap_t *heap, uint32_t page, const cha
     memset(body, 0, sizeof(body));
     memcpy(body, magic, 4);
     body[4] = (uint8_t)version;
-    put_u32(body + 8, heap->table_id);
-    put_u32(body + 16, (uint32_t)count);
+    le_put_u32(body + 8, heap->table_id);
+    le_put_u32(body + 16, (uint32_t)count);
     bool hinted = free_bytes != NULL;
     for (size_t k = 0; k < count; k++) {
         size_t offset = HEAP_DIRECTORY_HEADER_BYTES + k * (hinted ? 6u : 4u);
-        put_u32(body + offset, items[k]);
+        le_put_u32(body + offset, items[k]);
         if (hinted) {
             body[offset + 4u] = (uint8_t)free_bytes[k];
             body[offset + 5u] = (uint8_t)(free_bytes[k] >> 8);

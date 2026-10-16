@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "storage/text_tree.h"
+#include "storage/le.h"
 
 #define LEVEL_ANY (-1)
 #define ENTRY_FIXED_BYTES 8u
@@ -35,27 +36,6 @@ typedef struct {
     uint32_t count;
 } change_t;
 
-static uint16_t get_u16(const uint8_t *p)
-{
-    return (uint16_t)((uint16_t)p[0] | (uint16_t)p[1] << 8);
-}
-
-static uint32_t get_u32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
-static void put_u16(uint8_t *p, uint16_t value)
-{
-    p[0] = (uint8_t)value;
-    p[1] = (uint8_t)(value >> 8);
-}
-
-static void put_u32(uint8_t *p, uint32_t value)
-{
-    for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(value >> (8 * i));
-}
-
 static int compare_keys(text_key_t left, text_key_t right)
 {
     size_t common = left.size < right.size ? left.size : right.size;
@@ -71,10 +51,10 @@ static size_t entry_size(entry_t entry)
 
 static entry_t entry_at(const node_t *node, uint32_t index)
 {
-    uint16_t offset = get_u16(node->body + TEXT_TREE_HEADER_BYTES + 2u * index);
+    uint16_t offset = le_get_u16(node->body + TEXT_TREE_HEADER_BYTES + 2u * index);
     const uint8_t *at = node->body + offset;
-    uint16_t size = get_u16(at);
-    return (entry_t){{at + 2, size}, get_u32(at + 2 + size), get_u16(at + 6 + size)};
+    uint16_t size = le_get_u16(at);
+    return (entry_t){{at + 2, size}, le_get_u32(at + 2 + size), le_get_u16(at + 6 + size)};
 }
 
 static bool node_valid(const node_t *node)
@@ -83,10 +63,10 @@ static bool node_valid(const node_t *node)
     if (node->level > 0 && node->count == 0) return false;
     size_t cursor = PAGE_BODY_BYTES;
     for (uint32_t i = 0; i < node->count; i++) {
-        uint16_t offset = get_u16(node->body + TEXT_TREE_HEADER_BYTES + 2u * i);
+        uint16_t offset = le_get_u16(node->body + TEXT_TREE_HEADER_BYTES + 2u * i);
         if (cursor < ENTRY_FIXED_BYTES || offset < TEXT_TREE_HEADER_BYTES + 2u * node->count ||
             offset > cursor - ENTRY_FIXED_BYTES) return false;
-        uint16_t size = get_u16(node->body + offset);
+        uint16_t size = le_get_u16(node->body + offset);
         if (size > TEXT_TREE_KEY_MAX_BYTES || cursor < ENTRY_FIXED_BYTES + size ||
             offset != cursor - ENTRY_FIXED_BYTES - size) return false;
         cursor = offset;
@@ -103,10 +83,10 @@ static pk_status_t load_node(const pk_tree_io_t *io, uint32_t table_id, uint32_t
     pk_status_t status = io->read(io->context, page, node->body);
     if (status != PK_OK) return status;
     if (memcmp(node->body, TEXT_TREE_MAGIC, 4) != 0 ||
-        get_u16(node->body + 4) != TEXT_TREE_VERSION || get_u32(node->body + 8) != table_id) return PK_CORRUPT;
+        le_get_u16(node->body + 4) != TEXT_TREE_VERSION || le_get_u32(node->body + 8) != table_id) return PK_CORRUPT;
     node->level = node->body[6];
-    node->count = get_u32(node->body + 12);
-    node->stamp = get_u32(node->body + 16);
+    node->count = le_get_u32(node->body + 12);
+    node->stamp = le_get_u32(node->body + 16);
     if (!node_valid(node) || (expected_level != LEVEL_ANY && node->level != expected_level)) return PK_CORRUPT;
     return PK_OK;
 }
@@ -115,13 +95,13 @@ static pk_status_t store_node(const pk_tree_io_t *io, uint32_t table_id, node_t 
                               uint32_t old_page, uint32_t *page)
 {
     memcpy(node->body, TEXT_TREE_MAGIC, 4);
-    put_u16(node->body + 4, TEXT_TREE_VERSION);
+    le_put_u16(node->body + 4, TEXT_TREE_VERSION);
     node->body[6] = node->level;
     node->body[7] = 0;
-    put_u32(node->body + 8, table_id);
-    put_u32(node->body + 12, node->count);
-    put_u32(node->body + 16, node->stamp);
-    put_u32(node->body + 20, 0);
+    le_put_u32(node->body + 8, table_id);
+    le_put_u32(node->body + 12, node->count);
+    le_put_u32(node->body + 16, node->stamp);
+    le_put_u32(node->body + 20, 0);
     uint32_t target = old_page;
     bool in_place = old_page != PAGE_FILE_NO_PAGE && io->is_fresh(io->context, old_page);
     if (!in_place) {
@@ -164,11 +144,11 @@ static void build_node(node_t *node, uint8_t level, uint32_t stamp,
         entry_t entry = entries[i];
         if (level > 0 && i == 0) entry.key = (text_key_t){NULL, 0};
         cursor -= entry_size(entry);
-        put_u16(node->body + TEXT_TREE_HEADER_BYTES + 2u * i, (uint16_t)cursor);
-        put_u16(node->body + cursor, entry.key.size);
+        le_put_u16(node->body + TEXT_TREE_HEADER_BYTES + 2u * i, (uint16_t)cursor);
+        le_put_u16(node->body + cursor, entry.key.size);
         if (entry.key.size > 0) memcpy(node->body + cursor + 2, entry.key.bytes, entry.key.size);
-        put_u32(node->body + cursor + 2 + entry.key.size, entry.target);
-        put_u16(node->body + cursor + 6 + entry.key.size, entry.slot);
+        le_put_u32(node->body + cursor + 2 + entry.key.size, entry.target);
+        le_put_u16(node->body + cursor + 6 + entry.key.size, entry.slot);
     }
 }
 
