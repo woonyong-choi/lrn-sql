@@ -56,6 +56,12 @@ typedef struct {
     int misaligned;
     int io_calls;
     int pread_calls;      /* 페이지 단위 pread 수(open의 8바이트 탐색 제외) */
+    size_t short_max;     /* 0이 아니면 pread·pwrite 한 번에 이 바이트까지만 옮긴다(짧은 I/O) */
+    bool eintr_odd;       /* 홀수 번째 pread·pwrite는 아무것도 옮기지 않고 EINTR로 끝난다 */
+    bool eintr_always;    /* pwrite가 매번 EINTR로 끝난다 */
+    int pread_zero_at;    /* n번째 페이지 pread가 0바이트(EOF)를 돌려준다 */
+    int pwrite_zero_at;   /* n번째 pwrite가 0바이트를 돌려준다 */
+    int raw_calls;        /* eintr_odd·zero 판정용 호출 수 */
 } hooks_t;
 
 static hooks_t g_hooks;
@@ -68,23 +74,42 @@ static void check_aligned(size_t size, off_t offset)
     if (size != PAGE_FILE_PAGE_BYTES || offset % PAGE_FILE_PAGE_BYTES != 0) g_hooks.misaligned++;
 }
 
+/* 짧은 I/O·EINTR 주입. 남은 바이트를 이어 옮기는 호출은 정렬 검사에서 뺀다. */
+static bool inject_eintr(void)
+{
+    if (!g_hooks.eintr_odd || ++g_hooks.raw_calls % 2 == 0) return false;
+    errno = EINTR;
+    return true;
+}
+
 static ssize_t hook_pread(int fd, void *buf, size_t size, off_t offset)
 {
     /* open이 첫 8바이트를 보는 탐색(8바이트)은 예외다. */
     if (size != 8) {
-        check_aligned(size, offset);
+        if (g_hooks.short_max == 0) check_aligned(size, offset);
         g_hooks.pread_calls++;
+        if (g_hooks.pread_zero_at != 0 && g_hooks.pread_calls == g_hooks.pread_zero_at) return 0;
+        if (inject_eintr()) return -1;
+        if (g_hooks.short_max != 0 && size > g_hooks.short_max) size = g_hooks.short_max;
     }
     return pread(fd, buf, size, offset);
 }
 
 static ssize_t hook_pwrite(int fd, const void *buf, size_t size, off_t offset)
 {
-    check_aligned(size, offset);
+    if (g_hooks.short_max == 0) check_aligned(size, offset);
     if (g_hooks.pwrite_fail_at != 0 && ++g_hooks.pwrite_calls == g_hooks.pwrite_fail_at) {
         errno = ENOSPC;
         return -1;
     }
+    if (g_hooks.pwrite_zero_at != 0 && ++g_hooks.pwrite_calls == g_hooks.pwrite_zero_at) return 0;
+    if (g_hooks.eintr_always) {
+        g_hooks.raw_calls++;
+        errno = EINTR;
+        return -1;
+    }
+    if (inject_eintr()) return -1;
+    if (g_hooks.short_max != 0 && size > g_hooks.short_max) size = g_hooks.short_max;
     return pwrite(fd, buf, size, offset);
 }
 
@@ -1314,6 +1339,86 @@ static void test_incomplete_commit_falls_back(void)
     clean_dir();
 }
 
+/*
+ * #78: 짧은 읽기·쓰기와 EINTR은 이어서 끝까지 옮기고, 진행 없는 0바이트 반환과 끝없는 EINTR은 성공으로 끝나지
+ * 않는다. 0바이트 pread는 잘린 파일, 0바이트 pwrite는 공간 부족과 같게 본다.
+ */
+static void test_short_io_and_eintr(void)
+{
+    printf("\n[test_short_io_and_eintr]\n");
+    fresh_dir();
+    hooks_reset();
+    page_file_set_default_cache_pages(0);
+    uint8_t body[PAGE_BODY_BYTES], got[PAGE_BODY_BYTES];
+    for (size_t i = 0; i < sizeof(body); i++) body[i] = (uint8_t)(i * 7 + 3);
+
+    /* 1000바이트씩 끊기고 두 번에 한 번 EINTR이어도 commit과 다시 읽기가 같은 바이트다 */
+    g_hooks.short_max = 1000;
+    g_hooks.eintr_odd = true;
+    page_file_t *file = NULL;
+    uint32_t id = 0;
+    bool created = page_file_create(DB_PATH, &file) == PAGE_FILE_OK;
+    CHECK(created && page_file_alloc(file, &id) == PAGE_FILE_OK &&
+              page_file_write(file, id, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK &&
+              page_file_commit(file) == PAGE_FILE_OK && page_file_publish(file) == PAGE_FILE_OK,
+          "짧은 쓰기·EINTR 속 생성과 commit 성공");
+    if (created) page_file_close(file);
+    bool opened = page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK;
+    CHECK(opened && page_file_read(file, id, PAGE_KIND_OVERFLOW, 0, got) == PAGE_FILE_OK &&
+              memcmp(body, got, sizeof(body)) == 0,
+          "짧은 읽기·EINTR 속 다시 읽은 바이트가 같음");
+    if (opened) page_file_close(file);
+    if (!created || !opened) {
+        g_hooks.short_max = 0;
+        g_hooks.eintr_odd = false;
+        clean_dir();
+        return;
+    }
+
+    /* 페이지 중간의 0바이트 pread는 잘린 파일이다. 읽은 앞부분을 성공으로 돌려주지 않는다 */
+    hooks_reset();
+    g_hooks.short_max = 1000;
+    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
+    g_hooks.pread_calls = 0;
+    g_hooks.pread_zero_at = 3;
+    errno = 0;
+    CHECK(page_file_read(file, id, PAGE_KIND_OVERFLOW, 0, got) == PAGE_FILE_IO && errno == EIO,
+          "중간 0바이트 pread는 IO와 EIO");
+    page_file_close(file);
+
+    /* 0바이트 pwrite는 진행이 없으므로 공간 부족이다. 실패한 commit은 이전 세대를 남긴다 */
+    hooks_reset();
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    memset(body, 0x5a, sizeof(body));
+    uint32_t fresh;
+    assert(page_file_alloc(file, &fresh) == PAGE_FILE_OK);
+    g_hooks.pwrite_zero_at = 1;
+    errno = 0;
+    CHECK(page_file_write(file, fresh, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_IO && errno == ENOSPC,
+          "0바이트 pwrite는 IO와 ENOSPC");
+    page_file_close(file);
+
+    /* 끝없는 EINTR은 재시도 한도 뒤 실패다 */
+    hooks_reset();
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    assert(page_file_alloc(file, &fresh) == PAGE_FILE_OK);
+    g_hooks.eintr_always = true;
+    errno = 0;
+    CHECK(page_file_write(file, fresh, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_IO && errno == EINTR &&
+              g_hooks.raw_calls <= 1000,
+          "끝없는 EINTR은 한도 뒤 IO");
+    g_hooks.eintr_always = false;
+    page_file_close(file);
+
+    hooks_reset();
+    page_file_set_default_cache_pages(PAGE_FILE_CACHE_PAGES);
+    CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK &&
+              page_file_read(file, id, PAGE_KIND_OVERFLOW, 0, got) == PAGE_FILE_OK && got[0] == (uint8_t)3,
+          "실패한 쓰기들 뒤에도 게시된 세대는 처음 그대로");
+    page_file_close(file);
+    clean_dir();
+}
+
 int main(void)
 {
     page_file_set_default_io(&HOOKED);
@@ -1331,6 +1436,7 @@ int main(void)
     test_free_list_survives_reopen();
     test_free_list_commit_failures();
     test_incomplete_commit_falls_back();
+    test_short_io_and_eintr();
     page_file_set_default_io(NULL);
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
