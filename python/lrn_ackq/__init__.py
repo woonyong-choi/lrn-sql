@@ -5,7 +5,7 @@ persistqueue_compat은 persist-queue 1.1.0 SQLiteAckQueue의 일부 호출을 �
 """
 
 from lrn_ackq.ack_queue import AckQueue, Claim, ClaimToken, ItemInfo, ItemState, PutResult, QueueStats
-from lrn_ackq.database import Database, Result, SqlValue, Transaction
+from lrn_ackq.database import Column, Database, Result, SqlValue, Transaction
 from lrn_ackq.errors import (
     BusyError,
     CancelledError,
@@ -33,6 +33,7 @@ __all__ = [
     "CancelledError",
     "Claim",
     "ClaimToken",
+    "Column",
     "ConflictError",
     "Database",
     "DatabaseOpenError",

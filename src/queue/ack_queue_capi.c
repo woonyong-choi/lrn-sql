@@ -287,6 +287,8 @@ static void encode_rows(buffer_t *b, result_t *result)
     for (size_t i = 0; i < columns; i++) {
         const result_column_t *column = result_column(result, i);
         put_length_prefixed(b, column->name, column->name_len);
+        put_u8(b, (uint8_t)column->type);
+        put_u8(b, column->is_nullable ? 1 : 0);
     }
     result_row_t row;
     result_next_t next;

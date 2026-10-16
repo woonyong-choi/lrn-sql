@@ -75,6 +75,9 @@ static void render(const uint8_t *buf, size_t n, char *out, size_t cap)
             uint32_t l = (uint32_t)rd(&r, 4);
             EMIT("%s%.*s", i ? "," : "", (int)l, (const char *)buf + r.at);
             r.at += l;
+            /* 열 형식 번호와 NULL 가능(?) */
+            uint8_t type = (uint8_t)rd(&r, 1);
+            EMIT(":%u%s", type, rd(&r, 1) ? "?" : "");
         }
         EMIT("]");
         while (r.at < r.n && rd(&r, 1) == 1) {
@@ -138,7 +141,7 @@ static void test_db_only_and_encoding(void)
     CHECK(exec_str(db, NULL, "INSERT INTO t (n, s, b, r) VALUES (?, ?, ?, ?)", row2, 4, out, sizeof(out)) == LRN_OK,
           "NULL·빈 값 INSERT");
     CHECK(exec_str(db, NULL, "SELECT id, n, s, b, r FROM t", NULL, 0, out, sizeof(out)) == LRN_OK &&
-              strcmp(out, "ROWS[id,n,s,b,r] (1|7|t3|b3|1.5) (2|NULL|t0|b0|-0.5)") == 0, "SELECT 왕복: %s", out);
+              strcmp(out, "ROWS[id:1,n:1?,s:3?,b:4?,r:2?] (1|7|t3|b3|1.5) (2|NULL|t0|b0|-0.5)") == 0, "SELECT 왕복: %s", out);
     CHECK(exec_str(db, NULL, "SELECT * FROM missing", NULL, 0, out, sizeof(out)) == LRN_OK && strncmp(out, "ERR ", 4) == 0,
           "문장 오류는 인코딩된 오류 결과: %s", out);
     lrn_param_t bad = {99, 0, 0, NULL, 0};
@@ -293,7 +296,7 @@ static void test_wrong_database_transaction(void)
           "stats·list");
     CHECK(lrndb_txn_failed(foreign) == 0, "거절은 남의 트랜잭션을 실패시키지 않는다");
     CHECK(lrndb_commit(&foreign) == LRN_OK, "남의 트랜잭션은 그대로 commit된다");
-    CHECK(exec_str(b, NULL, "SELECT id FROM ackq_jobs", NULL, 0, out, sizeof(out)) == LRN_OK && strcmp(out, "ROWS[id]") == 0,
+    CHECK(exec_str(b, NULL, "SELECT id FROM ackq_jobs", NULL, 0, out, sizeof(out)) == LRN_OK && strcmp(out, "ROWS[id:1]") == 0,
           "다른 database의 테이블이 바뀌지 않았다: %s", out);
     CHECK(lrnq_stats(qa, NULL, counts) == LRN_OK && counts[1] == 1, "이 큐도 그대로다");
     CHECK(lrnq_ack(qa, NULL, id, fence) == LRN_OK, "올바른 호출은 된다");
@@ -378,7 +381,7 @@ static void test_threads(void)
     reader_t r = {buf, size, 0};
     rd(&r, 1);
     uint32_t cols = (uint32_t)rd(&r, 4);
-    for (uint32_t i = 0; i < cols; i++) r.at += (size_t)rd(&r, 4);
+    for (uint32_t i = 0; i < cols; i++) r.at += (size_t)rd(&r, 4) + 2;   /* 이름 뒤 형식·NULL 가능 */
     int rows = 0;
     while (r.at < r.n && rd(&r, 1) == 1) {
         rows++;

@@ -181,3 +181,83 @@ def test_cancel_from_another_thread_is_distinct_from_success(tmp_path: Path) -> 
     assert len(caught) == 1 and isinstance(caught[0], SqlError) and caught[0].error_class == RESULT_E_CANCELLED
     assert db.execute("SELECT COUNT(*) FROM n").rows == ((3000,),)
     db.close()
+
+
+# #64 완료 조건 1: NULL·빈 값·NUL 포함 값·페이지보다 큰 값과 열 정보가 바인딩까지 손실 없이 온다
+def test_values_and_column_info_round_trip(tmp_path: Path) -> None:
+    from lrn_ackq import Column
+
+    db = Database(tmp_path / "values.lrdb")
+    db.execute("CREATE TABLE v (id INTEGER PRIMARY KEY, t TEXT, b BLOB, r REAL, n INTEGER NOT NULL)")
+    big_text = "한글" * 60_000 + "\x00끝"
+    big_blob = bytes(range(256)) * 1200
+    values = [
+        (1, None, None, None, 0),
+        (2, "", b"", 0.0, -1),
+        (3, "a\x00b", b"\x00\x01\x00", -0.5, 2**63 - 1),
+        (4, big_text, big_blob, 1e308, -(2**63)),
+    ]
+    for row in values:
+        db.execute("INSERT INTO v VALUES (?, ?, ?, ?, ?)", row)
+    result = db.execute("SELECT id, t, b, r, n FROM v ORDER BY id")
+    assert result.rows == tuple(values)
+    assert result.column_info == (
+        Column("id", "INTEGER", False),
+        Column("t", "TEXT", True),
+        Column("b", "BLOB", True),
+        Column("r", "REAL", True),
+        Column("n", "INTEGER", False),
+    )
+    assert result.columns == ("id", "t", "b", "r", "n")
+    db.close()
+
+
+# #64 완료 조건 2: 결과 상한을 넘으면 부분 행을 주지 않고 LimitError, 문장 오류는 분류·코드가 있는 SqlError
+def test_limit_and_errors_are_distinct_from_success(tmp_path: Path) -> None:
+    from lrn_ackq import LimitError
+    from lrn_ackq.database import _lib
+
+    db = Database(tmp_path / "limits.lrdb")
+    db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT)")
+    for i in range(1, 21):
+        db.execute("INSERT INTO t VALUES (?, ?)", (i, "x" * 100))
+    previous = _lib.lrn_max_result_bytes()
+    try:
+        _lib.lrn_set_max_result_bytes(1000)
+        with pytest.raises(LimitError):
+            db.execute("SELECT s FROM t")
+        assert len(db.execute("SELECT s FROM t WHERE id = 1").rows) == 1
+    finally:
+        _lib.lrn_set_max_result_bytes(previous)
+    with pytest.raises(SqlError) as raised:
+        db.execute("SELECT * FROM missing")
+    assert raised.value.error_class != 0 and raised.value.error_code != 0
+    db.close()
+
+
+# #64 완료 조건 3: 디코딩이 실패해도 C 버퍼는 해제된다
+def test_result_buffer_is_freed_when_decoding_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from lrn_ackq import database as module
+
+    freed: list[int] = []
+    real_lib = module._lib
+
+    class CountingLib:
+        def __getattr__(self, name: str) -> object:
+            return getattr(real_lib, name)
+
+        def lrn_free(self, pointer: object) -> None:
+            freed.append(1)
+            real_lib.lrn_free(pointer)
+
+    def broken_decode(data: bytes) -> module.Result:
+        raise ValueError("decoder failure")
+
+    db = Database(tmp_path / "free.lrdb")
+    monkeypatch.setattr(module, "_lib", CountingLib())
+    monkeypatch.setattr(module, "decode_result", broken_decode)
+    with pytest.raises(ValueError):
+        db.execute("SELECT 1")
+    assert freed == [1]
+    monkeypatch.undo()
+    db.close()

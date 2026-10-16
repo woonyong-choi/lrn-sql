@@ -70,7 +70,8 @@ void lrndb_cancel(lrndb_t *db);
  * SQL 문장 하나를 실행한다. txn이 NULL이 아니면 그 트랜잭션 안에서 실행한다. 성공하면 *out에 결과를 인코딩한 버퍼를
  * 주고(lrn_free로 해제) 문장 수준 오류도 인코딩된 오류 결과로 돌아온다. 인코딩:
  *   u8 kind(0 행, 1 명령, 2 오류)
- *   행:   u32 열 수, (u32 이름 길이, 이름)*열 수, 행마다 [u8 1, 셀*열 수], 끝에 u8 0
+ *   행:   u32 열 수, (u32 이름 길이, 이름, u8 형식, u8 NULL 가능)*열 수, 행마다 [u8 1, 셀*열 수], 끝에 u8 0
+ *         형식은 셀 type과 같은 번호이며 0은 식의 형식을 정하지 못했다는 뜻이다(예: SELECT NULL)
  *   명령: u32 tag 길이, tag, u64 영향 행 수
  *   오류: u32 분류, i32 코드, u32 메시지 길이, 메시지
  *   셀:   u8 type(0 NULL,1 INTEGER,2 REAL,3 TEXT,4 BLOB), INTEGER는 i64, REAL은 f64, TEXT·BLOB은 u32 길이와 바이트
