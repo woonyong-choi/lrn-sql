@@ -479,10 +479,9 @@ static heap_status_t check_directory_count(const uint8_t *body, bool hinted, uin
     size_t width = hinted ? 6u : 4u;
     size_t limit = hinted ? HEAP_HINT_DIRECTORY_ENTRIES : HEAP_DIRECTORY_ENTRIES;
     if (*count > limit) return HEAP_CORRUPT;
-    for (size_t i = HEAP_DIRECTORY_HEADER_BYTES + (size_t)*count * width; i < PAGE_BODY_BYTES; i++) {
-        if (body[i] != 0) return HEAP_CORRUPT;
-    }
-    return HEAP_OK;
+    static const uint8_t zero[PAGE_BODY_BYTES];
+    size_t used = HEAP_DIRECTORY_HEADER_BYTES + (size_t)*count * width;
+    return memcmp(body + used, zero, PAGE_BODY_BYTES - used) == 0 ? HEAP_OK : HEAP_CORRUPT;
 }
 
 static heap_status_t read_tree_leaf(heap_t *heap, uint32_t page, bool is_last, u32_list_t *entries,
