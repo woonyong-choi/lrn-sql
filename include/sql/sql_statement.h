@@ -22,9 +22,11 @@
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
  *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT]
  *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )}
- *   SELECT [DISTINCT] item {, item} [FROM name [[AS] alias]] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
+ *   SELECT [DISTINCT] item {, item} [FROM source {join}] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
  *     [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
  *     item       = * | name.* | expr [[AS] alias]
+ *     source     = name [[AS] alias]
+ *     join       = , source | CROSS JOIN source | [INNER] JOIN source ON expr | LEFT [OUTER] JOIN source ON expr
  *   UPDATE name SET column_name = expr {, column_name = expr} [WHERE expr]
  *   DELETE FROM name [WHERE expr]
  *   DROP TABLE name
@@ -50,9 +52,11 @@
  *   - 함수 이름은 대문자로 맞춰 둔다. 어떤 함수가 있는지, 열 이름이 맞는지, 형식이 맞는지는 실행기(sql_eval) 몫이다.
  *   - X'hex'는 X와 따옴표 문자열이 붙어 있어야 하며 짝수 개의 16진 숫자여야 한다. 빈 X''는 빈 BLOB이다.
  *   - 식 트리 높이는 512, 목록(인자·IN·여러 행 INSERT의 값)은 65536개까지다. 넘으면 SQLSTMT_LIMIT다.
+ *   - FROM 원본은 SQLSTMT_MAX_SOURCES개까지다. 넘으면 SQLSTMT_LIMIT다.
  *
- * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): JOIN·UNION·EXCEPT·INTERSECT·RETURNING·WITH·
- * 창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS), FROM의 둘 이상 테이블, INSERT ... SELECT, CREATE TABLE ... AS,
+ * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): RIGHT·FULL·NATURAL JOIN, JOIN ... USING, 괄호로 묶은 JOIN,
+ * UNION·EXCEPT·INTERSECT·RETURNING·WITH·창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS·FROM 안), INSERT ... SELECT,
+ * CREATE TABLE ... AS,
  * IF [NOT] EXISTS, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중 PRIMARY KEY 외의 것,
  * 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE, 테이블 이름의 한정(schema.table).
  *
@@ -221,13 +225,24 @@ typedef struct {
     sqlstmt_nulls_t nulls;
 } sqlstmt_order_t;
 
+/* FROM 원본의 결합 방식. 첫 원본은 NONE, 쉼표와 CROSS JOIN은 CROSS다 */
+typedef enum { SQLSTMT_JOIN_NONE, SQLSTMT_JOIN_CROSS, SQLSTMT_JOIN_INNER, SQLSTMT_JOIN_LEFT } sqlstmt_join_t;
+
+typedef struct {
+    sqlstmt_name_t table;
+    sqlstmt_name_t alias;        /* 없으면 size 0 */
+    sqlstmt_join_t join;
+    sqlexpr_t *on;               /* INNER·LEFT의 ON 조건. 그 밖에는 NULL */
+} sqlstmt_source_t;
+
+#define SQLSTMT_MAX_SOURCES 64
+
 typedef struct {
     bool distinct;
     sqlstmt_select_item_t *items;
     size_t item_count;
-    bool has_from;
-    sqlstmt_name_t table;
-    sqlstmt_name_t table_alias;
+    sqlstmt_source_t *sources;   /* FROM 원본 source_count개. FROM이 없으면 0개 */
+    size_t source_count;
     sqlexpr_t *where;            /* 없으면 NULL */
     sqlexpr_t **group_by;        /* GROUP BY 식 group_count개 */
     size_t group_count;

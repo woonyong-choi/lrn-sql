@@ -250,17 +250,17 @@ static void identifiers_and_case(void)
     /* 식별자는 대소문자를 구분하고 키워드만 구분하지 않는다. */
     statement = parse_ok("SeLeCt A, a FrOm T wHeRe B Is NoT NuLl");
     assert(statement->select.item_count == 2 && is_column(statement->select.items[0].expr, "A"));
-    assert(is_column(statement->select.items[1].expr, "a") && name_is(&statement->select.table, "T"));
+    assert(is_column(statement->select.items[1].expr, "a") && name_is(&statement->select.sources[0].table, "T"));
     assert(statement->select.where->kind == SQLEXPR_IS_NULL && statement->select.where->negated);
     free_clean(statement);
 
     statement = parse_ok("SELECT \"from\", \"where\" FROM \"table\"");
-    assert(is_column(statement->select.items[0].expr, "from") && name_is(&statement->select.table, "table"));
+    assert(is_column(statement->select.items[0].expr, "from") && name_is(&statement->select.sources[0].table, "table"));
     free_clean(statement);
 
     /* 예약어 아닌 단어는 맨 이름으로 쓸 수 있다. */
     statement = parse_ok("SELECT integer, x, count, if FROM limited");
-    assert(statement->select.item_count == 4 && name_is(&statement->select.table, "limited"));
+    assert(statement->select.item_count == 4 && name_is(&statement->select.sources[0].table, "limited"));
     free_clean(statement);
 }
 
@@ -417,11 +417,33 @@ static void parameters(void)
     assert(out == NULL && live_allocations == 0);
 }
 
+static void join_forms(void)
+{
+    sqlstmt_t *statement = parse_ok("SELECT * FROM a, b x CROSS JOIN c JOIN d ON d.k = a.k INNER JOIN e AS y ON TRUE "
+                                    "LEFT JOIN f ON f.k = 1 AND f.v = y.v LEFT OUTER JOIN g ON 1 = 1 WHERE a.k > 0");
+    const sqlstmt_select_t *q = &statement->select;
+    assert(q->source_count == 7 && q->where != NULL);
+    static const sqlstmt_join_t joins[] = {SQLSTMT_JOIN_NONE, SQLSTMT_JOIN_CROSS, SQLSTMT_JOIN_CROSS, SQLSTMT_JOIN_INNER,
+                                           SQLSTMT_JOIN_INNER, SQLSTMT_JOIN_LEFT, SQLSTMT_JOIN_LEFT};
+    static const char *const tables[] = {"a", "b", "c", "d", "e", "f", "g"};
+    for (size_t i = 0; i < 7; i++) {
+        assert(q->sources[i].join == joins[i] && name_is(&q->sources[i].table, tables[i]));
+        assert((q->sources[i].on != NULL) == (joins[i] == SQLSTMT_JOIN_INNER || joins[i] == SQLSTMT_JOIN_LEFT));
+    }
+    assert(name_is(&q->sources[1].alias, "x") && name_is(&q->sources[4].alias, "y") && q->sources[0].alias.size == 0);
+    assert(q->sources[5].on->kind == SQLEXPR_BINARY && q->sources[5].on->op == SQLEXPR_OP_AND);
+    free_clean(statement);
+
+    char sql[2048] = "SELECT 1 FROM t0";
+    for (int i = 1; i <= SQLSTMT_MAX_SOURCES; i++) snprintf(sql + strlen(sql), sizeof(sql) - strlen(sql), ", t%d", i);
+    expect_fail_bound(sql, NULL, 0, SQLSTMT_LIMIT, SQLSTMT_REASON_TOO_MANY_ITEMS, at(sql, "t64"));
+}
+
 static void select_forms(void)
 {
     sqlstmt_t *statement = parse_ok("SELECT * FROM t;");
     assert(statement->kind == SQLSTMT_SELECT && statement->select.item_count == 1 && statement->select.items[0].star);
-    assert(statement->select.where == NULL && statement->select.has_from);
+    assert(statement->select.where == NULL && statement->select.source_count == 1);
     free_clean(statement);
 
     statement = parse_ok("SELECT a, b, a FROM t WHERE c <> 'x'");
@@ -458,7 +480,7 @@ static void select_forms(void)
     free_clean(statement);
 
     statement = parse_ok("SELECT 1 + 2 * 3 - 4 % 5 || 'x' AS v");
-    assert(!statement->select.has_from && name_is(&statement->select.items[0].alias, "v"));
+    assert(statement->select.source_count == 0 && name_is(&statement->select.items[0].alias, "v"));
     const sqlexpr_t *e = statement->select.items[0].expr;
     assert(e->op == SQLEXPR_OP_SUB && e->args[0]->op == SQLEXPR_OP_ADD && e->args[0]->args[1]->op == SQLEXPR_OP_MUL);
     assert(e->args[1]->op == SQLEXPR_OP_MOD && e->args[1]->args[1]->op == SQLEXPR_OP_CONCAT);
@@ -486,13 +508,13 @@ static void select_forms(void)
     assert(q->items[2].expr->kind == SQLEXPR_CAST && q->items[2].expr->cast_type == VALUE_TEXT);
     assert(q->items[3].expr->kind == SQLEXPR_FUNCTION && name_is(&q->items[3].expr->name, "COALESCE"));
     assert(name_is(&q->items[4].expr->qualifier, "t") && name_is(&q->items[4].expr->name, "a"));
-    assert(q->items[5].star && name_is(&q->items[5].qualifier, "u") && name_is(&q->table_alias, "u"));
+    assert(q->items[5].star && name_is(&q->items[5].qualifier, "u") && name_is(&q->sources[0].alias, "u"));
     free_clean(statement);
 
     statement = parse_ok("SELECT DISTINCT a x, b FROM t u WHERE TRUE ORDER BY 1 DESC, b NULLS LAST, a + 1 ASC NULLS FIRST "
                          "LIMIT 10 OFFSET 2");
     q = &statement->select;
-    assert(q->distinct && name_is(&q->items[0].alias, "x") && name_is(&q->table_alias, "u"));
+    assert(q->distinct && name_is(&q->items[0].alias, "x") && name_is(&q->sources[0].alias, "u"));
     assert(is_integer(q->where, 1) && q->order_count == 3 && q->order[0].desc && is_integer(q->order[0].expr, 1));
     assert(!q->order[1].desc && q->order[1].nulls == SQLSTMT_NULLS_LAST);
     assert(q->order[2].nulls == SQLSTMT_NULLS_FIRST && q->order[2].expr->op == SQLEXPR_OP_ADD);
@@ -692,8 +714,13 @@ static void select_and_where_errors(void)
 
     expect_syntax("SELECT a FROM t GROUP a", SQLSTMT_REASON_EXPECTED_KEYWORD, 22);
     expect_syntax("SELECT a FROM t HAVING", SQLSTMT_REASON_UNEXPECTED_END, 22);
-    expect_unsupported("SELECT * FROM t JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
-    expect_unsupported("SELECT * FROM t, u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 15);
+    expect_syntax("SELECT * FROM t JOIN u", SQLSTMT_REASON_UNEXPECTED_END, 22);
+    expect_syntax("SELECT * FROM t LEFT u ON 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 21);
+    expect_unsupported("SELECT * FROM t CROSS JOIN u ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 29);
+    expect_unsupported("SELECT * FROM t RIGHT JOIN u ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
+    expect_unsupported("SELECT * FROM t NATURAL JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
+    expect_unsupported("SELECT * FROM t JOIN u USING (a)", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 23);
+    expect_unsupported("SELECT * FROM t JOIN (u) ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 21);
     expect_unsupported("SELECT * FROM t UNION SELECT * FROM u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t WHERE a IN (SELECT b FROM u)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 28);
     expect_unsupported("SELECT (SELECT 1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 7);
@@ -889,6 +916,7 @@ int main(void)
     numeric_literals();
     parameters();
     select_forms();
+    join_forms();
     update_delete_drop();
     transaction_control();
     create_errors();
