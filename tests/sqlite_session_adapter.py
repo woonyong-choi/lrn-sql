@@ -46,7 +46,6 @@ BUSY_MARKERS = ("database is locked", "database table is locked")
 class SqliteAdapter:
     def __init__(self) -> None:
         self._path = ""
-        self._use_wal = False
         self._connections: dict[str, sqlite3.Connection] = {}
 
     def handle(self, line: str) -> list[str] | None:
@@ -74,9 +73,8 @@ class SqliteAdapter:
         return [f"HELLO sqlite {sqlite3.sqlite_version}"]
 
     def _open(self, args: list[str]) -> list[str]:
-        path_hex, wal, fresh = args
+        path_hex, fresh = args
         self._path = hex_decode(path_hex).decode("utf-8")
-        self._use_wal = wal == "wal"
         if fresh == "new" and os.path.exists(self._path):
             return ["FAULT database_exists 0 0"]
         return ["OK"]
@@ -86,8 +84,8 @@ class SqliteAdapter:
         if name in self._connections:
             return ["FAULT session_exists 0 0"]
         connection = sqlite3.connect(self._path, timeout=0, isolation_level=None, check_same_thread=False)
-        if self._use_wal:
-            connection.execute("PRAGMA journal_mode=WAL")
+        # 게시된 상태를 읽는 동안 writer가 막히지 않는 우리 엔진과 맞춘다
+        connection.execute("PRAGMA journal_mode=WAL")
         self._connections[name] = connection
         return ["OK"]
 

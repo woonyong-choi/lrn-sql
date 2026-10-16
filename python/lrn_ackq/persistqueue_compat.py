@@ -77,15 +77,13 @@ class SQLiteAckQueue:
         *,
         lease_ms: int = DEFAULT_LEASE_MS,
         max_attempts: int = 0,
-        durable: bool = True,
         clock: Callable[[], int] | None = None,
     ) -> None:
         del multithreading  # 항상 스레드 안전하다
         directory = Path(path)
         directory.mkdir(parents=True, exist_ok=True)
-        wal = directory / "data.wal" if durable else None
-        self._db = Database(directory / "data.lrdb", wal)
-        self._queue = AckQueue(self._db, "ack_queue", durable=durable, max_attempts=max_attempts, clock=clock)
+        self._db = Database(directory / "data.lrdb")
+        self._queue = AckQueue(self._db, "ack_queue", max_attempts=max_attempts, clock=clock)
         self._serializer: Serializer = serializer or _JsonSerializer()
         self._lease_ms = lease_ms
         self._lock = threading.RLock()

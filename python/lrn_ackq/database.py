@@ -183,14 +183,12 @@ class Database:
     def __init__(
         self,
         path: str | os.PathLike[str],
-        wal_path: str | os.PathLike[str] | None = None,
         *,
         create: bool = True,
         busy_timeout_s: float = DEFAULT_BUSY_TIMEOUT_S,
     ) -> None:
         handle = ctypes.c_void_p()
-        wal = os.fsencode(wal_path) if wal_path is not None else None
-        check(_lib.lrndb_open(os.fsencode(path), wal, 1 if create else 0, ctypes.byref(handle)))
+        check(_lib.lrndb_open(os.fsencode(path), 1 if create else 0, ctypes.byref(handle)))
         self._handle: ctypes.c_void_p | None = handle
         self._queues: set[Closable] = set()
         self.busy_timeout_s = busy_timeout_s
@@ -206,16 +204,14 @@ class Database:
         """문장 하나를 자동 commit으로 실행한다."""
         return run_sql(self.handle, None, sql, params)
 
-    def begin(self, *, durable: bool = True) -> Transaction:
+    def begin(self) -> Transaction:
         """쓰기 트랜잭션을 시작한다. 다른 writer가 있으면 busy_timeout_s까지 기다린다.
 
         Raises:
             BusyError: 기다린 시간 안에 시작하지 못했을 때.
         """
         out = ctypes.c_void_p()
-        status = retry_busy(
-            lambda: _lib.lrndb_begin(self.handle, 1 if durable else 0, ctypes.byref(out)), self.busy_timeout_s
-        )
+        status = retry_busy(lambda: _lib.lrndb_begin(self.handle, ctypes.byref(out)), self.busy_timeout_s)
         if status == STATUS_BUSY:
             raise BusyError("another writer holds the database", status=status)
         check(status)

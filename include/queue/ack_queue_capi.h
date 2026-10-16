@@ -52,8 +52,8 @@ void lrn_free(void *pointer);
 void lrn_set_max_result_bytes(size_t limit);
 size_t lrn_max_result_bytes(void);
 
-/* path의 DB를 연다. wal_path가 NULL이 아니면 짝 WAL과 함께 연다(처음이면 durable로 전환). create가 0이 아니면 없을 때 만든다. */
-int lrndb_open(const char *path, const char *wal_path, int create, lrndb_t **out);
+/* path의 DB를 연다. create가 0이 아니면 없을 때 만든다. commit은 항상 DURABLE이다(database_txn.h). */
+int lrndb_open(const char *path, int create, lrndb_t **out);
 /* 살아 있는 큐 핸들(lrnq_t)이나 트랜잭션(lrntxn_t)이 있으면 ACKQ_BUSY이고 핸들은 그대로다. 먼저 닫는다. */
 int lrndb_close(lrndb_t **db);
 
@@ -71,16 +71,16 @@ int lrndb_close(lrndb_t **db);
 int lrndb_exec(lrndb_t *db, lrntxn_t *txn, const char *sql, const lrn_param_t *params, size_t param_count,
                uint8_t **out, size_t *out_size);
 
-/* 쓰기 트랜잭션 시작. 다른 writer가 있으면 기다리지 않고 LRN_BUSY(ACKQ_BUSY)다. durable이 0이 아니면 WAL 보증이다. */
-int lrndb_begin(lrndb_t *db, int durable, lrntxn_t **out);
+/* 쓰기 트랜잭션 시작. 다른 writer가 있으면 기다리지 않고 LRN_BUSY(ACKQ_BUSY)다. */
+int lrndb_begin(lrndb_t *db, lrntxn_t **out);
 /* commit·rollback은 성공하든 실패하든 트랜잭션을 해제하고 *txn을 NULL로 만든다. */
 int lrndb_commit(lrntxn_t **txn);
 int lrndb_rollback(lrntxn_t **txn);
 /* 문장 오류로 실패 상태인지(commit하면 안 되고 rollback만 된다) */
 int lrndb_txn_failed(const lrntxn_t *txn);
 
-/* 큐 이름 name을 연다. install이 0이 아니면 없을 때 만든다. durable이 0이면 VOLATILE이다. clock이 NULL이면 실시간이다. */
-int lrnq_open(lrndb_t *db, const char *name, int install, int durable, uint32_t max_attempts, lrn_clock_fn clock,
+/* 큐 이름 name을 연다. install이 0이 아니면 없을 때 만든다. clock이 NULL이면 실시간이다. */
+int lrnq_open(lrndb_t *db, const char *name, int install, uint32_t max_attempts, lrn_clock_fn clock,
               void *clock_ctx, lrnq_t **out);
 void lrnq_close(lrnq_t **queue);
 

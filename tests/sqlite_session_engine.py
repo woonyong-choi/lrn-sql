@@ -40,14 +40,12 @@ class EngineSession:
         argv: Sequence[str],
         db_path: Path,
         *,
-        wal: bool,
         timeout_s: float,
     ) -> None:
         self.label = label
         self.version = ""
         self._argv = list(argv)
         self._db_path = db_path
-        self._wal = wal
         self._timeout_s = timeout_s
         self._process: EngineProcess | None = None
 
@@ -96,7 +94,7 @@ class EngineSession:
     def _open(self, connections: Sequence[str], *, fresh: bool) -> None:
         process = self._require_process()
         path_hex = hex_encode(str(self._db_path).encode("utf-8"))
-        request = "OPEN {} {} {}".format(path_hex, "wal" if self._wal else "nowal", "new" if fresh else "existing")
+        request = "OPEN {} {}".format(path_hex, "new" if fresh else "existing")
         _expect_ok(process.request(request), f"{self.label} open")
         for name in connections:
             _expect_ok(process.request(f"SESSION {name}"), f"{self.label} session {name}")

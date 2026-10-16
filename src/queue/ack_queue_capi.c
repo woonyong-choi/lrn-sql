@@ -82,7 +82,7 @@ static int map_database_status(database_status_t status)
     }
 }
 
-int lrndb_open(const char *path, const char *wal_path, int create, lrndb_t **out)
+int lrndb_open(const char *path, int create, lrndb_t **out)
 {
     if (out == NULL) return LRN_DB_INVALID;
     *out = NULL;
@@ -96,11 +96,7 @@ int lrndb_open(const char *path, const char *wal_path, int create, lrndb_t **out
     }
     lrndb_t *handle = calloc(1, sizeof(*handle));
     if (handle == NULL) return LRN_DB_NOMEM;
-    database_txn_options_t options = {0};
-    options.wal_path = wal_path;
-    options.convert = wal_path != NULL;
-    database_txn_info_t info;
-    database_status_t status = database_open_transactional(path, &options, &handle->db, &info);
+    database_status_t status = database_open_transactional(path, NULL, &handle->db);
     if (status != DATABASE_OK) {
         free(handle);
         return map_database_status(status);
@@ -351,7 +347,7 @@ static int map_txn(txn_status_t status)
     }
 }
 
-int lrndb_begin(lrndb_t *db, int durable, lrntxn_t **out)
+int lrndb_begin(lrndb_t *db, lrntxn_t **out)
 {
     if (db == NULL || out == NULL) return ACKQ_INVALID;
     *out = NULL;
@@ -359,7 +355,7 @@ int lrndb_begin(lrndb_t *db, int durable, lrntxn_t **out)
     if (handle == NULL) return ACKQ_NOMEM;
     txn_begin_options_t options = {.access = TXN_ACCESS_READ_WRITE,
                                    .isolation = TXN_ISOLATION_SNAPSHOT,
-                                   .guarantee = durable ? TXN_GUARANTEE_DURABLE : TXN_GUARANTEE_SYNCED,
+                                   .guarantee = TXN_GUARANTEE_DURABLE,
                                    .timeout_ms = 0};
     pthread_mutex_lock(&db->mutex);
     txn_status_t status = database_txn_begin(db->db, &options, &handle->txn);
@@ -415,7 +411,7 @@ int lrndb_txn_failed(const lrntxn_t *txn)
 
 /* ── 큐 ── */
 
-int lrnq_open(lrndb_t *db, const char *name, int install, int durable, uint32_t max_attempts, lrn_clock_fn clock,
+int lrnq_open(lrndb_t *db, const char *name, int install, uint32_t max_attempts, lrn_clock_fn clock,
               void *clock_ctx, lrnq_t **out)
 {
     if (db == NULL || out == NULL) return ACKQ_INVALID;
@@ -424,7 +420,6 @@ int lrnq_open(lrndb_t *db, const char *name, int install, int durable, uint32_t 
     if (handle == NULL) return ACKQ_NOMEM;
     ackq_options_t options = {0};
     options.name = name;
-    options.durability = durable ? ACKQ_DURABLE : ACKQ_VOLATILE;
     options.max_attempts = max_attempts;
     options.begin_timeout_ms = 0;
     options.now_ms = clock;

@@ -14,7 +14,6 @@ struct ackq {
     char table[ACKQ_NAME_MAX + 8];
     uint32_t max_attempts;
     uint32_t begin_timeout_ms;
-    txn_guarantee_t guarantee;
     uint64_t (*now_ms)(void *ctx);
     void *clock_ctx;
     database_exec_options_t exec_opts;

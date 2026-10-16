@@ -1,13 +1,13 @@
 /*
  * test_session_txn.c -- session 위의 트랜잭션(#8): BEGIN·COMMIT·ROLLBACK 문장과 C API가 같은 트랜잭션을 쓰는지, 서로 다른
  * 세션(연결) 사이에서 미확정 값이 보이지 않고 writer가 직렬화되며 rollback·close 뒤 다음 writer가 실행되는지, 풀의
- * 예산 계상(작업 카탈로그·페이지 목록)이 열린 트랜잭션 동안 유지되고 끝나면 돌아오는지, durable 재시작을 실제 파일로 확인한다.
+ * 예산 계상(작업 카탈로그·페이지 목록)이 열린 트랜잭션 동안 유지되고 끝나면 돌아오는지, commit 뒤 재시작을 실제 파일로 확인한다.
  *
  * 합성 데이터만 쓴다. 다루지 않는 것: 전원 장애, 큐 ACK(#140), 여러 스레드가 같은 세션을 쓰는 경우(세션은 한 번에 한 스레드).
  *
  * 빌드(저장소 루트): tests/test_session_txn.c src/sql/{session,database,database_txn,sql_statement,lexer,result}.c
- *   src/storage/{heap_store,record,record_page,overflow,value,catalog,page_file,catalog_store,legacy_migrate,
- *   durable_pair,wal,transaction}.c -lpthread -lm
+ *   src/storage/{heap_store,record,record_page,overflow,value,catalog,page_file,page_cache,catalog_store,legacy_migrate,
+ *   transaction}.c -lpthread -lm
  */
 
 #define _GNU_SOURCE
@@ -26,7 +26,6 @@
 
 #define DIR_NAME "__test__session_txn"
 #define DB DIR_NAME "/db.lrdb"
-#define WAL DIR_NAME "/db.wal"
 
 static int g_run, g_fail;
 
@@ -181,15 +180,12 @@ static void create_plain_file(void)
     assert(database_close(db) == DATABASE_OK);
 }
 
-static bool open_env(env_t *env, bool with_wal, bool convert, size_t shared)
+static bool open_env(env_t *env, size_t shared)
 {
     session_limits_t l = limits(shared);
     if (session_pool_open(&l, &env->pool) != SESSION_OK) return false;
-    database_txn_options_t o = {0};
-    o.wal_path = with_wal ? WAL : NULL;
-    o.convert = convert;
     database_status_t ds = DATABASE_OK;
-    session_status_t ss = session_pool_open_transactional(env->pool, DB, &o, &env->db, &ds, NULL);
+    session_status_t ss = session_pool_open_transactional(env->pool, DB, NULL, &env->db, &ds);
     if (ss != SESSION_OK) {
         printf("  open 실패 session=%d database=%d\n", (int)ss, (int)ds);
         session_pool_close(env->pool);
@@ -219,7 +215,7 @@ static void test_sql_control_two_sessions(void)
     printf("\n[BEGIN·COMMIT·ROLLBACK 문장과 두 세션]\n");
     create_plain_file();
     env_t env;
-    assert(open_env(&env, false, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     session_t *a = NULL, *b = NULL;
     assert(session_open(env.db, &a) == SESSION_OK && session_open(env.db, &b) == SESSION_OK);
     schema(a);
@@ -251,7 +247,7 @@ static void test_sql_control_two_sessions(void)
     expect(b, "SELECT * FROM t", "[2] 1|'changed'/ 2|'pending'");
     expect(a, "ROLLBACK", "CMD ROLLBACK 0");
     expect(a, "SELECT * FROM t", "[2] 1|'changed'/ 2|'pending'");
-    expect(b, "BEGIN TRANSACTION VOLATILE", "CMD BEGIN 0");
+    expect(b, "BEGIN TRANSACTION", "CMD BEGIN 0");
     ok(b, "INSERT INTO u VALUES (3, 'three')");
     expect(b, "ROLLBACK TRANSACTION", "CMD ROLLBACK 0");
     expect(a, "ROLLBACK", "ERR 2/36");
@@ -277,7 +273,7 @@ static void test_failed_transaction(void)
     printf("\n[실패한 트랜잭션]\n");
     create_plain_file();
     env_t env;
-    assert(open_env(&env, false, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     session_t *s = NULL;
     assert(session_open(env.db, &s) == SESSION_OK);
     schema(s);
@@ -303,7 +299,7 @@ static void test_c_api(void)
     printf("\n[C API와 문장이 같은 트랜잭션을 쓴다]\n");
     create_plain_file();
     env_t env;
-    assert(open_env(&env, false, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     session_t *s = NULL, *other = NULL;
     assert(session_open(env.db, &s) == SESSION_OK && session_open(env.db, &other) == SESSION_OK);
     schema(s);
@@ -352,7 +348,7 @@ static void test_waiting_begin(void)
     printf("\n[기다리는 BEGIN]\n");
     create_plain_file();
     env_t env;
-    assert(open_env(&env, false, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     session_t *a = NULL, *b = NULL;
     assert(session_open(env.db, &a) == SESSION_OK && session_open(env.db, &b) == SESSION_OK);
     schema(a);
@@ -395,7 +391,7 @@ static void test_budget(void)
     printf("\n[풀 예산 계상]\n");
     create_plain_file();
     env_t env;
-    assert(open_env(&env, false, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     session_t *s = NULL;
     assert(session_open(env.db, &s) == SESSION_OK);
     schema(s);
@@ -437,14 +433,14 @@ static void test_budget(void)
     assert(session_pool_open(&(session_limits_t){64u << 20, 64u << 20, 64u << 20, 16, 0}, &pool) == SESSION_OK);
     database_txn_options_t o = {0};
     session_db_t *sdb = NULL;
-    assert(session_pool_open_transactional(pool, DB, &o, &sdb, NULL, NULL) == SESSION_OK);
+    assert(session_pool_open_transactional(pool, DB, &o, &sdb, NULL) == SESSION_OK);
     session_pool_stats_t opened;
     session_pool_stats(pool, &opened);
     session_pool_close_database(sdb, NULL);
     session_pool_close(pool);
     l = limits(opened.shared_used + 64 * 1024);
     assert(session_pool_open(&l, &pool) == SESSION_OK);
-    assert(session_pool_open_transactional(pool, DB, &o, &sdb, NULL, NULL) == SESSION_OK);
+    assert(session_pool_open_transactional(pool, DB, &o, &sdb, NULL) == SESSION_OK);
     assert(session_open(sdb, &s) == SESSION_OK);
     schema(s);
     expect(s, "BEGIN", "CMD BEGIN 0");
@@ -471,14 +467,14 @@ static void test_budget(void)
     session_pool_close(pool);
 }
 
-/* ── 6. durable ── */
+/* ── 6. commit과 재시작 ── */
 
-static void test_durable_restart(void)
+static void test_commit_restart(void)
 {
-    printf("\n[durable BEGIN·COMMIT과 재시작]\n");
+    printf("\n[BEGIN·COMMIT과 재시작]\n");
     create_plain_file();
     env_t env;
-    assert(open_env(&env, true, true, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     session_t *s = NULL;
     assert(session_open(env.db, &s) == SESSION_OK);
     schema(s);
@@ -489,27 +485,27 @@ static void test_durable_restart(void)
     expect(s, "BEGIN", "CMD BEGIN 0");
     ok(s, "INSERT INTO t (v) VALUES ('rolled back')");
     expect(s, "ROLLBACK", "CMD ROLLBACK 0");
-    expect(s, "BEGIN DURABLE", "CMD BEGIN 0");
+    expect(s, "START TRANSACTION", "CMD BEGIN 0");
     ok(s, "UPDATE t SET v = 'd2' WHERE id = 1");
     expect(s, "COMMIT", "CMD COMMIT 0");
-    expect(s, "BEGIN VOLATILE", "CMD BEGIN 0");
-    ok(s, "INSERT INTO u VALUES (2, 'volatile')");
+    expect(s, "BEGIN TRANSACTION", "CMD BEGIN 0");
+    ok(s, "INSERT INTO u VALUES (2, 'second')");
     expect(s, "COMMIT", "CMD COMMIT 0");
     session_close(s);
     close_env(&env);
 
-    assert(open_env(&env, true, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     assert(session_open(env.db, &s) == SESSION_OK);
     expect(s, "SELECT * FROM t", "[1] 1|'d2'");
-    expect(s, "SELECT * FROM u", "[2] 1|'u1'/ 2|'volatile'");
+    expect(s, "SELECT * FROM u", "[2] 1|'u1'/ 2|'second'");
     session_close(s);
     close_env(&env);
 
-    /* 응답 직후 프로세스가 종료돼도 durable commit은 보존된다 */
+    /* 응답 직후 프로세스가 종료돼도 commit은 보존된다 */
     pid_t pid = fork();
     if (pid == 0) {
         env_t c;
-        if (!open_env(&c, true, false, 64u << 20)) _exit(4);
+        if (!open_env(&c, 64u << 20)) _exit(4);
         session_t *cs = NULL;
         if (session_open(c.db, &cs) != SESSION_OK) _exit(5);
         char *a = run(cs, "BEGIN");
@@ -520,7 +516,7 @@ static void test_durable_restart(void)
     int status;
     waitpid(pid, &status, 0);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "자식 commit 응답");
-    assert(open_env(&env, true, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     assert(session_open(env.db, &s) == SESSION_OK);
     expect(s, "SELECT * FROM t", "[2] 1|'d2'/ 2|'after-kill'");
     /* 복구 뒤의 기본 키 색인도 같은 상태를 가리킨다 */
@@ -537,7 +533,7 @@ static void test_key_index_follows_transactions(void)
     printf("\n[기본 키 색인이 트랜잭션의 commit·rollback을 따른다]\n");
     create_plain_file();
     env_t env;
-    assert(open_env(&env, true, true, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     session_t *a = NULL, *b = NULL;
     assert(session_open(env.db, &a) == SESSION_OK && session_open(env.db, &b) == SESSION_OK);
     schema(a);
@@ -560,7 +556,7 @@ static void test_key_index_follows_transactions(void)
     expect(b, "SELECT * FROM t WHERE id = 10", "[0]");
     ok(a, "INSERT INTO t VALUES (10, 'reuse')");
 
-    expect(a, "BEGIN DURABLE", "CMD BEGIN 0");
+    expect(a, "BEGIN", "CMD BEGIN 0");
     ok(a, "UPDATE t SET id = 20 WHERE id = 2");
     ok(a, "INSERT INTO t VALUES (21, 'second')");
     ok(a, "DELETE FROM t WHERE id = 21");
@@ -573,7 +569,7 @@ static void test_key_index_follows_transactions(void)
     session_close(b);
     close_env(&env);
 
-    assert(open_env(&env, true, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     assert(session_open(env.db, &a) == SESSION_OK);
     expect(a, "SELECT * FROM t WHERE id = 20", "[1] 20|'base2'");
     expect(a, "SELECT * FROM t WHERE id = 21", "[1] 21|'third'");
@@ -606,15 +602,17 @@ static void test_rejections(void)
     session_pool_close_database(sdb, NULL);
     session_pool_close(pool);
 
-    /* WAL 없이 열린 트랜잭션 데이터베이스에서 DURABLE */
+    /* 옛 보증 선택 문법은 없다. 어떤 보증을 요청해도 commit은 DURABLE이다 */
     env_t env;
-    assert(open_env(&env, false, false, 64u << 20));
+    assert(open_env(&env, 64u << 20));
     assert(session_open(env.db, &s) == SESSION_OK);
-    expect(s, "BEGIN DURABLE", "ERR 2/37");
+    char *old = run(s, "BEGIN DURABLE");
+    CHECK(strncmp(old, "ERR 1/", 6) == 0, "BEGIN DURABLE은 구문 오류: %s", old);
+    free(old);
     session_txn_options_t o = {TXN_GUARANTEE_DURABLE, 0};
-    CHECK(session_txn_begin(s, &o) == TXN_UNSUPPORTED, "C API도 거절");
-    expect(s, "BEGIN", "CMD BEGIN 0");  /* 기본은 volatile */
-    expect(s, "ROLLBACK", "CMD ROLLBACK 0");
+    CHECK(session_txn_begin(s, &o) == TXN_OK, "C API DURABLE 요청");
+    txn_commit_info_t info;
+    CHECK(session_txn_commit(s, &info) == TXN_OK && info.guarantee == TXN_GUARANTEE_DURABLE, "달성 보증은 DURABLE");
     /* 열린 트랜잭션이 있는 세션이 있으면 database를 닫을 수 없다 */
     expect(s, "BEGIN", "CMD BEGIN 0");
     database_status_t ds;
@@ -631,7 +629,7 @@ int main(void)
     test_c_api();
     test_waiting_begin();
     test_budget();
-    test_durable_restart();
+    test_commit_restart();
     test_key_index_follows_transactions();
     test_rejections();
     fresh_dir();

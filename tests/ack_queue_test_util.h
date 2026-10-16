@@ -32,7 +32,7 @@ static int g_run, g_fail;
         }                                             \
     } while (0)
 
-static char g_dir[128], g_db_path[192], g_wal_path[192];
+static char g_dir[128], g_db_path[192];
 static uint64_t g_now;
 
 static __attribute__((unused)) uint64_t fake_clock(void *ctx)
@@ -45,7 +45,6 @@ static __attribute__((unused)) void set_dir(const char *dir)
 {
     snprintf(g_dir, sizeof(g_dir), "%s", dir);
     snprintf(g_db_path, sizeof(g_db_path), "%s/db.lrdb", dir);
-    snprintf(g_wal_path, sizeof(g_wal_path), "%s/db.wal", dir);
 }
 
 static __attribute__((unused)) void fresh_dir(void)
@@ -80,17 +79,13 @@ static __attribute__((unused)) void make_db(void)
     assert(database_close(db) == DATABASE_OK);
 }
 
-/* 트랜잭션 계층을 붙여 연다. with_wal이면 짝 WAL로 연다(처음이면 durable로 전환한다). */
-static __attribute__((unused)) database_t *open_db(bool with_wal)
+/* 트랜잭션 계층을 붙여 연다. */
+static __attribute__((unused)) database_t *open_db(void)
 {
-    database_txn_options_t o = {0};
-    o.wal_path = with_wal ? g_wal_path : NULL;
-    o.convert = with_wal;
     database_t *db = NULL;
-    database_txn_info_t info;
-    database_status_t st = database_open_transactional(g_db_path, &o, &db, &info);
+    database_status_t st = database_open_transactional(g_db_path, NULL, &db);
     if (st != DATABASE_OK) {
-        printf("  open failed status=%d pair=%d\n", (int)st, info.pair_status);
+        printf("  open failed status=%d\n", (int)st);
         return NULL;
     }
     return db;

@@ -1,7 +1,7 @@
 /*
- * test_ack_queue_fault.c — durable ACK 큐 연산의 I/O 실패와 프로세스 종료 주입(#140). 합성 데이터만 쓴다.
+ * test_ack_queue_fault.c — ACK 큐 연산의 I/O 실패와 프로세스 종료 주입(#140). 합성 데이터만 쓴다.
  *
- * 연산마다 WAL·데이터 파일의 pwrite·fsync·ftruncate 호출 지점을 하나씩 실패시키거나(오류 주입) 그 지점에서 프로세스를
+ * 연산마다 데이터 파일의 pwrite·fsync·link·unlink 호출 지점을 하나씩 실패시키거나(오류 주입) 그 지점에서 프로세스를
  * 끝낸 뒤(fork) 다시 열어, 호출자에게 성공(ACKQ_OK)으로 알린 변경은 반드시 남고 실패·불확실로 알린 변경은 이전이거나
  * 새 상태 중 하나이며 중간 상태가 없다는 것을 확인한다. 불확실한 결과를 성공으로 돌려주지 않는지도 같은 검사로 본다.
  * 다루지 않는 것: 전원 장애·lost write(database_txn.h의 한계와 같다), 여러 프로세스 동시 사용.
@@ -12,7 +12,6 @@
 
 #include "ack_queue_test_util.h"
 #include "storage/page_file.h"
-#include "storage/wal.h"
 
 #define DIR "__test__ack_queue_fault"
 
@@ -52,17 +51,6 @@ static int h_fsync(int fd)
     return r;
 }
 
-static int h_ftruncate(int fd, off_t len)
-{
-    if (point()) {
-        errno = EIO;
-        return -1;
-    }
-    int r = ftruncate(fd, len);
-    point();
-    return r;
-}
-
 static int h_link(const char *a, const char *b)
 {
     point();
@@ -79,22 +67,19 @@ static void hooks_on(void)
 {
     page_file_io_t pio = {pread, h_pwrite, h_fsync, h_link, h_unlink};
     page_file_set_default_io(&pio);
-    wal_io_t wio = {pread, h_pwrite, h_fsync, h_ftruncate};
-    wal_set_default_io(&wio);
 }
 
 static void hooks_off(void)
 {
     page_file_set_default_io(NULL);
-    wal_set_default_io(NULL);
 }
 
 /* ── 파일 스냅샷 ── */
 
 typedef struct {
-    uint8_t *data[2];
-    size_t len[2];
-    bool present[2];
+    uint8_t *data;
+    size_t len;
+    bool present;
 } snap_t;
 
 static bool read_file(const char *path, uint8_t **buf, size_t *len)
@@ -131,21 +116,17 @@ static void write_file(const char *path, const uint8_t *buf, size_t len)
 static void snap_take(snap_t *s)
 {
     memset(s, 0, sizeof(*s));
-    s->present[0] = read_file(g_db_path, &s->data[0], &s->len[0]);
-    s->present[1] = read_file(g_wal_path, &s->data[1], &s->len[1]);
+    s->present = read_file(g_db_path, &s->data, &s->len);
 }
 
 static void snap_restore(const snap_t *s)
 {
-    if (s->present[0]) write_file(g_db_path, s->data[0], s->len[0]);
-    if (s->present[1]) write_file(g_wal_path, s->data[1], s->len[1]);
-    else unlink(g_wal_path);
+    if (s->present) write_file(g_db_path, s->data, s->len);
 }
 
 static void snap_free(snap_t *s)
 {
-    free(s->data[0]);
-    free(s->data[1]);
+    free(s->data);
 }
 
 /* ── 장면: 준비, 실행, 재시작 뒤 검증 ── */
@@ -190,7 +171,7 @@ static ackq_t *open_queue(database_t *db)
 static void prepare_ack(void)
 {
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -229,7 +210,7 @@ static void verify_ack(database_t *db, ackq_t *q, ackq_status_t st, bool acknowl
 static void prepare_enqueue(void)
 {
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -266,7 +247,7 @@ static void verify_enqueue(database_t *db, ackq_t *q, ackq_status_t st, bool ack
 static void prepare_claim(void)
 {
     prepare_enqueue();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_t *q = open_queue(db);
     for (int i = 0; i < 3; i++) {
         uint64_t id;
@@ -314,7 +295,7 @@ static long count_points(const scenario_t *sc, const snap_t *base)
 {
     snap_restore(base);
     hooks_on();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_t *q = open_queue(db);
     g_fail_mode = true;
     g_fail_at = 0;
@@ -331,7 +312,7 @@ static long count_points(const scenario_t *sc, const snap_t *base)
 
 static void reopen_and_verify(const scenario_t *sc, ackq_status_t st, bool acknowledged)
 {
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     CHECK(db != NULL, "%s: 재시작 열기", sc->name);
     if (db == NULL) return;
     ackq_t *q = open_queue(db);
@@ -353,7 +334,7 @@ static void sweep_io_failures(const scenario_t *sc)
     for (long k = 1; k <= points; k++) {
         snap_restore(&base);
         hooks_on();
-        database_t *db = open_db(true);
+        database_t *db = open_db();
         ackq_t *q = db != NULL ? open_queue(db) : NULL;
         if (q == NULL) {
             CHECK(false, "%s k=%ld: 열기 실패", sc->name, k);
@@ -400,7 +381,7 @@ static void sweep_kills(const scenario_t *sc)
         if (pid == 0) {
             close(pipefd[0]);
             hooks_on();
-            database_t *db = open_db(true);
+            database_t *db = open_db();
             ackq_t *q = db != NULL ? open_queue(db) : NULL;
             if (q == NULL) _exit(4);
             g_fail_mode = false;

@@ -461,19 +461,13 @@ static void update_delete_drop(void)
 static void transaction_control(void)
 {
     sqlstmt_t *statement = parse_ok("BEGIN");
-    assert(statement->kind == SQLSTMT_BEGIN && statement->txn.mode == SQLSTMT_TXN_DEFAULT);
+    assert(statement->kind == SQLSTMT_BEGIN);
     free_clean(statement);
-    statement = parse_ok("begin transaction durable;");
-    assert(statement->kind == SQLSTMT_BEGIN && statement->txn.mode == SQLSTMT_TXN_DURABLE);
+    statement = parse_ok("begin transaction;");
+    assert(statement->kind == SQLSTMT_BEGIN);
     free_clean(statement);
-    statement = parse_ok("BEGIN VOLATILE");
-    assert(statement->kind == SQLSTMT_BEGIN && statement->txn.mode == SQLSTMT_TXN_VOLATILE);
-    free_clean(statement);
-    statement = parse_ok("START TRANSACTION");
-    assert(statement->kind == SQLSTMT_BEGIN && statement->txn.mode == SQLSTMT_TXN_DEFAULT);
-    free_clean(statement);
-    statement = parse_ok("Start Transaction Volatile");
-    assert(statement->kind == SQLSTMT_BEGIN && statement->txn.mode == SQLSTMT_TXN_VOLATILE);
+    statement = parse_ok("Start Transaction");
+    assert(statement->kind == SQLSTMT_BEGIN);
     free_clean(statement);
     statement = parse_ok("COMMIT");
     assert(statement->kind == SQLSTMT_COMMIT);
@@ -490,7 +484,8 @@ static void transaction_control(void)
 
     expect_syntax("START", SQLSTMT_REASON_UNEXPECTED_END, 5);
     expect_syntax("START DURABLE", SQLSTMT_REASON_EXPECTED_KEYWORD, 6);
-    expect_syntax("BEGIN DURABLE VOLATILE", SQLSTMT_REASON_TRAILING_TOKENS, 14);
+    expect_syntax("BEGIN DURABLE", SQLSTMT_REASON_TRAILING_TOKENS, 6);
+    expect_syntax("BEGIN TRANSACTION VOLATILE", SQLSTMT_REASON_TRAILING_TOKENS, 18);
     expect_syntax("BEGIN x", SQLSTMT_REASON_TRAILING_TOKENS, 6);
     expect_syntax("COMMIT x", SQLSTMT_REASON_TRAILING_TOKENS, 7);
     expect_syntax("COMMIT TRANSACTION TRANSACTION", SQLSTMT_REASON_TRAILING_TOKENS, 19);

@@ -32,11 +32,10 @@ static void *capi_test_realloc(void *pointer, size_t size)
 
 static lrndb_t *open_capi_db(const char *name)
 {
-    char path[192], wal[192];
+    char path[192];
     snprintf(path, sizeof(path), "%s/%s.lrdb", g_dir, name);
-    snprintf(wal, sizeof(wal), "%s/%s.wal", g_dir, name);
     lrndb_t *db = NULL;
-    int st = lrndb_open(path, wal, 1, &db);
+    int st = lrndb_open(path, 1, &db);
     assert(st == LRN_OK);
     return db;
 }
@@ -262,7 +261,7 @@ static void test_wrong_database_transaction(void)
     lrndb_t *a = open_capi_db("a");
     lrndb_t *b = open_capi_db("b");
     lrnq_t *qa = NULL;
-    assert(lrnq_open(a, "jobs", 1, 1, 0, fake_clock, NULL, &qa) == LRN_OK);
+    assert(lrnq_open(a, "jobs", 1, 0, fake_clock, NULL, &qa) == LRN_OK);
     g_now = 5;
     uint64_t id = 0;
     int dup = 0;
@@ -275,7 +274,7 @@ static void test_wrong_database_transaction(void)
     char out[256];
     assert(exec_str(b, NULL, "CREATE TABLE ackq_jobs (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)", NULL, 0, out, sizeof(out)) == LRN_OK);
     lrntxn_t *foreign = NULL;
-    assert(lrndb_begin(b, 1, &foreign) == LRN_OK);
+    assert(lrndb_begin(b, &foreign) == LRN_OK);
     uint8_t *buf = NULL;
     size_t size = 0;
     CHECK(lrndb_exec(a, foreign, "DELETE FROM ackq_jobs", NULL, 0, &buf, &size) == ACKQ_INVALID && buf == NULL,
@@ -310,14 +309,14 @@ static void test_handle_lifetime(void)
     make_db();
     lrndb_t *db = open_capi_db("main");
     lrnq_t *q = NULL;
-    assert(lrnq_open(db, "jobs", 1, 1, 0, fake_clock, NULL, &q) == LRN_OK);
+    assert(lrnq_open(db, "jobs", 1, 0, fake_clock, NULL, &q) == LRN_OK);
     lrndb_t *keep = db;
     CHECK(lrndb_close(&db) == ACKQ_BUSY && db == keep, "큐가 있으면 BUSY이고 핸들은 그대로다");
     uint64_t id;
     g_now = 1;
     CHECK(lrnq_put(q, NULL, (const uint8_t *)"x", 1, NULL, &id, NULL) == LRN_OK, "BUSY 뒤에도 큐를 쓸 수 있다");
     lrntxn_t *txn = NULL;
-    CHECK(lrndb_begin(db, 1, &txn) == LRN_OK, "트랜잭션 시작");
+    CHECK(lrndb_begin(db, &txn) == LRN_OK, "트랜잭션 시작");
     lrnq_close(&q);
     CHECK(lrndb_close(&db) == ACKQ_BUSY && db == keep, "트랜잭션이 있으면 BUSY");
     CHECK(lrndb_rollback(&txn) == LRN_OK && txn == NULL, "rollback");
@@ -399,8 +398,8 @@ static void test_queue_round_trip(void)
     make_db();
     lrndb_t *db = open_capi_db("main");
     lrnq_t *q = NULL;
-    CHECK(lrnq_open(db, "jobs", 0, 1, 0, fake_clock, NULL, &q) == ACKQ_NOT_INSTALLED && q == NULL, "설치 전 open");
-    assert(lrnq_open(db, "jobs", 1, 1, 2, fake_clock, NULL, &q) == LRN_OK);
+    CHECK(lrnq_open(db, "jobs", 0, 0, fake_clock, NULL, &q) == ACKQ_NOT_INSTALLED && q == NULL, "설치 전 open");
+    assert(lrnq_open(db, "jobs", 1, 2, fake_clock, NULL, &q) == LRN_OK);
     g_now = 100;
     lrnq_item_t item;
     CHECK(lrnq_get(q, NULL, 0, 500, &item) == LRN_EMPTY, "비면 EMPTY");
