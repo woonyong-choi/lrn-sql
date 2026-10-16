@@ -224,6 +224,41 @@ CASES = [
         ],
     },
     {
+        "name": "join-shapes",
+        "setup": [
+            "CREATE TABLE a (id INTEGER PRIMARY KEY, k INTEGER, v TEXT)",
+            "CREATE TABLE b (id INTEGER PRIMARY KEY, k INTEGER, w TEXT)",
+            "CREATE TABLE e (id INTEGER PRIMARY KEY, k INTEGER)",
+            "INSERT INTO a VALUES (1, 1, 'a1'), (2, 1, 'a2'), (3, 2, 'a3'), (4, NULL, 'a4'), (5, 3, 'a5')",
+            "INSERT INTO b VALUES (1, 1, 'b1'), (2, 1, 'b2'), (3, 1, 'b3'), (4, 2, 'b4'), (5, NULL, 'b5'), (6, 4, 'b6')",
+            "CREATE INDEX b_k ON b (k)",
+        ],
+        "queries": [
+            # 다대다: k=1은 2×3, NULL끼리는 같지 않다
+            "SELECT a.v, b.w FROM a JOIN b ON a.k = b.k",
+            "SELECT a.v, b.w FROM b JOIN a ON a.k = b.k",
+            "SELECT a.v, b.w FROM a, b WHERE b.k = a.k",
+            "SELECT a.v, b.w FROM a JOIN b ON b.k + 0 = a.k",
+            "SELECT a.v, b.w FROM a JOIN b ON TRUE WHERE a.k = b.k",
+            "SELECT a.v, b.w FROM a LEFT JOIN b ON b.k = a.k",
+            "SELECT a.v, b.w FROM a LEFT JOIN b ON b.k + 0 = a.k",
+            "SELECT b.w, a.v FROM b LEFT JOIN a ON a.k = b.k",
+            "SELECT a.v, b.w FROM a LEFT JOIN b ON b.k = a.k AND b.id > 1 WHERE a.id < 4",
+            "SELECT a.v FROM a JOIN b ON b.id = a.id JOIN b c ON c.k = b.k WHERE c.id <> b.id",
+            # 빈 테이블
+            "SELECT a.v, e.id FROM a JOIN e ON e.k = a.k",
+            "SELECT a.v, e.id FROM a LEFT JOIN e ON e.k = a.k",
+            "SELECT e.id, a.v FROM e LEFT JOIN a ON a.k = e.k",
+            "SELECT COUNT(*) FROM a, e",
+            "SELECT COUNT(*), COUNT(e.id) FROM a LEFT JOIN e ON e.k = a.k",
+            "SELECT a.k, COUNT(b.id) FROM a LEFT JOIN b ON b.k = a.k GROUP BY a.k ORDER BY a.k NULLS FIRST",
+            {"sql": "SELECT k FROM a JOIN b ON a.k = b.k", "error": True},
+            {"sql": "SELECT a.nope FROM a JOIN b ON a.k = b.k", "error": True},
+            {"sql": "SELECT a.v FROM a JOIN b ON a.k = c.k", "error": True},
+            {"sql": "SELECT a.v FROM a JOIN b ON b.k = c.k JOIN b c ON TRUE", "differs": {"like": "postgres", "reason": "ON은 앞의 원본만 본다(SQLite는 뒤 원본도 허용)"}},
+        ],
+    },
+    {
         "name": "dml",
         "setup": [
             "CREATE TABLE stock (id INTEGER PRIMARY KEY, item TEXT NOT NULL, qty INTEGER NOT NULL, price REAL)",
