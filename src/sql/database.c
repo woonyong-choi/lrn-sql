@@ -1586,10 +1586,10 @@ typedef struct {
     result_column_t meta;
 } select_out_t;
 
-/* 정렬 키. prog가 NULL이면 출력 열 out을 쓴다(ORDER BY 번호·별칭) */
+/* 정렬 키. slot은 행 안의 자리: prog가 NULL이면 출력 열(ORDER BY 번호·별칭), 아니면 출력 열 뒤의 식 자리 */
 typedef struct {
     sqleval_prog_t *prog;
-    size_t out;
+    size_t slot;
     bool desc;
     bool nulls_first;
 } select_key_t;
@@ -1601,6 +1601,7 @@ typedef struct {
     size_t outs_bytes;
     select_key_t *keys;
     size_t key_count;
+    size_t extra_count;         /* 식 정렬 키 수(행마다 출력 열 뒤에 둔다) */
     size_t keys_bytes;
     result_column_t *columns;   /* out_count개 결과 열 */
     bool distinct;
@@ -1619,7 +1620,7 @@ typedef struct {
     size_t row_cap;
 } select_ctx_t;
 
-static size_t select_width(const select_ctx_t *ctx) { return ctx->out_count + ctx->key_count; }
+static size_t select_width(const select_ctx_t *ctx) { return ctx->out_count + ctx->extra_count; }
 
 /* 출력 열이 정해진 뒤 결과 열·계산 자리·결과 builder를 만든다 */
 static database_exec_status_t select_prepare(select_ctx_t *ctx)
@@ -1736,7 +1737,7 @@ static database_exec_status_t select_emit(select_ctx_t *ctx, const value_t *row)
         status = select_value(db, ctx->outs[i].prog, ctx->outs[i].column, row, &values[i]);
     }
     for (size_t k = 0; k < ctx->key_count && status == DATABASE_EXEC_OK; k++) {
-        if (ctx->keys[k].prog != NULL) status = select_value(db, ctx->keys[k].prog, 0, row, &values[ctx->out_count + k]);
+        if (ctx->keys[k].prog != NULL) status = select_value(db, ctx->keys[k].prog, 0, row, &values[ctx->keys[k].slot]);
     }
     if (status != DATABASE_EXEC_OK) {
         owned_clear(db, values, width);
@@ -1760,8 +1761,7 @@ static int compare_keys_of(const select_ctx_t *ctx, const value_t *a, const valu
 {
     for (size_t k = 0; k < ctx->key_count; k++) {
         const select_key_t *key = &ctx->keys[k];
-        size_t at = key->prog != NULL ? ctx->out_count + k : key->out;
-        const value_view_t *x = &a[at].view, *y = &b[at].view;
+        const value_view_t *x = &a[key->slot].view, *y = &b[key->slot].view;
         bool x_null = x->type == VALUE_NULL, y_null = y->type == VALUE_NULL;
         if (x_null || y_null) {
             if (x_null && y_null) continue;
@@ -1792,8 +1792,8 @@ static void merge_sort(const select_ctx_t *ctx, value_t **rows, value_t **scratc
     }
 }
 
-/* 모은 행을 DISTINCT·ORDER BY·OFFSET·LIMIT 순서로 결과에 넣는다 */
-static database_exec_status_t select_flush(select_ctx_t *ctx)
+/* 모은 행에 DISTINCT·ORDER BY를 적용한다 */
+static database_exec_status_t select_settle(select_ctx_t *ctx)
 {
     database_t *db = ctx->db;
     size_t count = ctx->row_count;
@@ -1817,6 +1817,16 @@ static database_exec_status_t select_flush(select_ctx_t *ctx)
         if (ctx->key_count > 0) merge_sort(ctx, ctx->rows, scratch, count, true);
         q_free(db, scratch, scratch_bytes);
     }
+    return DATABASE_EXEC_OK;
+}
+
+/* 모은 행을 DISTINCT·ORDER BY·OFFSET·LIMIT 순서로 결과에 넣는다 */
+static database_exec_status_t select_flush(select_ctx_t *ctx)
+{
+    database_t *db = ctx->db;
+    database_exec_status_t settled = select_settle(ctx);
+    if (settled != DATABASE_EXEC_OK) return settled;
+    size_t count = ctx->row_count;
     for (size_t i = (size_t)(ctx->offset < count ? ctx->offset : count); i < count; i++) {
         if (ctx->has_limit && ctx->emitted >= ctx->limit) break;
         for (size_t c = 0; c < ctx->out_count; c++) ctx->views[c] = ctx->rows[i][c].view;
@@ -2130,7 +2140,7 @@ static database_exec_status_t plan_keys(database_t *db, const sqlstmt_select_t *
                 return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_BAD_ORDER_POSITION,
                                    "ORDER BY 번호가 선택 목록 밖입니다: %lld", (long long)position);
             }
-            key->out = (size_t)position - 1;
+            key->slot = (size_t)position - 1;
             continue;
         }
         bool by_alias = false;
@@ -2147,14 +2157,14 @@ static database_exec_status_t plan_keys(database_t *db, const sqlstmt_select_t *
                 }
                 if (item->alias.size == expr->name.size &&
                     memcmp(item->alias.bytes, expr->name.bytes, expr->name.size) == 0) {
-                    key->out = out;
+                    key->slot = out;
                     by_alias = true;
                 }
                 out++;
             }
         }
         if (by_alias) continue;
-        compile_in(db, expr, cc, &key->prog, &status);
+        if (compile_in(db, expr, cc, &key->prog, &status)) key->slot = ctx->out_count + ctx->extra_count++;
     }
     return status;
 }
@@ -2877,11 +2887,13 @@ static database_exec_status_t join_open(database_t *db, const sqlstmt_select_t *
     return status;
 }
 
-static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
+/*
+ * SELECT 핵심 하나를 실행해 ctx에 행을 낸다. core_only면 ORDER BY·LIMIT·OFFSET을 보지 않고 행을 모두 ctx->rows에
+ * 모은다(집합 연산의 한쪽). 아니면 결과 builder로 바로 내보내거나(스트리밍) 정렬하려고 모은다.
+ */
+static database_exec_status_t select_run(database_t *db, const sqlstmt_select_t *select, bool core_only,
+                                         select_ctx_t *ctx)
 {
-    select_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.db = db;
     group_plan_t plan;
     memset(&plan, 0, sizeof(plan));
     group_rows_t groups = {db, &plan, NULL, 0, 0};
@@ -2898,9 +2910,9 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         if (status != DATABASE_EXEC_OK) goto done;
         cc = (compile_ctx_t){group_resolve, group_match, &plan, &resolver};
     }
-    status = plan_outputs(db, select->items, select->item_count, &cc, &ctx);
+    status = plan_outputs(db, select->items, select->item_count, &cc, ctx);
     if (status != DATABASE_EXEC_OK) goto done;
-    status = plan_keys(db, select, &cc, &ctx);
+    if (!core_only) status = plan_keys(db, select, &cc, ctx);
     if (status != DATABASE_EXEC_OK) goto done;
     if (select->having != NULL) {
         if (!compile_in(db, select->having, &cc, &having, &status)) goto done;
@@ -2910,25 +2922,28 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
             goto done;
         }
     }
-    if (!constant_count(db, select->limit, &ctx.has_limit, &ctx.limit, &status)) goto done;
-    bool has_offset = false;
-    if (!constant_count(db, select->offset, &has_offset, &ctx.offset, &status)) goto done;
-    ctx.distinct = select->distinct;
-    ctx.buffered = select->distinct || ctx.key_count > 0;
-
-    status = select_prepare(&ctx);
-    if (status != DATABASE_EXEC_OK) goto done;
+    ctx->distinct = select->distinct;
+    if (core_only) {
+        ctx->buffered = true;
+    } else {
+        if (!constant_count(db, select->limit, &ctx->has_limit, &ctx->limit, &status)) goto done;
+        bool has_offset = false;
+        if (!constant_count(db, select->offset, &has_offset, &ctx->offset, &status)) goto done;
+        ctx->buffered = select->distinct || ctx->key_count > 0;
+        status = select_prepare(ctx);
+        if (status != DATABASE_EXEC_OK) goto done;
+    }
     /* 읽을 칸: 그룹이면 GROUP BY·집계 인자가, 아니면 출력·정렬 식이 쓰는 칸과 조건·탐침이 쓰는 칸 */
     bool *needed = join.needed;
     if (grouped) {
         for (size_t g = 0; g < plan.key_count; g++) sqleval_mark_columns(plan.key_progs[g], needed, n);
         for (size_t a = 0; a < plan.agg_count; a++) sqleval_mark_columns(plan.aggs[a].arg, needed, n);
     } else {
-        for (size_t i = 0; i < ctx.out_count; i++) {
-            if (ctx.outs[i].prog == NULL) needed[ctx.outs[i].column] = true;
-            else sqleval_mark_columns(ctx.outs[i].prog, needed, n);
+        for (size_t i = 0; i < ctx->out_count; i++) {
+            if (ctx->outs[i].prog == NULL) needed[ctx->outs[i].column] = true;
+            else sqleval_mark_columns(ctx->outs[i].prog, needed, n);
         }
-        for (size_t k = 0; k < ctx.key_count; k++) sqleval_mark_columns(ctx.keys[k].prog, needed, n);
+        for (size_t k = 0; k < ctx->key_count; k++) sqleval_mark_columns(ctx->keys[k].prog, needed, n);
     }
     for (size_t i = 0; i < join.cond_count; i++) sqleval_mark_columns(join.conds[i].prog, needed, n);
     for (size_t l = 0; l < join.level_count; l++) {
@@ -2937,7 +2952,7 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         }
     }
 
-    if (ctx.has_limit && ctx.limit == 0) ctx.done = true;
+    if (ctx->has_limit && ctx->limit == 0) ctx->done = true;
     for (size_t l = 0; l < join.level_count; l++) {
         heap_status_t opened = open_heap(db, &join.levels[l].view, join.levels[l].id, &join.levels[l].heap);
         if (opened != HEAP_OK) {
@@ -2946,30 +2961,206 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         }
     }
     bool never_stop = false;
-    row_sink_t sink = grouped ? (row_sink_t){group_collect, &groups, &never_stop} : (row_sink_t){emit_sink, &ctx, &ctx.done};
+    row_sink_t sink = grouped ? (row_sink_t){group_collect, &groups, &never_stop} : (row_sink_t){emit_sink, ctx, &ctx->done};
     join.out = &sink;
     for (size_t l = 0; l < join.level_count; l++) join.levels[l].sink = (row_sink_t){join_accept, &join.levels[l], sink.stop};
     if (!*sink.stop) status = join_start(&join);
-    if (status == DATABASE_EXEC_OK && grouped && !ctx.done) status = group_flush(db, &plan, &groups, having, &ctx);
-    if (status == DATABASE_EXEC_OK && ctx.buffered) status = select_flush(&ctx);
-    if (status != DATABASE_EXEC_OK) goto done;
-    result_t *rows = NULL;
-    result_status_t finished = result_builder_finish(&ctx.builder, &rows);
-    if (finished == RESULT_NOMEM) {
-        status = DATABASE_EXEC_NOMEM;
-        goto done;
-    }
-    if (finished != RESULT_OK) {
-        status = fail_result(db, RESULT_E_LIMIT, 17, "결과를 만들지 못했습니다");
-        goto done;
-    }
-    *out = rows;
+    if (status == DATABASE_EXEC_OK && grouped && !ctx->done) status = group_flush(db, &plan, &groups, having, ctx);
 done:
     group_rows_free(&groups);
-    select_ctx_free(&ctx);
     sqleval_free(having);
     group_plan_free(db, &plan);
     join_free(&join);
+    return status;
+}
+
+/* 모은 행을 정리해 결과로 만든다 */
+static database_exec_status_t select_finish(select_ctx_t *ctx, result_t **out)
+{
+    database_t *db = ctx->db;
+    if (ctx->buffered) {
+        database_exec_status_t status = select_flush(ctx);
+        if (status != DATABASE_EXEC_OK) return status;
+    }
+    result_status_t finished = result_builder_finish(&ctx->builder, out);
+    if (finished == RESULT_NOMEM) return DATABASE_EXEC_NOMEM;
+    return finished == RESULT_OK ? DATABASE_EXEC_OK : fail_result(db, RESULT_E_LIMIT, 17, "결과를 만들지 못했습니다");
+}
+
+/* ── 집합 연산(UNION·EXCEPT·INTERSECT) ── */
+
+/* 행 배열 자리를 need개 이상으로 늘린다 */
+static database_exec_status_t select_rows_reserve(select_ctx_t *ctx, size_t need)
+{
+    database_t *db = ctx->db;
+    if (need <= ctx->row_cap) return DATABASE_EXEC_OK;
+    size_t cap = ctx->row_cap == 0 ? 64 : ctx->row_cap;
+    while (cap < need) cap *= 2;
+    if (cap > SIZE_MAX / sizeof(value_t *) || !q_reserve(db, cap * sizeof(value_t *))) return DATABASE_EXEC_NOMEM;
+    value_t **grown = realloc(ctx->rows, cap * sizeof(*grown));
+    if (grown == NULL) {
+        q_release(db, cap * sizeof(value_t *));
+        return DATABASE_EXEC_NOMEM;
+    }
+    q_release(db, ctx->row_cap * sizeof(value_t *));
+    ctx->rows = grown;
+    ctx->row_cap = cap;
+    return DATABASE_EXEC_OK;
+}
+
+/* 행을 정렬하고 중복을 지운다 */
+static database_exec_status_t select_dedupe(select_ctx_t *ctx)
+{
+    bool distinct = ctx->distinct;
+    ctx->distinct = true;
+    database_exec_status_t status = select_settle(ctx);
+    ctx->distinct = distinct;
+    return status;
+}
+
+static void drop_row(select_ctx_t *ctx, value_t *row)
+{
+    size_t width = select_width(ctx);
+    owned_clear(ctx->db, row, width);
+    q_free(ctx->db, row, width * sizeof(value_t));
+}
+
+/* acc op other를 acc에 둔다. other의 행은 옮기거나 지운다 */
+static database_exec_status_t combine_rows(select_ctx_t *acc, select_ctx_t *other, sqlstmt_set_op_t op)
+{
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    if (op == SQLSTMT_SET_UNION || op == SQLSTMT_SET_UNION_ALL) {
+        status = select_rows_reserve(acc, acc->row_count + other->row_count);
+        if (status != DATABASE_EXEC_OK) return status;
+        memcpy(acc->rows + acc->row_count, other->rows, other->row_count * sizeof(value_t *));
+        acc->row_count += other->row_count;
+        other->row_count = 0;
+        return op == SQLSTMT_SET_UNION ? select_dedupe(acc) : DATABASE_EXEC_OK;
+    }
+    /* EXCEPT·INTERSECT: 양쪽을 정렬·중복 제거한 뒤 함께 훑는다 */
+    status = select_dedupe(acc);
+    if (status == DATABASE_EXEC_OK) status = select_dedupe(other);
+    if (status != DATABASE_EXEC_OK) return status;
+    size_t kept = 0, j = 0;
+    for (size_t i = 0; i < acc->row_count; i++) {
+        while (j < other->row_count && compare_outputs(acc, other->rows[j], acc->rows[i]) < 0) j++;
+        bool present = j < other->row_count && compare_outputs(acc, other->rows[j], acc->rows[i]) == 0;
+        if (present == (op == SQLSTMT_SET_INTERSECT)) acc->rows[kept++] = acc->rows[i];
+        else drop_row(acc, acc->rows[i]);
+    }
+    acc->row_count = kept;
+    return DATABASE_EXEC_OK;
+}
+
+/* 두 쪽 열 형식을 맞춘다. NULL은 다른 쪽을 따르고 INTEGER·REAL은 REAL, 그 밖에 다르면 오류 */
+static bool merge_type(value_type_t *into, value_type_t other)
+{
+    if (*into == VALUE_NULL || *into == other) {
+        if (*into == VALUE_NULL) *into = other;
+        return true;
+    }
+    if (other == VALUE_NULL) return true;
+    bool numeric = (*into == VALUE_INTEGER || *into == VALUE_REAL) && (other == VALUE_INTEGER || other == VALUE_REAL);
+    if (numeric) *into = VALUE_REAL;
+    return numeric;
+}
+
+/* 집합 연산 결과의 ORDER BY: 결과 열 번호나 첫 SELECT의 결과 열 이름만 쓴다 */
+static database_exec_status_t plan_set_keys(database_t *db, const sqlstmt_select_t *head, select_ctx_t *ctx)
+{
+    ctx->keys_bytes = (head->order_count > 0 ? head->order_count : 1) * sizeof(select_key_t);
+    ctx->keys = q_calloc(db, head->order_count > 0 ? head->order_count : 1, sizeof(select_key_t));
+    if (ctx->keys == NULL) return DATABASE_EXEC_NOMEM;
+    for (size_t k = 0; k < head->order_count; k++) {
+        const sqlstmt_order_t *order = &head->order[k];
+        select_key_t *key = &ctx->keys[ctx->key_count++];
+        key->desc = order->desc;
+        key->nulls_first = order->nulls == SQLSTMT_NULLS_DEFAULT ? !order->desc : order->nulls == SQLSTMT_NULLS_FIRST;
+        const sqlexpr_t *expr = order->expr;
+        if (expr->kind == SQLEXPR_LITERAL && expr->value.view.type == VALUE_INTEGER) {
+            int64_t position = expr->value.view.integer;
+            if (position < 1 || (uint64_t)position > ctx->out_count) {
+                return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_BAD_ORDER_POSITION,
+                                   "ORDER BY 번호가 선택 목록 밖입니다: %lld", (long long)position);
+            }
+            key->slot = (size_t)position - 1;
+            continue;
+        }
+        size_t found = SIZE_MAX;
+        for (size_t i = 0; expr->kind == SQLEXPR_COLUMN && expr->qualifier.size == 0 && i < ctx->out_count; i++) {
+            const result_column_t *meta = &ctx->outs[i].meta;
+            if (meta->name_len != expr->name.size || memcmp(meta->name, expr->name.bytes, expr->name.size) != 0) continue;
+            if (found != SIZE_MAX) {
+                return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_AMBIGUOUS_COLUMN, "ORDER BY 이름이 모호합니다: %.*s",
+                                   name_len(expr->name.size), (const char *)expr->name.bytes);
+            }
+            found = i;
+        }
+        if (found == SIZE_MAX) {
+            return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_SET_OPERATION,
+                               "집합 연산의 ORDER BY에는 결과 열 이름이나 번호만 쓸 수 있습니다");
+        }
+        key->slot = found;
+    }
+    return DATABASE_EXEC_OK;
+}
+
+static database_exec_status_t exec_compound(database_t *db, const sqlstmt_select_t *head, result_t **out)
+{
+    select_ctx_t acc, other;
+    memset(&acc, 0, sizeof(acc));
+    memset(&other, 0, sizeof(other));
+    acc.db = other.db = db;
+    database_exec_status_t status = select_run(db, head, true, &acc);
+    if (status == DATABASE_EXEC_OK && acc.distinct) status = select_dedupe(&acc);
+    for (const sqlstmt_select_t *left = head; status == DATABASE_EXEC_OK && left->next != NULL; left = left->next) {
+        status = select_run(db, left->next, true, &other);
+        if (status == DATABASE_EXEC_OK && other.out_count != acc.out_count) {
+            status = fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_SET_OPERATION,
+                                 "집합 연산 양쪽의 열 수가 다릅니다 (%zu, %zu)", acc.out_count, other.out_count);
+        }
+        for (size_t i = 0; status == DATABASE_EXEC_OK && i < acc.out_count; i++) {
+            if (!merge_type(&acc.outs[i].meta.type, other.outs[i].meta.type)) {
+                status = fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_TYPE, "집합 연산 %zu번째 열의 형식이 다릅니다", i + 1);
+            }
+            acc.outs[i].meta.is_nullable |= other.outs[i].meta.is_nullable;
+        }
+        if (status == DATABASE_EXEC_OK && other.distinct) status = select_dedupe(&other);
+        if (status == DATABASE_EXEC_OK) status = combine_rows(&acc, &other, left->next_op);
+        select_ctx_free(&other);
+    }
+    /* 결과는 결합한 행 그대로다: 출력 열은 행의 칸을 읽고 정렬 키는 결과 열을 가리킨다 */
+    for (size_t i = 0; status == DATABASE_EXEC_OK && i < acc.out_count; i++) {
+        sqleval_free(acc.outs[i].prog);
+        acc.outs[i].prog = NULL;
+        acc.outs[i].column = i;
+        if (acc.outs[i].meta.type != VALUE_REAL) continue;
+        for (size_t r = 0; r < acc.row_count; r++) {
+            value_t *cell = &acc.rows[r][i];
+            if (cell->view.type == VALUE_INTEGER) value_set_real(cell, (double)cell->view.integer);
+        }
+    }
+    acc.distinct = false;
+    if (status == DATABASE_EXEC_OK) status = plan_set_keys(db, head, &acc);
+    if (status == DATABASE_EXEC_OK && !constant_count(db, head->limit, &acc.has_limit, &acc.limit, &status)) goto done;
+    bool has_offset = false;
+    if (status == DATABASE_EXEC_OK && !constant_count(db, head->offset, &has_offset, &acc.offset, &status)) goto done;
+    if (status == DATABASE_EXEC_OK) status = select_prepare(&acc);
+    if (status == DATABASE_EXEC_OK) status = select_finish(&acc, out);
+done:
+    select_ctx_free(&acc);
+    return status;
+}
+
+static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
+{
+    if (select->next != NULL) return exec_compound(db, select, out);
+    select_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.db = db;
+    database_exec_status_t status = select_run(db, select, false, &ctx);
+    if (status == DATABASE_EXEC_OK) status = select_finish(&ctx, out);
+    select_ctx_free(&ctx);
     return status;
 }
 

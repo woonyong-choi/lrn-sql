@@ -22,8 +22,9 @@
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
  *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT]
  *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )} [returning]
- *   SELECT [DISTINCT] item {, item} [FROM source {join}] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
- *     [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
+ *   SELECT core {set_op core} [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
+ *     core       = [DISTINCT] item {, item} [FROM source {join}] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
+ *     set_op     = UNION [ALL] SELECT | EXCEPT SELECT | INTERSECT SELECT
  *     item       = * | name.* | expr [[AS] alias]
  *     source     = name [[AS] alias]
  *     join       = , source | CROSS JOIN source | [INNER] JOIN source ON expr | LEFT [OUTER] JOIN source ON expr
@@ -56,7 +57,7 @@
  *   - FROM 원본은 SQLSTMT_MAX_SOURCES개까지다. 넘으면 SQLSTMT_LIMIT다.
  *
  * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): RIGHT·FULL·NATURAL JOIN, JOIN ... USING, 괄호로 묶은 JOIN,
- * UNION·EXCEPT·INTERSECT·WITH·창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS·FROM 안), INSERT ... SELECT,
+ * INTERSECT와 UNION·EXCEPT를 괄호 없이 섞기, EXCEPT ALL·INTERSECT ALL, 괄호로 묶은 SELECT, WITH·창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS·FROM 안), INSERT ... SELECT,
  * CREATE TABLE ... AS,
  * IF [NOT] EXISTS, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중 PRIMARY KEY 외의 것,
  * 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE, 테이블 이름의 한정(schema.table).
@@ -245,7 +246,10 @@ typedef struct {
 
 #define SQLSTMT_MAX_SOURCES 64
 
-typedef struct {
+/* 집합 연산. 왼쪽부터 결합한다. INTERSECT를 다른 연산과 섞으면 거절한다(엔진마다 우선순위가 다르다) */
+typedef enum { SQLSTMT_SET_UNION, SQLSTMT_SET_UNION_ALL, SQLSTMT_SET_EXCEPT, SQLSTMT_SET_INTERSECT } sqlstmt_set_op_t;
+
+typedef struct sqlstmt_select {
     bool distinct;
     sqlstmt_select_item_t *items;
     size_t item_count;
@@ -259,6 +263,9 @@ typedef struct {
     size_t order_count;
     sqlexpr_t *limit;            /* 없으면 NULL */
     sqlexpr_t *offset;
+    /* 집합 연산으로 이어지는 다음 SELECT. 있으면 ORDER BY·LIMIT·OFFSET은 첫 SELECT에 두며 결합한 결과에 쓴다 */
+    struct sqlstmt_select *next;
+    sqlstmt_set_op_t next_op;
 } sqlstmt_select_t;
 
 typedef struct {
