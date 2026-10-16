@@ -59,6 +59,25 @@ make test-sql-diff SQLDIFF_DSN=postgresql://user:password@localhost:5432/sqldiff
 make SANITIZE= BUILD_DIR=build-sqlite test-sqlite-session-diff
 ```
 
+### 성능 측정
+
+`bench/sqlite_workload.py`는 같은 SQL을 이 엔진과 시스템 SQLite에 주고, 문장마다 결과를 대조하면서 시간과 메모리를 잰다.
+
+- 측정 항목
+  - 자동 commit 삽입
+  - 기본 키·구간·조건·전체 스캔 조회
+  - 혼합 부하
+  - 강제 종료 뒤 다시 열기
+- 측정 조건(seed, 행 수, 반복 수, 내구성 설정)은 `bench/sqlite_workload.json`에 있다
+- 결과가 하나라도 다르면 실패로 끝난다
+- 시간 수치는 통과/실패 판정에 쓰지 않는다
+
+```sh
+python3 bench/sqlite_workload.py --smoke
+python3 bench/sqlite_workload.py --output build/bench/sqlite_workload.json
+python3 bench/sqlite_workload.py --output build/bench/sqlite_workload.json --analyze
+```
+
 ## CI
 
 `.github/workflows/ci.yml`은 Ubuntu에서 아래 작업을 실행한다.
