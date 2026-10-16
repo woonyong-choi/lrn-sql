@@ -134,6 +134,7 @@ database_exec_status_t database_exec(database_t *db, const uint8_t *sql, size_t 
 #define DATABASE_CODE_AGGREGATE_MISUSE 49   /* WHERE·GROUP BY·집계 안 등 집계를 쓸 수 없는 자리 */
 #define DATABASE_CODE_NOT_GROUPED 50        /* 그룹 질의에서 GROUP BY에 없는 컬럼을 집계 밖에서 씀 */
 #define DATABASE_CODE_SET_OPERATION 51      /* 집합 연산 양쪽 열 수가 다르거나 ORDER BY가 결과 열이 아님 */
+#define DATABASE_CODE_SUBQUERY 52           /* 서브쿼리 결과 모양이 자리에 맞지 않음, WITH 열 이름 수가 다름 */
 
 typedef struct {
     bool (*requested)(void *ctx);

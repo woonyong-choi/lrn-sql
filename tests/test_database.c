@@ -894,8 +894,12 @@ static void test_order_and_distinct_respect_budget(void)
                              "SELECT s.id, t.body FROM sorted s LEFT JOIN sorted t ON t.id = s.id + 1 ORDER BY t.body, s.id",
                              "UPDATE sorted SET grp = grp RETURNING id, body",
                              "SELECT body FROM sorted UNION ALL SELECT body FROM sorted WHERE grp = 1 ORDER BY 1 LIMIT 100",
-                             "SELECT body, grp FROM sorted UNION SELECT body, grp FROM sorted EXCEPT SELECT body, 0 FROM sorted"};
-    const size_t expected_rows[] = {300, 40, 40, 1, 300, 300, 100, 72};
+                             "SELECT body, grp FROM sorted UNION SELECT body, grp FROM sorted EXCEPT SELECT body, 0 FROM sorted",
+                             "WITH b AS (SELECT body, id FROM sorted WHERE grp >= 0) SELECT x.body FROM b x JOIN b y ON y.id = x.id "
+                             "WHERE x.id IN (SELECT id FROM sorted WHERE grp <> 3)",
+                             "UPDATE sorted SET grp = grp WHERE id IN (SELECT id FROM sorted WHERE grp = 1) RETURNING body"};
+    const size_t expected_rows[] = {300, 40, 40, 1, 300, 300, 100, 72, 206, 52};
+    char *before = query(db, "SELECT COUNT(*), SUM(grp), SUM(LENGTH(body)) FROM sorted");
     for (size_t q = 0; q < sizeof(queries) / sizeof(queries[0]); q++) {
         projection_memory_t memory = {0};
         result_t *result = NULL;
@@ -923,6 +927,11 @@ static void test_order_and_distinct_respect_budget(void)
             CHECK(swept.used == 0, "%s: 한도 %zu에서 계상 %zu 남음", queries[q], limit, swept.used);
         }
     }
+    /* 한도에 걸린 변경 문장은 아무것도 바꾸지 않았다 */
+    char *after = query(db, "SELECT COUNT(*), SUM(grp), SUM(LENGTH(body)) FROM sorted");
+    CHECK(strcmp(before, after) == 0, "거절 뒤 데이터 보존: %s / %s", before, after);
+    free(before);
+    free(after);
     /* 정렬이 없는 LIMIT은 모으지 않고 내보내다 멈춘다 */
     projection_memory_t whole = {0}, first = {0};
     result_t *result = NULL;
