@@ -67,11 +67,11 @@ QueueStats(ready=0, leased=0, acked=1, failed=0)
 
 | 있는 것 | 아직 없는 것 | 다음 |
 |---|---|---|
-| CREATE TABLE·INDEX, INSERT·UPDATE·DELETE, DEFAULT, ON CONFLICT, RETURNING | ALTER TABLE, `INSERT ... SELECT`, 복합 색인, 창 함수, WITH RECURSIVE | [연산자·내장 함수 구현](https://github.com/woonyong-choi/lrn-sql/issues/40) |
-| SELECT의 WHERE·ORDER BY·LIMIT, JOIN(INNER·LEFT·첫 RIGHT), GROUP BY·HAVING, 상관 서브쿼리, UNION·EXCEPT·INTERSECT, WITH, 정수 기본 키 범위 조회 | FULL JOIN, USING, 보조 색인 범위 조회, 색인 순서 정렬 | [SQL 결과·오류 계약 구현](https://github.com/woonyong-choi/lrn-sql/issues/64) |
-| 단일 writer, snapshot 격리, COW 게시와 `fsync` 뒤 commit 응답 | 여러 writer, 프로세스 간 공유, 저장 장치가 버린 쓰기 탐지 | [파일 I/O 오류 전파 구현](https://github.com/woonyong-choi/lrn-sql/issues/78) |
-| at-least-once ACK 큐, lease와 fence, 업무 갱신과 같은 commit | 큐 연산의 색인 사용(claim·ack마다 테이블 전체 스캔) | [선택형 ACK 큐 라이브러리 구현](https://github.com/woonyong-choi/lrn-sql/issues/140) |
-| 시험마다 SQLite와 PostgreSQL에 같은 SQL을 실행해 결과 대조 | 혼합 부하와 복구 비용 측정 | [혼합 부하·복구 비용 측정](https://github.com/woonyong-choi/lrn-sql/issues/137) |
+| CREATE TABLE·INDEX, INSERT·UPDATE·DELETE, DEFAULT, ON CONFLICT, RETURNING | ALTER TABLE, `INSERT ... SELECT`, 복합 색인, 창 함수, WITH RECURSIVE | — |
+| SELECT의 WHERE·ORDER BY·LIMIT, JOIN(INNER·LEFT·첫 RIGHT), GROUP BY·HAVING, 상관 서브쿼리, UNION·EXCEPT·INTERSECT, WITH, 정수 기본 키 범위 조회 | FULL JOIN, USING, 보조 색인 범위 조회, 보조 색인 순서 정렬 | — |
+| 단일 writer, snapshot 격리, COW 게시와 `fsync` 뒤 commit 응답 | 여러 writer, 프로세스 간 공유, 저장 장치가 버린 쓰기 탐지 | — |
+| at-least-once ACK 큐, lease와 fence, 업무 갱신과 같은 commit, 상태·idempotency 색인 | lease 연장, purge 뒤 idempotency 키 보존 규칙 | — |
+| 시험마다 SQLite와 PostgreSQL에 같은 SQL을 실행해 결과 대조, SQLite와 같은 입력의 CRUD·혼합 부하·강제 종료 뒤 복구 측정 | 전원 차단 검증, SQLite 수준의 파일 크기(지금 4~5배) | [행 인코딩 형식 변경](https://github.com/woonyong-choi/lrn-sql/issues/192) |
 
 1.0 전에는 파일 형식과 API가 예고 없이 바뀔 수 있습니다.
 
