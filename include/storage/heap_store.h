@@ -78,9 +78,10 @@
  * 재사용되지 않는다. update로 행이 옮겨지면 새 locator를 돌려준다. commit 뒤에는 순번이
  * 같아도 다시 open한 heap_t의 locator로만 쓴다.
  *
- * 보장하지 않는 것: WAL·거래 복구, 여러 페이지 갱신의 원자성(게시는 catalog commit 하나에 기대며
- * 그 한계는 page_file.h를 따른다), 재시작 뒤 해제 목록 회수(page_file이 메모리에만 둔다),
- * 삭제된 slot 번호의 재사용, 동시 접근(단일 스레드). 삭제된 행의 데이터 바이트는 같은 record page에
+ * 놓은 페이지 목록은 page_file_commit이 제어 페이지와 빈 목록 사슬 페이지에 적으므로 재시작 뒤에도 회수된다.
+ * 보장하지 않는 것: WAL, 여러 페이지 갱신의 원자성(게시는 catalog commit 하나에 기대며 그 한계는
+ * page_file.h를 따른다), 삭제된 slot 번호의 재사용, 동시 접근(단일 스레드, 직렬화는 database가 맡는다).
+ * 삭제된 행의 데이터 바이트는 같은 record page에
  * 새 행을 넣을 때 재사용한다. 후보 탐색은 메모리 힌트 배열을 훑는 best-fit이며 record page 읽기를 줄이지만
  * 후보 수에 비례하는 CPU 비용은 남는다. 디렉터리 최대 record page 수는
  * HEAP_DIRECTORY_ENTRIES * HEAP_HINT_DIRECTORY_ENTRIES다.
