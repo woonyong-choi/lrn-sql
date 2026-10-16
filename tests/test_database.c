@@ -883,6 +883,8 @@ static void test_order_and_distinct_respect_budget(void)
     expect_text(db, "SELECT grp FROM sorted GROUP BY grp HAVING COUNT(*) < 52 ORDER BY 1", "[3] -1/ 2/ 4");
     expect_text(db, "SELECT COUNT(*), SUM(id) FROM sorted WHERE grp = 9", "[1] 0|NULL");
     expect_text(db, "SELECT COUNT(*) FROM sorted s JOIN sorted t ON t.grp = s.grp", "[1] 15078");
+    expect_text(db, "SELECT grp FROM sorted UNION SELECT grp + 10 FROM sorted WHERE grp > 2 ORDER BY 1 DESC LIMIT 4",
+                "[4] 14/ 13/ 4/ 3");
     expect_text(db, "SELECT s.id, t.id FROM sorted s LEFT JOIN sorted t ON t.id = s.id * 150 WHERE s.id < 4 ORDER BY 1",
                 "[3] 1|150/ 2|300/ 3|NULL");
 
@@ -890,8 +892,10 @@ static void test_order_and_distinct_respect_budget(void)
                              "SELECT body, COUNT(*), MIN(id) FROM sorted GROUP BY body ORDER BY body",
                              "SELECT COUNT(DISTINCT body), MAX(body) FROM sorted",
                              "SELECT s.id, t.body FROM sorted s LEFT JOIN sorted t ON t.id = s.id + 1 ORDER BY t.body, s.id",
-                             "UPDATE sorted SET grp = grp RETURNING id, body"};
-    const size_t expected_rows[] = {300, 40, 40, 1, 300, 300};
+                             "UPDATE sorted SET grp = grp RETURNING id, body",
+                             "SELECT body FROM sorted UNION ALL SELECT body FROM sorted WHERE grp = 1 ORDER BY 1 LIMIT 100",
+                             "SELECT body, grp FROM sorted UNION SELECT body, grp FROM sorted EXCEPT SELECT body, 0 FROM sorted"};
+    const size_t expected_rows[] = {300, 40, 40, 1, 300, 300, 100, 72};
     for (size_t q = 0; q < sizeof(queries) / sizeof(queries[0]); q++) {
         projection_memory_t memory = {0};
         result_t *result = NULL;

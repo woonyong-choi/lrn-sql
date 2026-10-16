@@ -417,6 +417,22 @@ static void parameters(void)
     assert(out == NULL && live_allocations == 0);
 }
 
+static void set_operation_forms(void)
+{
+    sqlstmt_t *statement = parse_ok("SELECT a FROM t UNION SELECT b FROM u UNION ALL SELECT DISTINCT c FROM v WHERE c > 1 "
+                                    "EXCEPT SELECT 1 ORDER BY 1 DESC LIMIT 3 OFFSET 1");
+    const sqlstmt_select_t *q = &statement->select;
+    assert(q->next_op == SQLSTMT_SET_UNION && q->order_count == 1 && q->limit != NULL && q->offset != NULL);
+    const sqlstmt_select_t *second = q->next, *third = second->next, *fourth = third->next;
+    assert(second->next_op == SQLSTMT_SET_UNION_ALL && name_is(&second->sources[0].table, "u"));
+    assert(third->next_op == SQLSTMT_SET_EXCEPT && third->distinct && third->where != NULL && third->order_count == 0);
+    assert(fourth->next == NULL && fourth->source_count == 0 && fourth->limit == NULL);
+    free_clean(statement);
+    statement = parse_ok("SELECT a FROM t INTERSECT SELECT a FROM u INTERSECT SELECT a FROM v");
+    assert(statement->select.next_op == SQLSTMT_SET_INTERSECT && statement->select.next->next_op == SQLSTMT_SET_INTERSECT);
+    free_clean(statement);
+}
+
 static void returning_forms(void)
 {
     sqlstmt_t *statement = parse_ok("INSERT INTO t (a) VALUES (1), (2) RETURNING *, a + 1 AS b, t.*");
@@ -740,7 +756,13 @@ static void select_and_where_errors(void)
     expect_unsupported("SELECT * FROM t NATURAL JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t JOIN u USING (a)", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 23);
     expect_unsupported("SELECT * FROM t JOIN (u) ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 21);
-    expect_unsupported("SELECT * FROM t UNION SELECT * FROM u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
+    expect_unsupported("SELECT a FROM t UNION SELECT a FROM u INTERSECT SELECT a FROM v", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 38);
+    expect_unsupported("SELECT a FROM t INTERSECT SELECT a FROM u EXCEPT SELECT a FROM v", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 42);
+    expect_unsupported("SELECT a FROM t EXCEPT ALL SELECT a FROM u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 23);
+    expect_unsupported("SELECT a FROM t UNION (SELECT a FROM u)", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 22);
+    expect_syntax("SELECT a FROM t UNION", SQLSTMT_REASON_UNEXPECTED_END, 21);
+    expect_syntax("SELECT a FROM t UNION a FROM u", SQLSTMT_REASON_EXPECTED_KEYWORD, 22);
+    expect_syntax("SELECT a FROM t ORDER BY a UNION SELECT a FROM u", SQLSTMT_REASON_TRAILING_TOKENS, 27);
     expect_unsupported("SELECT * FROM t WHERE a IN (SELECT b FROM u)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 28);
     expect_unsupported("SELECT (SELECT 1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 7);
     expect_unsupported("SELECT * FROM t WHERE EXISTS (SELECT 1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 22);
@@ -939,6 +961,7 @@ int main(void)
     select_forms();
     join_forms();
     returning_forms();
+    set_operation_forms();
     update_delete_drop();
     transaction_control();
     create_errors();

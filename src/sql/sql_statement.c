@@ -29,12 +29,11 @@ static const char *const RESERVED[] = {
     "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
     "INDEX", "UNIQUE", "AND", "OR", "IN", "BETWEEN", "LIKE", "ESCAPE", "CASE", "WHEN", "THEN",
     "ELSE", "END", "CAST", "AS", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "DISTINCT",
-    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", "RETURNING", NULL};
+    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", "RETURNING", "UNION", "ALL", "EXCEPT", "INTERSECT", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
-    "ALL", "RIGHT", "FULL", "NATURAL",
-    "UNION", "EXCEPT", "INTERSECT", "USING", "WINDOW", "OVER", "WITH", NULL};
+    "RIGHT", "FULL", "NATURAL", "USING", "WINDOW", "OVER", "WITH", NULL};
 
 static bool fail(parser_t *p, sqlstmt_status_t status, sqlstmt_reason_t reason, size_t offset)
 {
@@ -193,6 +192,37 @@ static void items_free(sqlstmt_select_item_t *items, size_t count)
     free(items);
 }
 
+static void select_fields_clear(sqlstmt_select_t *q)
+{
+    items_free(q->items, q->item_count);
+    for (size_t i = 0; i < q->order_count; i++) expr_free(q->order[i].expr);
+    for (size_t i = 0; i < q->group_count; i++) expr_free(q->group_by[i]);
+    free(q->group_by);
+    expr_free(q->having);
+    free(q->order);
+    expr_free(q->where);
+    expr_free(q->limit);
+    expr_free(q->offset);
+    for (size_t i = 0; i < q->source_count; i++) {
+        name_clear(&q->sources[i].table);
+        name_clear(&q->sources[i].alias);
+        expr_free(q->sources[i].on);
+    }
+    free(q->sources);
+}
+
+/* 첫 SELECT는 문장 구조 안에 있고 집합 연산으로 이어진 뒤 SELECT들은 따로 할당했다 */
+static void select_clear(sqlstmt_select_t *head)
+{
+    select_fields_clear(head);
+    for (sqlstmt_select_t *next = head->next; next != NULL;) {
+        sqlstmt_select_t *after = next->next;
+        select_fields_clear(next);
+        free(next);
+        next = after;
+    }
+}
+
 void sqlstmt_free(sqlstmt_t *statement)
 {
     if (statement == NULL) return;
@@ -219,21 +249,7 @@ void sqlstmt_free(sqlstmt_t *statement)
             items_free(statement->insert.returning.items, statement->insert.returning.count);
             break;
         case SQLSTMT_SELECT:
-            items_free(statement->select.items, statement->select.item_count);
-            for (size_t i = 0; i < statement->select.order_count; i++) expr_free(statement->select.order[i].expr);
-            for (size_t i = 0; i < statement->select.group_count; i++) expr_free(statement->select.group_by[i]);
-            free(statement->select.group_by);
-            expr_free(statement->select.having);
-            free(statement->select.order);
-            expr_free(statement->select.where);
-            expr_free(statement->select.limit);
-            expr_free(statement->select.offset);
-            for (size_t i = 0; i < statement->select.source_count; i++) {
-                name_clear(&statement->select.sources[i].table);
-                name_clear(&statement->select.sources[i].alias);
-                expr_free(statement->select.sources[i].on);
-            }
-            free(statement->select.sources);
+            select_clear(&statement->select);
             break;
         case SQLSTMT_UPDATE:
             for (size_t i = 0; i < statement->update.assignment_count; i++) {
@@ -1091,10 +1107,9 @@ static bool parse_from(parser_t *p, sqlstmt_select_t *query)
     }
 }
 
-static bool parse_select(parser_t *p, sqlstmt_t *statement)
+/* SELECT 핵심: 목록·FROM·WHERE·GROUP BY·HAVING */
+static bool parse_select_core(parser_t *p, sqlstmt_select_t *query)
 {
-    sqlstmt_select_t *query = &statement->select;
-    statement->kind = SQLSTMT_SELECT;
     query->distinct = take_word(p, "DISTINCT");
     size_t capacity = 0;
     do {
@@ -1119,6 +1134,52 @@ static bool parse_select(parser_t *p, sqlstmt_t *statement)
     }
     if (take_word(p, "HAVING")) {
         if (!parse_expr(p, &query->having)) return false;
+    }
+    return true;
+}
+
+/* UNION [ALL] | EXCEPT | INTERSECT. 아니면 false */
+static bool take_set_op(parser_t *p, sqlstmt_set_op_t *op)
+{
+    if (take_word(p, "UNION")) {
+        *op = take_word(p, "ALL") ? SQLSTMT_SET_UNION_ALL : SQLSTMT_SET_UNION;
+    } else if (take_word(p, "EXCEPT")) {
+        *op = SQLSTMT_SET_EXCEPT;
+    } else if (take_word(p, "INTERSECT")) {
+        *op = SQLSTMT_SET_INTERSECT;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static bool parse_select(parser_t *p, sqlstmt_t *statement)
+{
+    sqlstmt_select_t *query = &statement->select;
+    statement->kind = SQLSTMT_SELECT;
+    if (!parse_select_core(p, query)) return false;
+    sqlstmt_select_t *tail = query;
+    bool has_intersect = false, has_other = false;
+    sqlstmt_set_op_t op;
+    for (size_t offset = here_offset(p); take_set_op(p, &op); offset = here_offset(p)) {
+        if ((op == SQLSTMT_SET_EXCEPT || op == SQLSTMT_SET_INTERSECT) && word_is(current(p), "ALL")) {
+            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+        }
+        if (op == SQLSTMT_SET_INTERSECT) has_intersect = true;
+        else has_other = true;
+        if (has_intersect && has_other) {
+            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, offset);
+        }
+        if (punct_is(current(p), "(")) {
+            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+        }
+        if (!expect_word(p, "SELECT")) return false;
+        sqlstmt_select_t *next = calloc(1, sizeof(*next));
+        if (next == NULL) return nomem(p, offset);
+        tail->next = next;
+        tail->next_op = op;
+        tail = next;
+        if (!parse_select_core(p, next)) return false;
     }
     if (take_word(p, "ORDER")) {
         if (!expect_word(p, "BY") || !parse_order(p, query)) return false;
@@ -1456,6 +1517,10 @@ size_t sqlstmt_parse_peak_bytes(const lexer_statement_t *statement, const lexer_
         const lexer_token_t *token = &statement->tokens[i];
         switch (token->kind) {
             case LEXER_WORD:
+                /* 집합 연산 뒤의 SELECT마다 핵심 구조 하나 */
+                if (word_is(token, "SELECT")) total += sizeof(sqlstmt_select_t);
+                total += 2 * token->text_size;
+                break;
             case LEXER_QUOTED_IDENT:
             case LEXER_STRING: total += 2 * token->text_size; break;
             case LEXER_NUMBER: total += token->text_size + 16; break;
