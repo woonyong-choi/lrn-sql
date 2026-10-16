@@ -344,9 +344,12 @@ static void format_follows_lengths_and_buffer_contract(void)
     assert_text_form(real_view(1.0), "1.0");
     assert_text_form(real_view(-0.0), "-0.0");
     assert_text_form(real_view(0.0), "0.0");
-    assert_text_form(real_view(0.1), "0.10000000000000001");
+    assert_text_form(real_view(0.1), "0.1");
+    /* 15자리로 왕복하지 않는 값은 16·17자리로 늘린다 */
+    assert_text_form(real_view(0.1 + 0.2), "0.30000000000000004");
+    assert_text_form(real_view(1.0 / 3.0), "0.3333333333333333");
     assert_text_form(real_view(1e20), "1e+20");
-    assert_text_form(real_view(TWO_POW_63), "9.2233720368547758e+18");
+    assert_text_form(real_view(TWO_POW_63), "9.223372036854776e+18");
     assert_text_form(text_view("한글", 6), "한글");
     assert_text_form(text_view("", 0), "");
     uint8_t blob[] = {0x00, 0xff, 0xab};
@@ -489,7 +492,7 @@ static void real_text_is_locale_independent(void)
     value_t value = {0};
     value_view_t from = real_view(0.1);
     assert(value_cast(&from, VALUE_TEXT, &value) == VALUE_OK);
-    assert(value.view.size_bytes == 19 && memcmp(value.view.bytes, "0.10000000000000001", 19) == 0);
+    assert(value.view.size_bytes == 3 && memcmp(value.view.bytes, "0.1", 3) == 0);
     value_clear(&value);
     assert(setlocale(LC_NUMERIC, "C") != NULL);
 }

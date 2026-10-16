@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from lrn_ackq import Database
+from lrn_ackq import Database, SqlError
 
 JOBS = 60
 WORKERS = 6
@@ -124,4 +124,24 @@ def test_concurrent_upserts_lose_nothing(tmp_path: Path) -> None:
     rows = db.execute("SELECT k, n FROM counters ORDER BY k").rows
     assert list(rows[:5]) == [(k, WORKERS * rounds // 5) for k in range(5)]
     assert [row[0] for row in rows[5:]] == [100 + i for i in range(WORKERS)]
+    db.close()
+
+
+# #40 완료 조건 2: 집계 이름의 잘못된 인자 꼴은 모르는 함수(43)가 아니라 인자 오류(44)로 거절
+@pytest.mark.parametrize(
+    ("sql", "code"),
+    [
+        ("SELECT SUM(*) FROM t", 44),
+        ("SELECT MAX(x, x) FROM t", 44),
+        ("SELECT COUNT(x, x) FROM t", 44),
+        ("SELECT ABS(1, 2)", 44),
+        ("SELECT nosuchfunc(1)", 43),
+    ],
+)
+def test_function_signature_errors_are_distinct(tmp_path: Path, sql: str, code: int) -> None:
+    db = Database(tmp_path / "fn.lrdb")
+    db.execute("CREATE TABLE t (x INTEGER)")
+    with pytest.raises(SqlError) as raised:
+        db.execute(sql)
+    assert raised.value.error_code == code
     db.close()

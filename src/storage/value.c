@@ -188,7 +188,11 @@ static size_t render_number(const value_view_t *view, char text[NUMBER_TEXT_BYTE
         text[length] = '\0';
         return length;
     }
-    snprintf(text, NUMBER_TEXT_BYTES, "%.17g", view->real);
+    /* 15·16·17자리 가운데 다시 읽어 같은 값이 되는 가장 짧은 표현. 17자리는 모든 유한값을 왕복한다 */
+    for (int digits = 15; digits <= 17; digits++) {
+        snprintf(text, NUMBER_TEXT_BYTES, "%.*g", digits, view->real);
+        if (digits == 17 || strtod(text, NULL) == view->real) break;
+    }
     normalize_decimal_point(text);
     if (strpbrk(text, ".eE") == NULL) strcat(text, ".0");
     return strlen(text);

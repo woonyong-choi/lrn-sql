@@ -29,7 +29,7 @@ typedef struct {
 static const fn_spec_t FUNCTIONS[] = {
     {"ABS", FN_ABS, 1, 1},           {"LENGTH", FN_LENGTH, 1, 1},     {"LOWER", FN_LOWER, 1, 1},
     {"UPPER", FN_UPPER, 1, 1},       {"SUBSTR", FN_SUBSTR, 2, 3},     {"SUBSTRING", FN_SUBSTR, 2, 3},
-    {"TRIM", FN_TRIM, 1, 1},         {"LTRIM", FN_LTRIM, 1, 2},       {"RTRIM", FN_RTRIM, 1, 2},
+    {"TRIM", FN_TRIM, 1, 2},         {"LTRIM", FN_LTRIM, 1, 2},       {"RTRIM", FN_RTRIM, 1, 2},
     {"REPLACE", FN_REPLACE, 3, 3},   {"COALESCE", FN_COALESCE, 1, SIZE_MAX},
     {"NULLIF", FN_NULLIF, 2, 2},
 };
@@ -129,7 +129,13 @@ static sqleval_status_t compile_function(compiler_t *c, node_t *node)
     for (size_t i = 0; i < sizeof(FUNCTIONS) / sizeof(FUNCTIONS[0]); i++) {
         if (name_is(&expr->name, FUNCTIONS[i].name)) spec = &FUNCTIONS[i];
     }
-    if (spec == NULL) return failed(c->error, SQLEVAL_UNKNOWN_FUNCTION, expr, &expr->name);
+    if (spec == NULL) {
+        /* 집계 이름인데 인자 꼴이 맞지 않으면(SUM(*), MAX(a, b)) 모르는 함수가 아니라 인자 오류다 */
+        for (size_t i = 0; AGGREGATES[i] != NULL; i++) {
+            if (name_is(&expr->name, AGGREGATES[i])) return failed(c->error, SQLEVAL_ARGUMENT, expr, &expr->name);
+        }
+        return failed(c->error, SQLEVAL_UNKNOWN_FUNCTION, expr, &expr->name);
+    }
     if (expr->star || expr->distinct || expr->arg_count < spec->min_args || expr->arg_count > spec->max_args) {
         return failed(c->error, SQLEVAL_ARGUMENT, expr, &expr->name);
     }
@@ -771,6 +777,12 @@ static sqleval_status_t substr(const runner_t *r, const node_t *node, const valu
     return set_text_bytes(r, node, tmp, view, text->bytes + from, to - from);
 }
 
+/* C 로캘 isspace와 같은 여섯 글자. 로캘에 따라 결과가 바뀌지 않게 직접 본다 */
+static bool is_ascii_space(uint8_t c)
+{
+    return c == ' ' || (c >= '\t' && c <= '\r');
+}
+
 static bool in_set(const uint8_t *c, size_t len, const value_view_t *set)
 {
     for (size_t at = 0; at < set->size_bytes; at += char_len(set->bytes[at])) {
@@ -910,7 +922,7 @@ static sqleval_status_t eval_function(const runner_t *r, const node_t *node, val
             case FN_SUBSTR:
                 status = substr(r, node, a, args[1].integer, count == 3, count == 3 ? args[2].integer : 0, tmp, view);
                 break;
-            case FN_TRIM: status = trim(r, node, a, NULL, true, true, tmp, view); break;
+            case FN_TRIM: status = trim(r, node, a, count == 2 ? &args[1] : NULL, true, true, tmp, view); break;
             case FN_LTRIM: status = trim(r, node, a, count == 2 ? &args[1] : NULL, true, false, tmp, view); break;
             case FN_RTRIM: status = trim(r, node, a, count == 2 ? &args[1] : NULL, false, true, tmp, view); break;
             case FN_REPLACE: status = replace(r, node, a, &args[1], &args[2], tmp, view); break;
@@ -1022,7 +1034,18 @@ static sqleval_status_t eval(const runner_t *r, const node_t *node, value_t *tmp
             value_view_t v;
             sqleval_status_t status = eval(r, node->args[0], &inner, &v);
             if (status == SQLEVAL_OK) {
-                value_status_t cast = value_cast(&v, expr->cast_type, tmp);
+                /* 문자열을 숫자로 바꿀 때는 SQLite·PostgreSQL처럼 앞뒤 ASCII 공백을 무시한다 */
+                if (v.type == VALUE_TEXT && (expr->cast_type == VALUE_INTEGER || expr->cast_type == VALUE_REAL)) {
+                    while (v.size_bytes > 0 && is_ascii_space(v.bytes[0])) {
+                        v.bytes++;
+                        v.size_bytes--;
+                    }
+                    while (v.size_bytes > 0 && is_ascii_space(v.bytes[v.size_bytes - 1])) v.size_bytes--;
+                }
+                /* 정수를 실수로 바꾸는 CAST는 산술의 암묵 변환처럼 가장 가까운 double이다(SQLite·PostgreSQL과 같음) */
+                value_status_t cast = v.type == VALUE_INTEGER && expr->cast_type == VALUE_REAL
+                                          ? value_set_real(tmp, (double)v.integer)
+                                          : value_cast(&v, expr->cast_type, tmp);
                 status = from_value(r, cast, node);
                 if (status == SQLEVAL_OK) *view = tmp->view;
             }

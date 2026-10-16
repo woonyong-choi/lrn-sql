@@ -20,7 +20,12 @@
  *   - 비교: 숫자끼리(INTEGER·REAL 섞어도 정확히), TEXT끼리(바이트 순서), BLOB끼리. 그 밖의 조합은 형식 오류.
  *   - || 는 TEXT·INTEGER를 받아 TEXT를 만든다(INTEGER는 10진 표기). REAL·BLOB은 형식 오류.
  *   - LIKE는 대소문자를 구분한다(%·_, ESCAPE 한 글자). SQLite 기본(ASCII 대소문자 무시)과 다르다.
- *   - CAST는 value_cast의 정확한 변환만 받는다(잃는 변환은 형식 오류).
+ *   - CAST는 value_cast의 정확한 변환만 받는다(잃는 변환은 형식 오류). 문자열을 숫자로 바꿀 때만 앞뒤 ASCII 공백을
+ *     무시하고, 정수를 실수로 바꿀 때는 가장 가까운 double로 반올림한다(SQLite·PostgreSQL과 같음). 저장할 때의 변환은
+ *     공백과 정밀도 손실을 거절한다.
+ *   - 최상위 AND로 나뉜 WHERE 조건은 앞에서부터 보고 참이 아닌 조건을 만나면 뒤 조건을 평가하지 않는다. 그래서 뒤 조건의
+ *     평가 오류(0으로 나누기 등)는 앞 조건이 참인 행에서만 난다. SELECT 목록의 AND는 NULL AND x에서 x를 평가한다.
+ *     평가 순서는 SQL 표준·PostgreSQL도 약속하지 않으므로 오류가 날 수 있는 조건은 CASE로 막아야 한다.
  *   - 집계 COUNT·SUM·AVG·MIN·MAX는 이 모듈이 계산하지 않는다. 실행기가 그룹마다 접어 match로 넘긴다.
  *   - 서브쿼리 결과는 subquery 훅이 준다. 바깥 열을 보는 서브쿼리는 평가할 때마다 refresh로 다시 계산한다.
  *   - 함수: ABS, LENGTH(글자 수, BLOB은 바이트 수), LOWER, UPPER(ASCII), SUBSTR(x, 시작[, 길이])(글자 단위,

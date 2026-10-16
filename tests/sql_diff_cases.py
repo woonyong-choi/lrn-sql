@@ -125,6 +125,36 @@ CASES = [
         ],
     },
     {
+        # #40: 함수별 NULL 인자, 인자 수·형식 오류, 정수 넘침, 문자열↔숫자 CAST
+        "name": "function-edges",
+        "setup": PEOPLE,
+        "queries": [
+            "SELECT ABS(NULL), LOWER(NULL), TRIM(NULL), LTRIM(NULL), RTRIM(NULL), LTRIM('ab', NULL)",
+            "SELECT SUBSTR(NULL, 1), SUBSTR('abc', NULL), SUBSTR('abc', 1, NULL)",
+            "SELECT REPLACE(NULL, 'a', 'b'), REPLACE('abc', NULL, 'b'), REPLACE('abc', 'a', NULL)",
+            "SELECT NULLIF(NULL, 1), NULLIF(1, NULL), NULLIF(1, 1), COALESCE(NULL, age) FROM people WHERE id = 3",
+            "SELECT TRIM('xxaxx', 'x'), TRIM('  a  ', ' '), TRIM('abcba', 'ab')",
+            "SELECT CAST(' 12 ' AS INTEGER), CAST('-7' AS INTEGER), CAST(' 1.5 ' AS REAL)",
+            "SELECT CAST(0.3 AS TEXT), CAST(1.1 AS TEXT), CAST(0.5 AS TEXT), CAST(-2.25 AS TEXT)",
+            "SELECT CAST(9223372036854775807 AS REAL), CAST(9007199254740993 AS REAL)",
+            {"sql": "SELECT ABS(1, 2)", "error": True},
+            {"sql": "SELECT TRIM()", "error": True},
+            {"sql": "SELECT UPPER(*)", "error": True},
+            {"sql": "SELECT SUM(*) FROM people", "error": True},
+            {"sql": "SELECT ABS(-9223372036854775807 - 1)", "error": True},
+            {"sql": "SELECT CAST('12abc' AS INTEGER)", "differs": {"like": "postgres", "reason": "숫자 뒤 문자가 붙은 문자열은 거절(SQLite는 앞 숫자만 읽는다)"}},
+            {"sql": "SELECT CAST('' AS INTEGER)", "differs": {"like": "postgres", "reason": "빈 문자열은 숫자가 아니다(SQLite는 0)"}},
+            {"sql": "SELECT SUBSTR('hello', -2)", "differs": {"like": "postgres", "reason": "음수 시작은 1 앞에서 시작(SQLite는 끝에서 센다)"}},
+            {"sql": "SELECT -9223372036854775807 - 2", "differs": {"like": "postgres", "reason": "정수 넘침은 오류"}},
+            {"sql": "SELECT 4611686018427387904 * 2", "differs": {"like": "postgres", "reason": "정수 넘침은 오류"}},
+            {"sql": "SELECT (-9223372036854775807 - 1) / -1", "differs": {"like": "postgres", "reason": "정수 넘침은 오류"}},
+            {"sql": "SELECT age * 9223372036854775807 FROM people WHERE id = 1", "differs": {"like": "postgres", "reason": "열 값의 정수 넘침도 오류"}},
+            # 상수 자리(INSERT 값·LIMIT)도 행 평가와 같은 평가기·오류 정책
+            {"sql": "INSERT INTO people VALUES (99, 'x', 1 / 0, NULL, NULL)", "differs": {"like": "postgres", "reason": "상수 자리의 0으로 나누기도 오류"}},
+            {"sql": "INSERT INTO people VALUES (98, 'y', 9223372036854775807 + 1, NULL, NULL)", "differs": {"like": "postgres", "reason": "상수 자리의 정수 넘침도 오류"}},
+        ],
+    },
+    {
         "name": "order-limit-distinct",
         "setup": PEOPLE,
         "queries": [
