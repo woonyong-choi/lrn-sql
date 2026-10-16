@@ -121,6 +121,16 @@ database_exec_status_t database_exec(database_t *db, const uint8_t *sql, size_t 
 #define DATABASE_CODE_CANCELLED 23
 /* 메모리 예산 거절 오류 결과의 code */
 #define DATABASE_CODE_BUDGET 24
+/* 식 평가 오류 결과의 code(RESULT_E_SEMANTIC). 메시지는 원인 식의 입력 위치를 함께 적는다 */
+#define DATABASE_CODE_TYPE 40               /* 형식이 맞지 않는 연산·비교·조건 */
+#define DATABASE_CODE_DIVIDE_BY_ZERO 41
+#define DATABASE_CODE_ARITHMETIC_OVERFLOW 42
+#define DATABASE_CODE_UNKNOWN_FUNCTION 43
+#define DATABASE_CODE_FUNCTION_ARGUMENT 44
+#define DATABASE_CODE_NOT_CONSTANT 45       /* 상수 자리(INSERT 값·LIMIT·OFFSET)에 열이 나옴 */
+#define DATABASE_CODE_AMBIGUOUS_COLUMN 46
+#define DATABASE_CODE_BAD_LIMIT 47          /* LIMIT·OFFSET이 음수이거나 정수가 아님 */
+#define DATABASE_CODE_BAD_ORDER_POSITION 48 /* ORDER BY 번호가 선택 목록 밖 */
 
 typedef struct {
     bool (*requested)(void *ctx);

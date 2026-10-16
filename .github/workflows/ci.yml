@@ -70,6 +70,12 @@ jobs:
         run: |
           make SANITIZE= BUILD_DIR=build-pg build-pg/sql_probe
           python3 tests/pg_compat.py --probe ./build-pg/sql_probe --require-postgres
+      - name: Compare the SQL engine with SQLite and PostgreSQL 18
+        run: |
+          python3 -m pip install --user 'psycopg[binary]'
+          psql postgresql://compat:compat@localhost:5432/compat_test -c \
+            "CREATE DATABASE sqldiff TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C' ENCODING 'UTF8'"
+          make SANITIZE= test-sql-diff SQLDIFF_DSN=postgresql://compat:compat@localhost:5432/sqldiff
 
   figures:
     runs-on: ubuntu-latest

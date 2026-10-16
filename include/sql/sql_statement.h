@@ -21,16 +21,19 @@
  *     column     = column_name type {constraint}
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
  *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT]
- *   INSERT INTO name [( column_name {, column_name} )] VALUES ( value {, value} )
- *   SELECT ( * | column_name {, column_name} ) FROM name [where]
- *   UPDATE name SET column_name = value {, column_name = value} [where]
- *   DELETE FROM name [where]
+ *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )}
+ *   SELECT [DISTINCT] item {, item} [FROM name [[AS] alias]] [WHERE expr]
+ *     [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
+ *     item       = * | name.* | expr [[AS] alias]
+ *   UPDATE name SET column_name = expr {, column_name = expr} [WHERE expr]
+ *   DELETE FROM name [WHERE expr]
  *   DROP TABLE name
  *   BEGIN [TRANSACTION] | START TRANSACTION
  *   COMMIT [TRANSACTION] | ROLLBACK [TRANSACTION]
- *   where      = WHERE column_name ( = | != | <> | < | <= | > | >= ) value
- *              | WHERE column_name IS [NOT] NULL
- *   value      = [+|-] number | 'string' | NULL | X'hex' | ? | ?N
+ *   expr(우선순위 낮은 것부터): OR, AND, NOT, 비교(= == != <> < <= > >=)·IS [NOT] NULL·[NOT] BETWEEN·[NOT] IN (목록)·
+ *     [NOT] LIKE [ESCAPE], + -, * / %, ||, 단항 + -, 기본식
+ *   기본식      = 숫자 | 'string' | NULL | TRUE | FALSE | X'hex' | ? | ?N | [name.]column | name(args) | name(*) |
+ *                name(DISTINCT expr) | CASE [expr] WHEN expr THEN expr {...} [ELSE expr] END | CAST(expr AS type) | ( expr )
  *   문장 끝의 세미콜론은 lexer가 처리하므로 이 API는 토큰만 본다.
  *
  * 의미:
@@ -40,17 +43,18 @@
  *     has_identity가 된다. 테이블 제약 PRIMARY KEY (...)에는 쓸 수 없다.
  *   - 기본 키는 한 컬럼이다. 컬럼 제약과 테이블 제약을 합쳐 둘 이상이거나 없는 컬럼 이름이면 거절한다.
  *     primary_key_column은 columns 배열의 번호이며 없으면 SQLSTMT_NO_COLUMN이다.
- *   - 정수 리터럴은 INTEGER, 소수점이나 지수가 있으면 REAL이다. int64 범위를 벗어나는 정수와
- *     유한하지 않은 실수는 REAL로 바꾸지 않고 SQLSTMT_LIMIT로 거절한다. 숫자 리터럴은 부호를 포함해
- *     4096바이트 이하여야 한다.
- *   - 매개변수는 lexer가 번호를 매긴 id로 binding에서 값을 찾아 복제한다. 값은 SQL에 이어 붙이지 않는다.
- *   - NULL은 값이며 NULL과의 = 비교도 그대로 구조에 담는다. 3치 논리는 실행기 몫이다.
+ *   - 정수 리터럴은 INTEGER, 소수점이나 지수가 있으면 REAL이다. 부호가 붙은 숫자는 리터럴 하나로 읽는다(INT64_MIN).
+ *     int64 범위를 벗어나는 정수와 유한하지 않은 실수는 SQLSTMT_LIMIT로 거절한다. 숫자 리터럴은 부호를 포함해
+ *     4096바이트 이하여야 한다. TRUE·FALSE는 INTEGER 1·0이다.
+ *   - 매개변수는 lexer가 번호를 매긴 id로 binding에서 값을 찾아 리터럴로 복제한다. 값은 SQL에 이어 붙이지 않는다.
+ *   - 함수 이름은 대문자로 맞춰 둔다. 어떤 함수가 있는지, 열 이름이 맞는지, 형식이 맞는지는 실행기(sql_eval) 몫이다.
  *   - X'hex'는 X와 따옴표 문자열이 붙어 있어야 하며 짝수 개의 16진 숫자여야 한다. 빈 X''는 빈 BLOB이다.
+ *   - 식 트리 높이는 512, 목록(인자·IN·여러 행 INSERT의 값)은 65536개까지다. 넘으면 SQLSTMT_LIMIT다.
  *
- * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): ORDER BY·GROUP BY·HAVING·LIMIT·OFFSET·DISTINCT·
- * JOIN·UNION 같은 절, AND·OR로 이은 둘 이상의 조건, 별칭(AS), 함수 호출, 테이블.컬럼 형태의 이름,
- * IF [NOT] EXISTS, 여러 행 INSERT, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중
- * PRIMARY KEY 외의 것, 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE.
+ * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): GROUP BY·HAVING·JOIN·UNION·EXCEPT·INTERSECT·RETURNING·WITH·
+ * 창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS), FROM의 둘 이상 테이블, INSERT ... SELECT, CREATE TABLE ... AS,
+ * IF [NOT] EXISTS, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중 PRIMARY KEY 외의 것,
+ * 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE, 테이블 이름의 한정(schema.table).
  *
  * 소유권: 성공한 sqlstmt_t의 모든 이름·값은 이 구조가 복사해 소유하며 입력 SQL과 binding이
  * 사라져도 유효하다. 해제는 sqlstmt_free 한 번이다. 실패하면 *out을 바꾸지 않고 할당을 남기지 않는다.
@@ -152,56 +156,100 @@ typedef struct {
     bool unique;
 } sqlstmt_index_t;
 
+/* ── 식 ── */
+
+typedef enum {
+    SQLEXPR_LITERAL,   /* value */
+    SQLEXPR_COLUMN,    /* [qualifier.]name */
+    SQLEXPR_UNARY,     /* op(NEG·PLUS·NOT) args[0] */
+    SQLEXPR_BINARY,    /* args[0] op args[1] */
+    SQLEXPR_IS_NULL,   /* args[0] IS [NOT] NULL (negated) */
+    SQLEXPR_BETWEEN,   /* args[0] [NOT] BETWEEN args[1] AND args[2] */
+    SQLEXPR_IN,        /* args[0] [NOT] IN (args[1..]) */
+    SQLEXPR_LIKE,      /* args[0] [NOT] LIKE args[1] [ESCAPE args[2]] */
+    SQLEXPR_CASE,      /* has_operand면 args[0]이 비교 대상. 이어 WHEN·THEN 쌍, has_else면 마지막이 ELSE */
+    SQLEXPR_FUNCTION,  /* name(args) | name(*) (star) | name(DISTINCT x) (distinct) */
+    SQLEXPR_CAST       /* CAST(args[0] AS cast_type) */
+} sqlexpr_kind_t;
+
+typedef enum {
+    SQLEXPR_OP_NEG, SQLEXPR_OP_PLUS, SQLEXPR_OP_NOT,
+    SQLEXPR_OP_ADD, SQLEXPR_OP_SUB, SQLEXPR_OP_MUL, SQLEXPR_OP_DIV, SQLEXPR_OP_MOD, SQLEXPR_OP_CONCAT,
+    SQLEXPR_OP_EQ, SQLEXPR_OP_NE, SQLEXPR_OP_LT, SQLEXPR_OP_LE, SQLEXPR_OP_GT, SQLEXPR_OP_GE,
+    SQLEXPR_OP_AND, SQLEXPR_OP_OR
+} sqlexpr_op_t;
+
+typedef struct sqlexpr {
+    sqlexpr_kind_t kind;
+    sqlexpr_op_t op;
+    bool negated;
+    bool has_operand;
+    bool has_else;
+    bool star;
+    bool distinct;
+    value_type_t cast_type;
+    size_t offset;               /* 식이 시작한 입력 바이트 위치(오류 보고용) */
+    value_t value;
+    sqlstmt_name_t qualifier;    /* COLUMN의 테이블 이름. 없으면 size 0 */
+    sqlstmt_name_t name;         /* COLUMN·FUNCTION 이름 */
+    struct sqlexpr **args;
+    size_t arg_count;
+} sqlexpr_t;
+
 typedef struct {
     sqlstmt_name_t table;
     bool has_columns;
     sqlstmt_name_t *columns;     /* has_columns일 때 column_count개 */
     size_t column_count;
-    value_t *values;
-    size_t value_count;          /* has_columns이면 column_count와 같다 */
+    sqlexpr_t **values;          /* row_count × value_count, 행 순서 */
+    size_t value_count;          /* 한 행의 값 수. has_columns이면 column_count와 같다 */
+    size_t row_count;
 } sqlstmt_insert_t;
 
-typedef enum {
-    SQLSTMT_OP_EQ,
-    SQLSTMT_OP_NE,        /* != 와 <> */
-    SQLSTMT_OP_LT,
-    SQLSTMT_OP_LE,
-    SQLSTMT_OP_GT,
-    SQLSTMT_OP_GE,
-    SQLSTMT_OP_IS_NULL,
-    SQLSTMT_OP_IS_NOT_NULL
-} sqlstmt_op_t;
+typedef struct {
+    sqlexpr_t *expr;             /* star면 NULL */
+    bool star;                   /* * 또는 table.* */
+    sqlstmt_name_t qualifier;    /* table.*의 table */
+    sqlstmt_name_t alias;        /* [AS] alias. 없으면 size 0 */
+} sqlstmt_select_item_t;
+
+typedef enum { SQLSTMT_NULLS_DEFAULT, SQLSTMT_NULLS_FIRST, SQLSTMT_NULLS_LAST } sqlstmt_nulls_t;
 
 typedef struct {
-    bool present;
-    sqlstmt_name_t column;
-    sqlstmt_op_t op;
-    value_t value;               /* IS [NOT] NULL이면 NULL 값 */
-} sqlstmt_where_t;
+    sqlexpr_t *expr;
+    bool desc;
+    sqlstmt_nulls_t nulls;
+} sqlstmt_order_t;
 
 typedef struct {
+    bool distinct;
+    sqlstmt_select_item_t *items;
+    size_t item_count;
+    bool has_from;
     sqlstmt_name_t table;
-    bool select_all;
-    sqlstmt_name_t *columns;     /* select_all이 아닐 때 column_count개 */
-    size_t column_count;
-    sqlstmt_where_t where;
+    sqlstmt_name_t table_alias;
+    sqlexpr_t *where;            /* 없으면 NULL */
+    sqlstmt_order_t *order;
+    size_t order_count;
+    sqlexpr_t *limit;            /* 없으면 NULL */
+    sqlexpr_t *offset;
 } sqlstmt_select_t;
 
 typedef struct {
     sqlstmt_name_t column;
-    value_t value;
+    sqlexpr_t *value;
 } sqlstmt_assignment_t;
 
 typedef struct {
     sqlstmt_name_t table;
     sqlstmt_assignment_t *assignments;
     size_t assignment_count;
-    sqlstmt_where_t where;
+    sqlexpr_t *where;
 } sqlstmt_update_t;
 
 typedef struct {
     sqlstmt_name_t table;
-    sqlstmt_where_t where;
+    sqlexpr_t *where;
 } sqlstmt_delete_t;
 
 typedef struct {

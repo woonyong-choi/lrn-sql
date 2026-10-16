@@ -444,7 +444,9 @@ static void test_failed_statements_keep_existing_data(void)
         {"DELETE FROM users WHERE id = 'abc'", RESULT_E_SEMANTIC},
         {"SELEC * FROM users", RESULT_E_SYNTAX},
         {"SELECT * FROM users; SELECT * FROM logs", RESULT_E_SYNTAX},
-        {"SELECT * FROM users ORDER BY id", RESULT_E_SEMANTIC},
+        {"SELECT * FROM users ORDER BY nothing", RESULT_E_SEMANTIC},
+        {"SELECT * FROM users WHERE name + 1 = 2", RESULT_E_SEMANTIC},
+        {"SELECT * FROM users LIMIT -1", RESULT_E_SEMANTIC},
         {"SELECT * FROM users WHERE name = ?", RESULT_E_SYNTAX},
         {"", RESULT_E_SYNTAX},
         {"INSERT INTO users (name) VALUES ('\x80')", RESULT_E_SYNTAX},
@@ -527,7 +529,9 @@ static void test_many_rows_updates_and_deletes_across_pages(void)
         snprintf(sql, sizeof(sql), "INSERT INTO big (grp, body) VALUES (%d, '%0*d')", i % 4, 1500 + (i % 3) * 700, i);
         exec_ok(db, sql);
     }
-    expect_class(db, "SELECT id FROM big WHERE grp = 0 AND id = 1", RESULT_E_SEMANTIC);
+    /* 기본 키 탐침과 나머지 조건을 함께 거른다 */
+    expect_text(db, "SELECT id FROM big WHERE grp = 0 AND id = 1", "[1] 1");
+    expect_text(db, "SELECT id FROM big WHERE grp = 1 AND id = 1", "[0]");
     result_t *res = run_bound(db, "SELECT id FROM big WHERE grp = 1", NULL, 0);
     size_t ones = 0;
     result_row_t row;
