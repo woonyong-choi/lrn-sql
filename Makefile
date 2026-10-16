@@ -164,6 +164,10 @@ $(BUILD_DIR)/bench_secondary_index: $(BUILD_DIR)/tests/bench_secondary_index.o $
 $(BUILD_DIR)/bench_secondary_index: LDLIBS += -lsqlite3
 $(BUILD_DIR)/bench_secondary_index:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+$(BUILD_DIR)/bench_primary_range: $(BUILD_DIR)/tests/bench_primary_range.o $(DATABASE_OBJS)
+$(BUILD_DIR)/bench_primary_range: LDLIBS += -lsqlite3
+$(BUILD_DIR)/bench_primary_range:
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 $(BUILD_DIR)/bench_free_space: $(BUILD_DIR)/tests/bench_free_space.o $(DATABASE_OBJS)
 $(BUILD_DIR)/bench_free_space: LDLIBS += -lsqlite3
 $(BUILD_DIR)/bench_free_space:

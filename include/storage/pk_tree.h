@@ -83,6 +83,14 @@ pk_status_t pk_tree_put(const pk_tree_io_t *io, uint32_t table_id, uint32_t *roo
 pk_status_t pk_tree_remove(const pk_tree_io_t *io, uint32_t table_id, uint32_t *root, int64_t key,
                            heap_locator_t *removed);
 
+/*
+ * low 이상 high 이하인 key를 오름차순으로 visit에 넘긴다. 범위와 겹치는 child만 내려가므로 읽는 페이지는
+ * 깊이 + 범위에 걸친 잎 수에 비례한다. visit이 false를 돌려주면 그 자리에서 멈추고 *stopped를 true로 둔다.
+ */
+pk_status_t pk_tree_visit_range(const pk_tree_io_t *io, uint32_t table_id, uint32_t root, int64_t low,
+                                int64_t high, bool (*visit)(void *context, int64_t key, heap_locator_t locator),
+                                void *context, bool *stopped);
+
 /* 모든 노드 페이지를 visit에 넘긴다. visit이 false를 돌려주면 PK_NOMEM으로 멈춘다. */
 pk_status_t pk_tree_visit_pages(const pk_tree_io_t *io, uint32_t table_id, uint32_t root,
                                 bool (*visit)(void *context, uint32_t page_id), void *context);

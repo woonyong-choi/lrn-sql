@@ -195,6 +195,14 @@ bool heap_is_indexed(const heap_t *heap);
 heap_status_t heap_find_key(heap_t *heap, int64_t key, heap_locator_t *locator);
 heap_status_t heap_find_text_key(heap_t *heap, const uint8_t *key, size_t key_bytes,
                                  heap_locator_t *locator);
+/*
+ * 정수 키 색인에서 low 이상 high 이하인 행을 키 오름차순으로 visit에 넘긴다. 넘기기 전에 행을 읽어 키가 같은지
+ * 확인하며 어긋나면 HEAP_CORRUPT다. visit이 false를 돌려주면 멈추고 *stopped가 true다. 색인을 쓰지 않거나 키가
+ * 정수가 아니면 HEAP_INVALID다.
+ */
+heap_status_t heap_visit_key_range(heap_t *heap, int64_t low, int64_t high,
+                                   bool (*visit)(void *context, heap_locator_t locator), void *context,
+                                   bool *stopped);
 bool heap_secondary_key_fits(const value_view_t *value);
 heap_status_t heap_secondary_visit_equal(heap_t *heap, heap_secondary_spec_t spec,
                                          const value_view_t *value,

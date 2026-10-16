@@ -446,6 +446,46 @@ static pk_status_t visit_node(const pk_tree_io_t *io, uint32_t table_id, uint32_
     return PK_OK;
 }
 
+static pk_status_t range_node(const pk_tree_io_t *io, uint32_t table_id, uint32_t page, int expected_level,
+                              int64_t low, int64_t high,
+                              bool (*visit)(void *context, int64_t key, heap_locator_t locator), void *context,
+                              bool *stopped)
+{
+    node_t node;
+    pk_status_t status = load_node(io, table_id, page, expected_level, &node);
+    if (status != PK_OK) return status;
+    if (node.level == 0) {
+        bool found;
+        for (uint32_t i = leaf_search(&node, low, &found); i < node.count && key_at(&node, i) <= high; i++) {
+            if (visit(context, key_at(&node, i), locator_at(&node, i))) continue;
+            *stopped = true;
+            return PK_OK;
+        }
+        return PK_OK;
+    }
+    uint32_t start = child_index(&node, low);
+    for (uint32_t i = start; i < node.count && !*stopped; i++) {
+        /* child i는 key_at(i) 이상을 담는다. 그 하한이 high를 넘으면 뒤 child도 모두 넘는다 */
+        if (i > start && key_at(&node, i) > high) break;
+        status = range_node(io, table_id, child_at(&node, i), node.level - 1, low, high, visit, context, stopped);
+        if (status != PK_OK) return status;
+    }
+    return PK_OK;
+}
+
+// cost: time O(d·log c + k), heap O(1), stack O(d), io d + l
+// mem: stack ≈ d·size(node_t)
+// vars: d = 트리 깊이, c = 노드당 항목 수, k = 범위 안 key 수, l = 범위에 걸친 잎 수
+// basis: estimate
+pk_status_t pk_tree_visit_range(const pk_tree_io_t *io, uint32_t table_id, uint32_t root, int64_t low,
+                                int64_t high, bool (*visit)(void *context, int64_t key, heap_locator_t locator),
+                                void *context, bool *stopped)
+{
+    *stopped = false;
+    if (low > high) return PK_OK;
+    return range_node(io, table_id, root, LEVEL_ANY, low, high, visit, context, stopped);
+}
+
 // cost: time O(n·c), heap O(1), stack O(d), io n
 // mem: stack ≈ d·size(node_t)
 // vars: n = 노드 수, d = 트리 깊이, c = 노드당 항목 수(순서 검사)

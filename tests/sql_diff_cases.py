@@ -11,6 +11,15 @@ PEOPLE = [
     "(6, 'Frank', 35, 'busan', 9.5)",
 ]
 
+# #180: 기본 키 색인 잎 여러 장에 걸치는 짝수 키 1200개(잎 하나는 508개)
+RANGE_ROWS = [
+    "CREATE TABLE r (id INTEGER PRIMARY KEY, v TEXT)",
+    *(
+        "INSERT INTO r VALUES " + ", ".join(f"({2 * i}, 'v{2 * i}')" for i in range(start, start + 200))
+        for start in range(1, 1201, 200)
+    ),
+]
+
 CASES = [
     {
         "name": "where-logic",
@@ -39,6 +48,33 @@ CASES = [
             "SELECT id FROM people WHERE id = 1.5",
             {"sql": "SELECT id FROM people WHERE name LIKE 'F%'", "differs": {"like": "postgres", "reason": "LIKE 대소문자 구분(SQLite는 ASCII 대소문자 무시)"}},
             {"sql": "SELECT id FROM people WHERE name LIKE 'f%'", "differs": {"like": "postgres", "reason": "LIKE 대소문자 구분"}},
+        ],
+    },
+    {
+        "name": "primary-key-range",
+        "setup": RANGE_ROWS,
+        "queries": [
+            "SELECT id FROM r WHERE id >= 2390",
+            "SELECT id FROM r WHERE id > 2390",
+            "SELECT id FROM r WHERE id >= 2391",
+            "SELECT id FROM r WHERE id <= 6",
+            "SELECT id FROM r WHERE id < 6",
+            "SELECT id FROM r WHERE id < 2",
+            "SELECT id FROM r WHERE id > 2400",
+            "SELECT id FROM r WHERE id > 1010 AND id <= 1030",
+            "SELECT id FROM r WHERE 1010 < id AND 1030 >= id",
+            "SELECT id FROM r WHERE id > 50 AND id < 40",
+            "SELECT id FROM r WHERE id > 9223372036854775807",
+            "SELECT id FROM r WHERE id >= -9223372036854775807 AND id < 5",
+            "SELECT id FROM r WHERE id > NULL",
+            "SELECT id FROM r WHERE id >= 1000 AND id <= 1100 AND v LIKE '%0'",
+            "SELECT count(*), min(id), max(id) FROM r WHERE id > 500",
+            "SELECT id FROM r WHERE id > 1000 ORDER BY id LIMIT 3",
+            "SELECT a.id, b.id FROM r a JOIN r b ON b.id > a.id AND b.id <= a.id + 4 WHERE a.id < 7",
+            "UPDATE r SET v = 'w' WHERE id > 2380",
+            "DELETE FROM r WHERE id <= 10",
+            "SELECT id, v FROM r WHERE id > 2370 OR id < 16",
+            "SELECT count(*) FROM r WHERE id >= 0",
         ],
     },
     {
