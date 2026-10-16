@@ -146,6 +146,48 @@ static void record_page_bounds_preserve_original(void)
     assert(memcmp(page, before, sizeof(page)) == 0);
 }
 
+/*
+ * #190: slot 하나를 꺼낼 때는 그 slot의 경계만 본다. 페이지 전체 검사(record_page_validate)는 읽을 때 한 번이며,
+ * slot마다 전체를 검사하면 페이지 하나를 훑는 비용이 slot 수의 제곱이 된다.
+ */
+static void record_page_get_checks_only_its_slot(void)
+{
+    uint8_t page[RECORD_PAGE_BYTES];
+    record_page_init(page);
+    uint16_t slots[3];
+    const char *values[3] = {"first", "second", "third"};
+    for (int i = 0; i < 3; i++) {
+        record_slice_t value = {(const uint8_t *)values[i], strlen(values[i])};
+        assert(record_page_insert(page, value, &slots[i]) == RECORD_PAGE_OK);
+    }
+    /* 가운데 slot의 크기를 페이지 밖까지로 깨뜨린다 */
+    page[8 + 4 * slots[1] + 2] = 0xff;
+    page[8 + 4 * slots[1] + 3] = 0xff;
+    assert(record_page_validate(page) == RECORD_PAGE_INVALID);
+    record_slice_t output = {NULL, 0};
+    assert(record_page_get(page, slots[0], &output) == RECORD_PAGE_OK);
+    assert(output.size_bytes == 5 && memcmp(output.bytes, "first", 5) == 0);
+    assert(record_page_get(page, slots[2], &output) == RECORD_PAGE_OK);
+    assert(output.size_bytes == 5 && memcmp(output.bytes, "third", 5) == 0);
+    output = (record_slice_t){NULL, 9};
+    assert(record_page_get(page, slots[1], &output) == RECORD_PAGE_INVALID);
+    assert(output.bytes == NULL && output.size_bytes == 9);
+
+    /* 위치가 slot 목록 안을 가리키면 거절한다 */
+    record_page_init(page);
+    for (int i = 0; i < 3; i++) {
+        record_slice_t value = {(const uint8_t *)values[i], strlen(values[i])};
+        assert(record_page_insert(page, value, &slots[i]) == RECORD_PAGE_OK);
+    }
+    page[8 + 4 * slots[2]] = 8;
+    page[8 + 4 * slots[2] + 1] = 0;
+    assert(record_page_get(page, slots[2], &output) == RECORD_PAGE_INVALID);
+    /* 비어 있는 slot에 크기가 있으면 거절한다 */
+    page[8 + 4 * slots[2]] = 0;
+    page[8 + 4 * slots[2] + 2] = 1;
+    assert(record_page_get(page, slots[2], &output) == RECORD_PAGE_INVALID);
+}
+
 /* #77: 본문 8192의 옛 LRP1 입력은 LRP2로 해석하지 않는다. */
 static void record_page_rejects_previous_format(void)
 {
@@ -174,6 +216,7 @@ int main(void)
     record_page_changes_preserve_slot_identity();
     record_page_bounds_preserve_original();
     record_page_rejects_previous_format();
+    record_page_get_checks_only_its_slot();
     puts("record: codec, stable slots, resize/delete, page bounds and malformed input passed");
     return 0;
 }

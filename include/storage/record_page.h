@@ -28,7 +28,7 @@ typedef struct {
 
 void record_page_init(uint8_t page[RECORD_PAGE_BYTES]);
 record_page_status_t record_page_validate(const uint8_t page[RECORD_PAGE_BYTES]);
-/* 조회 결과는 page를 빌리며 다음 수정부터 무효다. */
+/* 조회 결과는 page를 빌리며 다음 수정부터 무효다. 그 slot의 경계만 검사하므로 페이지 전체는 읽을 때 validate로 검사한다. */
 record_page_status_t record_page_get(const uint8_t *page, uint16_t slot,
                                      record_slice_t *output);
 /* 실패 시 page와 output은 그대로이며 삭제한 slot 번호는 재사용하지 않는다. */

@@ -54,17 +54,24 @@ record_page_status_t record_page_validate(const uint8_t page[RECORD_PAGE_BYTES])
     return RECORD_PAGE_OK;
 }
 
+/*
+ * slot 하나의 경계만 본다. 페이지 전체 검사는 읽을 때 한 번(record_page_validate)이며, 행마다 전체를 보면
+ * 페이지 하나를 훑는 비용이 slot 수의 제곱이 된다(#190). 깨진 다른 slot은 이 slot을 꺼내는 데 영향이 없다.
+ */
 record_page_status_t record_page_get(const uint8_t *page, uint16_t slot,
                                      record_slice_t *output)
 {
-    if (output == NULL) return RECORD_PAGE_INVALID;
-    record_page_status_t status = record_page_validate(page);
-    if (status != RECORD_PAGE_OK) return status;
-    if (slot >= read_u16(page + 4)) return RECORD_PAGE_NOT_FOUND;
+    if (page == NULL || output == NULL) return RECORD_PAGE_INVALID;
+    if (memcmp(page, RECORD_PAGE_MAGIC, 4) != 0 || read_u16(page + 6) != 0) return RECORD_PAGE_INVALID;
+    uint16_t count = read_u16(page + 4);
+    if (count > (RECORD_PAGE_BYTES - PAGE_HEADER_BYTES) / SLOT_BYTES) return RECORD_PAGE_INVALID;
+    if (slot >= count) return RECORD_PAGE_NOT_FOUND;
     const uint8_t *entry = get_slot(page, slot);
-    uint16_t offset = read_u16(entry);
-    if (offset == 0) return RECORD_PAGE_NOT_FOUND;
-    *output = (record_slice_t){page + offset, read_u16(entry + 2)};
+    size_t offset = read_u16(entry), size = read_u16(entry + 2);
+    if (offset == 0) return size == 0 ? RECORD_PAGE_NOT_FOUND : RECORD_PAGE_INVALID;
+    size_t lower = PAGE_HEADER_BYTES + (size_t)count * SLOT_BYTES;
+    if (offset < lower || size > RECORD_PAGE_BYTES - offset) return RECORD_PAGE_INVALID;
+    *output = (record_slice_t){page + offset, size};
     return RECORD_PAGE_OK;
 }
 
@@ -152,8 +159,10 @@ record_page_status_t record_page_update(uint8_t *page, uint16_t slot,
                                         record_slice_t value)
 {
     if (value.size_bytes > 0 && value.bytes == NULL) return RECORD_PAGE_INVALID;
+    /* 페이지 전체를 다시 쓰므로 모든 slot을 검사한다 */
     record_slice_t previous;
-    record_page_status_t status = record_page_get(page, slot, &previous);
+    record_page_status_t status = record_page_validate(page);
+    if (status == RECORD_PAGE_OK) status = record_page_get(page, slot, &previous);
     if (status != RECORD_PAGE_OK) return status;
     page_change_t change = {slot, read_u16(page + 4), value, 0};
     return apply_change(page, &change);
@@ -162,7 +171,8 @@ record_page_status_t record_page_update(uint8_t *page, uint16_t slot,
 record_page_status_t record_page_delete(uint8_t *page, uint16_t slot)
 {
     record_slice_t previous;
-    record_page_status_t status = record_page_get(page, slot, &previous);
+    record_page_status_t status = record_page_validate(page);
+    if (status == RECORD_PAGE_OK) status = record_page_get(page, slot, &previous);
     if (status != RECORD_PAGE_OK) return status;
     page_change_t change = {slot, read_u16(page + 4), {NULL, 0}, 1};
     return apply_change(page, &change);
