@@ -238,6 +238,15 @@ static uint32_t page_file_control_generation_slot(const uint8_t *bytes)
     return gen[1] > gen[0] ? 1 : 0;
 }
 
+/* 빈 commit을 한 번 더 해 최신 세대의 manifest가 이전 commit의 페이지를 대조하지 않게 한다 */
+static void empty_commit(void)
+{
+    page_file_t *file;
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    assert(page_file_commit(file) == PAGE_FILE_OK);
+    assert(page_file_close(file) == PAGE_FILE_OK);
+}
+
 static uint8_t g_big[20000];
 static overflow_ref_t g_big_ref;
 static uint32_t g_record_page;
@@ -286,7 +295,9 @@ static void test_fixture_roundtrip_is_page_size_independent(void)
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 4] == 1 && bytes[PAGE_FILE_PAGE_BYTES + 5] == 0, "envelope 버전 1 LE");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 6] == PAGE_KIND_CONTROL, "종류 제어");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 8] == 1, "제어 slot 1의 page ID");
-    CHECK(bytes[PAGE_FILE_PAGE_BYTES + 16] == 68, "빈 목록이 없는 제어 본문 길이 68");
+    uint32_t manifest = bytes[PAGE_FILE_PAGE_BYTES + 32 + 68];
+    CHECK(manifest > 0 && bytes[PAGE_FILE_PAGE_BYTES + 16] + 256u * bytes[PAGE_FILE_PAGE_BYTES + 17] == 72 + 8 * manifest,
+          "빈 목록이 없는 제어 본문은 머리 72바이트와 manifest %u개", manifest);
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 40] == PAGE_FILE_FORMAT_VERSION, "형식 버전 3");
     CHECK(memcmp(bytes + PAGE_FILE_PAGE_BYTES + 32, "LRSQLDB\0", 8) == 0, "파일 magic");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 48] == 4 && bytes[PAGE_FILE_PAGE_BYTES + 49] == 3 &&
@@ -618,38 +629,40 @@ static void test_commit_failures_keep_current_generation(void)
               page_file_release(file, reused) == PAGE_FILE_INVALID, "이중 해제 거절");
     page_file_close(file);
 
-    /* 제어 쓰기 전의 fsync 실패는 미반영, 핸들은 poison */
+    /* manifest가 있는 commit은 fsync가 제어 쓰기 뒤 한 번뿐이라 그 실패는 불확정이다 */
     CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK, "다시 열기");
     CHECK(page_file_control(file)->generation == 3, "마지막으로 성공한 세대 3");
     hooks_reset();
     g_hooks.fsync_fail_at = 1;
-    CHECK(page_file_commit(file) == PAGE_FILE_IO, "데이터 fsync 실패");
-    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_NOT_APPLIED &&
-              page_file_is_poisoned(file),
-          "제어 쓰기 전의 실패는 미반영이고 핸들은 poison");
-    hooks_reset();
-    errno = 0;
-    CHECK(page_file_commit(file) == PAGE_FILE_IO && errno == EIO,
-          "fsync가 실패한 핸들은 이후 commit도 거절");
-    CHECK(page_file_control(file)->generation == 3, "세대 그대로");
-    page_file_close(file);
-    CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK, "다른 핸들로는 다시 열림");
-    CHECK(page_file_control(file)->generation == 3, "미반영: 디스크도 세대 3");
-    page_file_close(file);
-
-    /* 제어 쓰기 뒤의 fsync 실패는 불확정: 응답은 실패인데 다시 열면 새 세대가 보일 수 있다 */
-    CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK, "다시 열기");
-    hooks_reset();
-    g_hooks.fsync_fail_at = 2;
-    CHECK(page_file_commit(file) == PAGE_FILE_IO, "제어 쓰기 뒤 fsync 실패");
-    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_UNKNOWN &&
-              page_file_is_poisoned(file) && page_file_control(file)->generation == 3,
+    CHECK(page_file_commit(file) == PAGE_FILE_IO, "fsync 실패");
+    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_UNKNOWN && page_file_is_poisoned(file) &&
+              page_file_control(file)->generation == 3,
           "불확정 결과, 핸들 poison, 핸들이 아는 세대는 그대로");
     hooks_reset();
+    errno = 0;
+    CHECK(page_file_commit(file) == PAGE_FILE_IO && errno == EIO, "fsync가 실패한 핸들은 이후 commit도 거절");
     page_file_close(file);
     CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK, "불확정 뒤에도 열림");
     CHECK(page_file_control(file)->generation == 4,
           "실패를 돌려준 commit의 새 세대가 다시 열면 보임(불확정 결과)");
+    page_file_close(file);
+
+    /* 게시된 페이지를 제자리에서 덮어쓴 commit은 장벽(데이터 fsync → 제어 쓰기 → fsync)이라 데이터 fsync 실패는 미반영 */
+    CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK, "다시 열기");
+    uint32_t in_place;
+    assert(page_file_alloc(file, &in_place) == PAGE_FILE_OK);
+    assert(page_file_write(file, in_place, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    assert(page_file_commit(file) == PAGE_FILE_OK);
+    assert(page_file_write(file, in_place, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    hooks_reset();
+    g_hooks.fsync_fail_at = 1;
+    CHECK(page_file_commit(file) == PAGE_FILE_IO, "데이터 fsync 실패");
+    CHECK(page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_NOT_APPLIED && page_file_is_poisoned(file),
+          "제어 쓰기 전의 실패는 미반영이고 핸들은 poison");
+    hooks_reset();
+    page_file_close(file);
+    CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK, "다른 핸들로는 다시 열림");
+    CHECK(page_file_control(file)->generation == 5, "미반영: 디스크도 세대 5");
     page_file_close(file);
     clean_dir();
 }
@@ -798,6 +811,8 @@ static void test_corrupt_data_pages_are_detected(void)
     build_fixture();
     page_file_t *file;
     assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    /* 최신 세대의 manifest가 이 페이지를 대조하지 않게 빈 commit을 한 번 더 한다(열기가 아니라 읽기에서 탐지) */
+    assert(page_file_commit(file) == PAGE_FILE_OK);
     uint8_t body[PAGE_BODY_BYTES];
 
     flip_slot(DB_PATH, g_record_page, 3000); /* 열린 뒤 디스크에서 한 비트 변경 */
@@ -918,6 +933,7 @@ static void test_page_info_reports_verified_kind(void)
     assert(page_file_commit(file) == PAGE_FILE_OK);
     assert(page_file_publish(file) == PAGE_FILE_OK);
     page_file_close(file);
+    empty_commit();
 
     /* 손상된 envelope와 알 수 없는 종류 */
     size_t size;
@@ -972,6 +988,7 @@ static void test_read_cache_matches_disk(void)
     hooks_reset();
     uint32_t ids[CACHE_TEST_PAGES];
     build_cache_fixture(ids);
+    empty_commit();  /* 아래에서 게시된 페이지를 제자리에서 덮어써 본다. 최신 manifest가 대조하지 않게 한다 */
     uint8_t body[PAGE_BODY_BYTES], expected[PAGE_BODY_BYTES];
     page_file_t *file;
 
@@ -1130,11 +1147,15 @@ static void test_free_list_survives_reopen(void)
     uint8_t *bytes = slurp(DB_PATH, &size);
     uint32_t slot = page_file_control_generation_slot(bytes);
     uint8_t *control = bytes + (size_t)slot * PAGE_FILE_PAGE_BYTES;
-    memcpy(control + 32 + 72, control + 32 + 68, 4);
+    uint32_t manifest = (uint32_t)control[32 + 68] | (uint32_t)control[32 + 69] << 8;
+    uint8_t *ids_at = control + 32 + 72 + 8 * manifest;
+    memcpy(ids_at + 4, ids_at, 4);
     reseal(control);
     spit(DB_PATH, bytes, size);
     free(bytes);
+    file = NULL;
     CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_CORRUPT, "중복 번호 거절");
+    if (file != NULL) page_file_close(file);
     clean_dir();
 }
 
@@ -1225,6 +1246,77 @@ static void test_free_list_commit_failures(void)
     clean_dir();
 }
 
+/* ══════════════════════════════════════════════════════════════ */
+/* fsync 한 번 commit: 제어 페이지는 남았지만 데이터 쓰기가 사라졌으면(전원 장애 모사) 이전 세대로 연다 */
+static void test_incomplete_commit_falls_back(void)
+{
+    printf("\n[test_incomplete_commit_falls_back]\n");
+    fresh_dir();
+    hooks_reset();
+    page_file_t *file;
+    assert(page_file_create(DB_PATH, &file) == PAGE_FILE_OK);
+    uint8_t body[PAGE_BODY_BYTES], got[PAGE_BODY_BYTES];
+    uint32_t p1, p2;
+    memset(body, 0x61, sizeof(body));
+    assert(page_file_alloc(file, &p1) == PAGE_FILE_OK && page_file_write(file, p1, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    assert(page_file_commit(file) == PAGE_FILE_OK && page_file_publish(file) == PAGE_FILE_OK);
+    assert(page_file_close(file) == PAGE_FILE_OK);
+    size_t size1;
+    uint8_t *gen1 = slurp(DB_PATH, &size1);
+
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    memset(body, 0x62, sizeof(body));
+    assert(page_file_alloc(file, &p2) == PAGE_FILE_OK && page_file_write(file, p2, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    hooks_reset();
+    assert(page_file_commit(file) == PAGE_FILE_OK);
+    CHECK(g_hooks.io_calls > 0, "commit");
+    assert(page_file_close(file) == PAGE_FILE_OK);
+    size_t size2;
+    uint8_t *gen2 = slurp(DB_PATH, &size2);
+    CHECK(size2 > size1, "새 페이지가 파일을 늘림 (%zu -> %zu)", size1, size2);
+
+    /* 1. 파일 길이가 늘지 않았다(새 페이지 쓰기가 사라짐) */
+    uint8_t *mixed = malloc(size2);
+    memcpy(mixed, gen1, size1);
+    memcpy(mixed, gen2, 2 * PAGE_FILE_PAGE_BYTES);   /* 제어 페이지 두 장은 세대 2의 것 */
+    spit(DB_PATH, mixed, size1);
+    page_file_open_info_t info;
+    CHECK(page_file_open(DB_PATH, false, &file, &info) == PAGE_FILE_OK && page_file_control(file)->generation == 1 &&
+              info.damaged_slots == 1, "짧은 파일: 세대 1로 열고 손상 슬롯 1");
+    page_file_close(file);
+
+    /* 2. 길이는 늘었지만 새 페이지 내용이 0이다 */
+    memcpy(mixed, gen2, size2);
+    memset(mixed + (size_t)p2 * PAGE_FILE_PAGE_BYTES, 0, PAGE_FILE_PAGE_BYTES);
+    spit(DB_PATH, mixed, size2);
+    CHECK(page_file_open(DB_PATH, true, &file, &info) == PAGE_FILE_OK && page_file_control(file)->generation == 1 &&
+              info.damaged_slots == 1, "사라진 데이터 쓰기: 세대 1로 엶");
+    CHECK(page_file_read(file, p1, PAGE_KIND_OVERFLOW, 0, got) == PAGE_FILE_OK && got[0] == 0x61, "세대 1의 페이지");
+    /* 이어서 commit하면 끝나지 않은 세대의 슬롯을 덮어쓴다 */
+    CHECK(page_file_commit(file) == PAGE_FILE_OK && page_file_control(file)->generation == 2, "이어서 commit");
+    page_file_close(file);
+    CHECK(page_file_open(DB_PATH, false, &file, &info) == PAGE_FILE_OK && page_file_control(file)->generation == 2 &&
+              info.damaged_slots == 0, "새 세대 2는 온전함");
+    page_file_close(file);
+
+    /* 3. 온전한 세대 2는 그대로 열린다 */
+    spit(DB_PATH, gen2, size2);
+    CHECK(page_file_open(DB_PATH, false, &file, &info) == PAGE_FILE_OK && page_file_control(file)->generation == 2 &&
+              page_file_read(file, p2, PAGE_KIND_OVERFLOW, 0, got) == PAGE_FILE_OK && got[0] == 0x62,
+          "온전한 commit은 새 세대");
+    page_file_close(file);
+
+    /* 4. 첫 세대가 끝나지 않았으면 돌아갈 세대가 없어 손상이다 */
+    memcpy(mixed, gen1, size1);
+    memset(mixed + (size_t)p1 * PAGE_FILE_PAGE_BYTES, 0, PAGE_FILE_PAGE_BYTES);
+    spit(DB_PATH, mixed, size1);
+    CHECK(page_file_open(DB_PATH, false, &file, &info) == PAGE_FILE_CORRUPT, "첫 세대가 끝나지 않으면 손상");
+    free(mixed);
+    free(gen1);
+    free(gen2);
+    clean_dir();
+}
+
 int main(void)
 {
     page_file_set_default_io(&HOOKED);
@@ -1241,6 +1333,7 @@ int main(void)
     test_read_cache_matches_disk();
     test_free_list_survives_reopen();
     test_free_list_commit_failures();
+    test_incomplete_commit_falls_back();
     page_file_set_default_io(NULL);
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);

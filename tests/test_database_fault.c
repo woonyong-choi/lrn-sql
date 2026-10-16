@@ -494,8 +494,9 @@ static void test_statement(const statement_case_t *c)
                     }
                 }
             }
-            if (kind == KIND_FSYNC && n == 2) {
-                CHECK(answered_error && poisoned, "%s: 제어 쓰기 뒤 fsync 실패는 오류 응답이고 핸들 poison", label);
+            if (kind == KIND_FSYNC) {
+                /* fsync는 제어 쓰기 뒤 한 번(manifest)이거나 그 앞뒤 두 번(장벽)이다. 어느 실패든 오류 응답이고 poison */
+                CHECK(answered_error && poisoned, "%s: fsync 실패는 오류 응답이고 핸들 poison", label);
             }
             result_release(&result);
             CHECK(tracked_live() == live_baseline && g_double_frees == doubles_before,
@@ -513,9 +514,6 @@ static void test_statement(const statement_case_t *c)
                 char *now = snapshot(reopened);
                 bool is_before = strcmp(now, before) == 0, is_after = strcmp(now, after) == 0;
                 CHECK(is_before || is_after, "%s: 다시 열면 문장 전 또는 후 상태", label);
-                if (kind == KIND_FSYNC && n == 1) {
-                    CHECK(is_before, "%s: 제어 쓰기 전의 fsync 실패는 반드시 문장 전 상태", label);
-                }
                 if (answered_error && poisoned && is_after) {
                     unknown++;  /* 오류로 응답했지만 새 상태가 보임: 불확정 결과를 성공이라 하지 않았다 */
                 }

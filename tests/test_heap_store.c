@@ -315,19 +315,17 @@ static void fx_reopen(fx_t *fx)
     fx_open_existing(fx);
 }
 
-/* finish가 끝난 batch를 catalog로 게시하고, 성공이 확실하면 옛 페이지를 release한다. */
+/* finish가 끝난 batch의 옛 페이지를 놓고(commit의 빈 목록에 적힌다) catalog로 게시한다. 반영되지 않으면 catalog_store가 되돌린다. */
 static catalog_store_status_t fx_save_finished(fx_t *fx, heap_batch_t *batch, const heap_batch_result_t *result)
 {
     assert(catalog_set_locators(fx->catalog, fx->tid, result->new_root, 0) == CATALOG_OK);
+    assert(heap_batch_release_old(batch) == HEAP_OK);
     catalog_store_status_t saved = catalog_store_save(fx->file, fx->catalog);
     fx->new_root = result->new_root;
-    if (saved == CATALOG_STORE_OK || saved == CATALOG_STORE_UNRECLAIMED) {
-        assert(heap_batch_release_old(batch) == HEAP_OK);
-    }
     return saved;
 }
 
-/* finish -> catalog 게시 -> 성공이 확실하면 옛 페이지 release 후 새 heap으로 교체. 실패는 abort하지 않고 돌려준다. */
+/* finish -> 옛 페이지 release -> catalog 게시. 실패는 abort하지 않고 돌려준다. */
 static catalog_store_status_t fx_publish(fx_t *fx, heap_batch_t *batch, heap_status_t *finish_status)
 {
     heap_batch_result_t result;
@@ -718,6 +716,9 @@ static void test_locator_kinds_are_distinguished(void)
     /* #77이 만든 단일 record root는 디렉터리로 재해석하지 않는다. 파일 내용은 그대로다 */
     heap_close(fx.heap);
     fx.heap = NULL;
+    page_file_close(fx.file);
+    /* 아래에서 게시된 페이지를 손상시켜 본다. 최신 세대의 manifest가 그 페이지를 대조하지 않게 빈 commit을 한다 */
+    assert(page_file_open(DB_PATH, true, &fx.file, NULL) == PAGE_FILE_OK && page_file_commit(fx.file) == PAGE_FILE_OK);
     page_file_close(fx.file);
     uint64_t before = file_hash();
     assert(page_file_open(DB_PATH, false, &fx.file, NULL) == PAGE_FILE_OK);
@@ -1566,6 +1567,8 @@ static void test_stale_space_hint_is_rechecked(void)
     }
     assert(fx_commit(&fx, batch) == CATALOG_STORE_OK);
     heap_batch_free(batch);
+    /* 아래에서 게시된 디렉터리를 제자리에서 고친다. 최신 세대의 manifest가 대조하지 않게 빈 commit을 한다 */
+    assert(page_file_commit(fx.file) == PAGE_FILE_OK);
     uint32_t root = catalog_heap_root(fx.catalog, fx.tid);
     uint8_t body[PAGE_BODY_BYTES];
     assert(page_file_read(fx.file, root, PAGE_KIND_DIRECTORY, fx.tid, body) == PAGE_FILE_OK);

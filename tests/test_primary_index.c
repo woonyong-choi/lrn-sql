@@ -431,6 +431,8 @@ static void test_wrong_locator_is_reported_not_returned(void)
 
     page_file_t *file;
     assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    /* 게시된 색인을 제자리에서 고친다. 최신 세대의 manifest가 대조하지 않게 빈 commit을 한다 */
+    assert(page_file_commit(file) == PAGE_FILE_OK);
     catalog_t *catalog;
     assert(catalog_store_load(file, &catalog) == CATALOG_STORE_OK);
     catalog_table_id_t id;
