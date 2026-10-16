@@ -1129,6 +1129,69 @@ static void test_aggregate_memory_scales_with_groups(void)
     clean_dir();
 }
 
+/*
+ * #140: 정수 기본 키 테이블의 비고유 색인은 같은 값 안에서 기본 키 순서다. WHERE 열 = 값 ORDER BY 기본 키 LIMIT은
+ * 정렬하지 않고 색인 순서로 내보내다 LIMIT에서 멈춘다. 행 이동·기본 키 변경·삭제·재시작 뒤에도 결과가 같다.
+ */
+static void expect_same_order(database_t *db, const char *fast, const char *slow)
+{
+    char *got = query(db, fast), *want = query(db, slow);
+    CHECK(strcmp(got, want) == 0, "%s\n      기대: %.200s\n      실제: %.200s", fast, want, got);
+    free(got);
+    free(want);
+}
+
+static void check_ordered_index(database_t *db)
+{
+    expect_same_order(db, "SELECT id, v FROM q WHERE state = 0 ORDER BY id LIMIT 5",
+                      "SELECT id, v FROM q WHERE state + 0 = 0 ORDER BY id LIMIT 5");
+    expect_same_order(db, "SELECT id FROM q WHERE state = 1 ORDER BY id LIMIT 7 OFFSET 3",
+                      "SELECT id FROM q WHERE state + 0 = 1 ORDER BY id LIMIT 7 OFFSET 3");
+    expect_same_order(db, "SELECT id FROM q WHERE state = 2 AND id > 900 ORDER BY id LIMIT 4",
+                      "SELECT id FROM q WHERE state + 0 = 2 AND id + 0 > 900 ORDER BY id LIMIT 4");
+    expect_same_order(db, "SELECT id FROM q WHERE id > 1500 ORDER BY id LIMIT 3",
+                      "SELECT id FROM q WHERE id + 0 > 1500 ORDER BY id LIMIT 3");
+    expect_same_order(db, "SELECT COUNT(*) FROM (SELECT id FROM q WHERE state = 0 ORDER BY id)",
+                      "SELECT COUNT(*) FROM q WHERE state = 0");
+}
+
+static void test_ordered_secondary_index(void)
+{
+    printf("\n[test_ordered_secondary_index]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE q (id INTEGER PRIMARY KEY, state INTEGER NOT NULL, v TEXT)");
+    exec_ok(db, "CREATE INDEX q_state ON q (state)");
+    /* id를 거꾸로 넣어 힙 순서와 기본 키 순서를 다르게 한다 */
+    for (int start = 2000; start > 0; start -= 100) {
+        char sql[8192];
+        size_t used = (size_t)snprintf(sql, sizeof(sql), "INSERT INTO q VALUES ");
+        for (int id = start; id > start - 100; id--) {
+            used += (size_t)snprintf(sql + used, sizeof(sql) - used, "%s(%d, %d, 'v%d')", id == start ? "" : ", ", id,
+                                     id % 3, id);
+        }
+        exec_ok(db, sql);
+    }
+    check_ordered_index(db);
+    /* 긴 값으로 바꿔 행을 옮기고, 상태와 기본 키를 바꾸고, 지운다 */
+    exec_ok(db, "UPDATE q SET v = 'a much longer value that no longer fits in the old slot' WHERE id % 7 = 0");
+    exec_ok(db, "UPDATE q SET state = 0 WHERE id % 11 = 0");
+    exec_ok(db, "UPDATE q SET id = id + 5000 WHERE id % 13 = 0 AND id < 400");
+    exec_ok(db, "DELETE FROM q WHERE id % 17 = 0");
+    check_ordered_index(db);
+    db = reopen(db, true);
+    check_ordered_index(db);
+    /* 색인 순서로 내보내면 LIMIT 2에서 멈추므로 모아서 정렬하는 DESC보다 문장 메모리가 훨씬 작다 */
+    projection_memory_t streamed = {0}, sorted = {0};
+    result_t *result = NULL;
+    run_budgeted(db, &streamed, "SELECT id, v FROM q WHERE state = 0 ORDER BY id LIMIT 2", &result);
+    result_release(&result);
+    run_budgeted(db, &sorted, "SELECT id, v FROM q WHERE state = 0 ORDER BY id DESC LIMIT 2", &result);
+    result_release(&result);
+    CHECK(streamed.peak * 4 < sorted.peak, "색인 순서 LIMIT의 최대 계상 %zu < 정렬 %zu의 1/4", streamed.peak, sorted.peak);
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+
 static void test_defaults_survive_reopen(void)
 {
     printf("\n[test_defaults_survive_reopen]\n");
@@ -1165,6 +1228,7 @@ int main(void)
     test_argument_errors();
     test_order_and_distinct_respect_budget();
     test_aggregate_memory_scales_with_groups();
+    test_ordered_secondary_index();
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
     return g_fail == 0 ? 0 : 1;

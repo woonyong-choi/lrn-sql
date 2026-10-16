@@ -18,6 +18,8 @@
 #define FLAG_IDENTITY 1u
 #define FLAG_NOT_NULL 1u
 #define FLAG_DEFAULT 2u
+#define INDEX_UNIQUE 1u
+#define INDEX_ORDERED 2u
 
 typedef struct {
     catalog_table_id_t id;
@@ -41,6 +43,7 @@ typedef struct {
     catalog_table_id_t table_id;
     uint16_t column;
     bool unique;
+    bool ordered;   /* 비고유 색인 키의 꼬리가 정수 기본 키다(값이 같으면 기본 키 순서) */
     uint32_t root;
 } index_t;
 
@@ -446,12 +449,12 @@ static index_t *find_index(catalog_t *catalog, const char *name, size_t name_byt
 
 catalog_status_t catalog_add_index(catalog_t *catalog, catalog_table_id_t table_id,
                                    const char *name, size_t name_bytes, uint16_t column,
-                                   bool unique)
+                                   bool unique, bool ordered)
 {
     if (catalog == NULL || !name_valid(name, name_bytes)) return CATALOG_INVALID;
     const table_t *table = find_by_id(catalog, table_id);
     if (table == NULL) return CATALOG_NOT_FOUND;
-    if (column >= table->column_count) return CATALOG_INVALID;
+    if (column >= table->column_count || (unique && ordered)) return CATALOG_INVALID;
     if (find_index(catalog, name, name_bytes) != NULL || find_by_name(catalog, name, name_bytes) != NULL) {
         return CATALOG_EXISTS;
     }
@@ -474,7 +477,7 @@ catalog_status_t catalog_add_index(catalog_t *catalog, catalog_table_id_t table_
     }
     memcpy(copied, name, name_bytes);
     catalog->indexes[catalog->index_count++] =
-        (index_t){copied, name_bytes, table_id, column, unique, CATALOG_NO_PAGE};
+        (index_t){copied, name_bytes, table_id, column, unique, ordered, CATALOG_NO_PAGE};
     catalog->encoded_bytes += extra;
     catalog->generation++;
     return CATALOG_OK;
@@ -510,7 +513,7 @@ catalog_status_t catalog_index_at(const catalog_t *catalog, catalog_table_id_t t
         if (index->table_id != table_id) continue;
         if (position-- > 0) continue;
         *view = (catalog_index_view_t){index->name, index->name_bytes, index->table_id,
-                                       index->column, index->unique, index->root};
+                                       index->column, index->unique, index->ordered, index->root};
         return CATALOG_OK;
     }
     return CATALOG_NOT_FOUND;
@@ -624,7 +627,7 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
             le_put_u32(at, index->table_id);
             put_u16(at + 4, index->column);
             put_u16(at + 6, (uint16_t)index->name_bytes);
-            at[8] = index->unique ? 1 : 0;
+            at[8] = (uint8_t)((index->unique ? INDEX_UNIQUE : 0) | (index->ordered ? INDEX_ORDERED : 0));
             le_put_u32(at + 9, index->root);
             memcpy(at + INDEX_FIXED_BYTES, index->name, index->name_bytes);
             at += INDEX_FIXED_BYTES + index->name_bytes;
@@ -821,13 +824,14 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
                     break;
                 }
                 size_t name_bytes = (size_t)get_le(fixed + 6, 2);
-                if (fixed[8] > 1 || !take(&reader, name_bytes, &name)) {
+                if (fixed[8] > (INDEX_UNIQUE | INDEX_ORDERED) || !take(&reader, name_bytes, &name)) {
                     status = CATALOG_CORRUPT;
                     break;
                 }
                 status = catalog_add_index(catalog, (catalog_table_id_t)get_le(fixed, 4),
                                            (const char *)name, name_bytes,
-                                           (uint16_t)get_le(fixed + 4, 2), fixed[8] == 1);
+                                           (uint16_t)get_le(fixed + 4, 2), (fixed[8] & INDEX_UNIQUE) != 0,
+                                           (fixed[8] & INDEX_ORDERED) != 0);
                 if (status == CATALOG_OK) {
                     catalog->indexes[catalog->index_count - 1].root = (uint32_t)get_le(fixed + 9, 4);
                 } else if (status != CATALOG_NOMEM) status = CATALOG_CORRUPT;

@@ -565,9 +565,11 @@ static void index_metadata_survives_restart(void)
     free(legacy.bytes);
     catalog_close(catalog);
 
-    assert(catalog_add_index(upgraded, users, "by_name", 7, 1, false) == CATALOG_OK);
-    assert(catalog_add_index(upgraded, orders, "order_name", 10, 1, true) == CATALOG_OK);
-    assert(catalog_add_index(upgraded, users, "by_name", 7, 1, false) == CATALOG_EXISTS);
+    assert(catalog_add_index(upgraded, users, "by_name", 7, 1, false, true) == CATALOG_OK);
+    assert(catalog_add_index(upgraded, orders, "order_name", 10, 1, true, false) == CATALOG_OK);
+    /* 유일 색인은 꼬리가 없어 ordered 표시를 받지 않는다 */
+    assert(catalog_add_index(upgraded, orders, "both", 4, 1, true, true) == CATALOG_INVALID);
+    assert(catalog_add_index(upgraded, users, "by_name", 7, 1, false, true) == CATALOG_EXISTS);
     assert(catalog_set_index_root(upgraded, "by_name", 7, 123) == CATALOG_OK);
     assert(catalog_set_index_root(upgraded, "order_name", 10, 456) == CATALOG_OK);
     snapshot_t indexed = snapshot(upgraded);
@@ -578,9 +580,9 @@ static void index_metadata_survives_restart(void)
     assert(catalog_index_count(reopened, orders) == 1);
     catalog_index_view_t view;
     assert(catalog_index_at(reopened, users, 0, &view) == CATALOG_OK);
-    assert(view.column == 1 && !view.unique && view.root == 123);
+    assert(view.column == 1 && !view.unique && view.ordered && view.root == 123);
     assert(catalog_index_at(reopened, orders, 0, &view) == CATALOG_OK);
-    assert(view.unique && view.root == 456);
+    assert(view.unique && !view.ordered && view.root == 456);
     assert_same(reopened, &indexed);
     assert(catalog_drop_table(reopened, users) == CATALOG_OK);
     assert(catalog_index_count(reopened, users) == 0);

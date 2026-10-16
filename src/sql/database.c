@@ -616,7 +616,7 @@ static heap_status_t configure_secondary(heap_batch_t *batch, const catalog_t *c
     for (size_t i = 0; i < count; i++) {
         catalog_index_view_t view;
         if (catalog_index_at(catalog, table_id, i, &view) != CATALOG_OK) return HEAP_CORRUPT;
-        specs[i] = (heap_secondary_spec_t){view.column, view.unique, view.root};
+        specs[i] = (heap_secondary_spec_t){view.column, view.unique, view.ordered, view.root};
     }
     return heap_batch_configure_secondary(batch, specs, count);
 }
@@ -1763,8 +1763,11 @@ static database_exec_status_t exec_create_index(database_t *db, const sqlstmt_in
         status = DATABASE_EXEC_NOMEM;
         goto done;
     }
+    /* 정수 기본 키가 있으면 비고유 색인의 꼬리를 기본 키로 둬 같은 값의 행을 기본 키 순서로 읽게 한다 */
+    bool ordered = !index->unique && view.primary_key_column != CATALOG_NO_COLUMN &&
+                   view.columns[view.primary_key_column].type == VALUE_INTEGER;
     catalog_status_t added = catalog_add_index(work.cat, id, (const char *)index->name.bytes,
-                                               index->name.size, (uint16_t)column, index->unique);
+                                               index->name.size, (uint16_t)column, index->unique, ordered);
     work_settle(db, &work, peak);
     if (added != CATALOG_OK) {
         if (added == CATALOG_NOMEM) status = DATABASE_EXEC_NOMEM;
@@ -2795,7 +2798,7 @@ static size_t secondary_probe(database_t *db, catalog_table_id_t table_id, const
             catalog_index_view_t index;
             if (catalog_index_at(catalog, table_id, i, &index) != CATALOG_OK) continue;
             if (index.column != where->probes[p].column) continue;
-            *spec = (heap_secondary_spec_t){index.column, index.unique, index.root};
+            *spec = (heap_secondary_spec_t){index.column, index.unique, index.ordered, index.root};
             return p;
         }
     }
@@ -4060,6 +4063,40 @@ static database_exec_status_t join_open(database_t *db, const sqlstmt_select_t *
     return status;
 }
 
+/* ORDER BY가 원본 하나의 정수 기본 키 하나(오름차순)인지 */
+static bool orders_by_primary_key(const sqlstmt_select_t *select, const resolver_t *resolver, const join_level_t *level)
+{
+    if (select->order_count != 1 || select->order[0].desc || select->order[0].expr->kind != SQLEXPR_COLUMN) return false;
+    const sqlexpr_t *expr = select->order[0].expr;
+    value_type_t type;
+    size_t column = resolve_column((void *)resolver, &expr->qualifier, &expr->name, &type);
+    return column != SQLEVAL_NO_COLUMN && column != SQLEVAL_AMBIGUOUS &&
+           level->view.primary_key_column != CATALOG_NO_COLUMN && column == level->view.primary_key_column &&
+           type == VALUE_INTEGER;
+}
+
+/*
+ * 이 단계의 scan_rows가 행을 기본 키 오름차순으로 내는지. scan_rows와 같은 순서로 경로를 고른다: 기본 키 등가(행 하나),
+ * 보조 색인 등가(유일이면 행 하나, ordered면 같은 값 안에서 기본 키 순서), 기본 키 구간(키 순서). 전체 스캔은 힙 순서다.
+ */
+static database_exec_status_t scan_follows_primary_key(join_t *join, join_level_t *step, bool *ordered)
+{
+    *ordered = false;
+    where_t where;
+    database_exec_status_t status = join_probes(join, step, &where);
+    if (status == DATABASE_EXEC_OK) {
+        heap_secondary_spec_t secondary;
+        if (where.never || key_probe(&step->view, step->heap, &where) != SIZE_MAX) *ordered = true;
+        else if (secondary_probe(join->db, step->id, &where, &secondary) != SIZE_MAX) {
+            *ordered = secondary.unique || secondary.ordered;   /* scan_rows는 구간보다 보조 색인을 먼저 쓴다 */
+        } else {
+            *ordered = key_range(&step->view, step->heap, &where) != SIZE_MAX;
+        }
+    }
+    where_clear(join->db, &where);
+    return status;
+}
+
 /*
  * SELECT 핵심 하나를 실행해 ctx에 행을 낸다. core_only면 ORDER BY·LIMIT·OFFSET을 보지 않고 행을 모두 ctx->rows에
  * 모은다(집합 연산의 한쪽). 아니면 결과 builder로 바로 내보내거나(스트리밍) 정렬하려고 모은다.
@@ -4133,6 +4170,17 @@ static database_exec_status_t select_run(database_t *db, const sqlstmt_select_t 
             status = heap_failure(db, opened, "open");
             goto done;
         }
+    }
+    /*
+     * ORDER BY 기본 키이고 원본 하나를 기본 키 순서로 읽는다면 정렬하지 않고 바로 내보낸다. LIMIT을 채우면 읽기를 멈춘다.
+     * 원본 하나의 조건은 탐침만 쓰므로 바깥 행 없이 판정할 수 있다.
+     */
+    if (!core_only && !grouped && !select->distinct && ctx->key_count == 1 && join.level_count == 1 &&
+        join.levels[0].relation == NULL && orders_by_primary_key(select, &resolver, &join.levels[0])) {
+        bool ordered = false;
+        status = scan_follows_primary_key(&join, &join.levels[0], &ordered);
+        if (status != DATABASE_EXEC_OK) goto done;
+        if (ordered) ctx->buffered = false;
     }
     bool never_stop = false;
     row_sink_t sink = grouped ? (row_sink_t){group_collect, &groups, &never_stop} : (row_sink_t){emit_sink, ctx, &ctx->done};

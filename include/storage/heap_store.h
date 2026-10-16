@@ -153,9 +153,14 @@ typedef struct {
     heap_stats_t *stats;  /* NULL이면 세지 않는다 */
 } heap_index_spec_t;
 
+/*
+ * 보조 색인 하나. 비고유 색인의 키는 [값][꼬리]이며 꼬리는 ordered면 정수 기본 키(순서 보존 8바이트), 아니면 행 위치다.
+ * ordered는 키 색인이 정수 기본 키인 heap에서만 쓸 수 있다. 같은 값의 항목이 기본 키 순서로 놓인다.
+ */
 typedef struct {
     uint16_t column;
     bool unique;
+    bool ordered;
     uint32_t root;
 } heap_secondary_spec_t;
 

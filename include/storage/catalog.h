@@ -90,6 +90,7 @@ typedef struct {
     catalog_table_id_t table_id;
     uint16_t column;
     bool unique;
+    bool ordered;
     uint32_t root;
 } catalog_index_view_t;
 
@@ -147,9 +148,13 @@ catalog_status_t catalog_set_row_count(catalog_t *catalog, catalog_table_id_t id
                                        uint64_t row_count);
 catalog_status_t catalog_set_locators(catalog_t *catalog, catalog_table_id_t id,
                                       uint32_t heap_root, uint32_t primary_root);
+/*
+ * 보조 색인을 등록한다. ordered는 비고유 색인 키의 꼬리가 정수 기본 키라는 표시다. 같은 값의 항목이 기본 키 순서로
+ * 놓여 WHERE 열 = 값 ORDER BY 기본 키를 색인 순서로 읽을 수 있다. unique와 함께 줄 수 없다(CATALOG_INVALID).
+ */
 catalog_status_t catalog_add_index(catalog_t *catalog, catalog_table_id_t table_id,
                                    const char *name, size_t name_bytes, uint16_t column,
-                                   bool unique);
+                                   bool unique, bool ordered);
 catalog_status_t catalog_set_index_root(catalog_t *catalog, const char *name, size_t name_bytes,
                                         uint32_t root);
 size_t catalog_index_count(const catalog_t *catalog, catalog_table_id_t table_id);
