@@ -11,7 +11,7 @@
 /*
  * 선택형 ACK 큐(#140). 독립 DB 위에 따로 설치하는 라이브러리이며 DB 코어(database·storage)는 이 모듈을 모른다.
  * 큐를 설치하지 않으면 객체·worker·전용 테이블이 생기지 않는다. 큐는 세션(session.h)의 공개 SQL과 트랜잭션 API만 쓰고
- * 큐 하나는 테이블 하나(ackq_<name>)다. 큐마다 따로 설치하며 DB와 같은 파일에 산다.
+ * 큐 하나는 테이블 하나(tote_queue_<name>)다. 큐마다 따로 설치하며 DB와 같은 파일에 산다.
  *
  * 작업(job) 상태: READY -> LEASED -> ACKED | FAILED, 그리고 LEASED -> READY(nack, 만료, 해제).
  *   claim이 READY 작업(또는 만료된 LEASED)을 LEASED로 바꾸고 fence token을 1 올려 돌려준다. fence는 작업별로 단조 증가하며
@@ -86,7 +86,7 @@ typedef enum {
 typedef struct ackq ackq_t;
 
 typedef struct {
-    const char *name;                /* [A-Za-z0-9_]{1..ACKQ_NAME_MAX}. 테이블은 ackq_<name> */
+    const char *name;                /* [A-Za-z0-9_]{1..ACKQ_NAME_MAX}. 테이블은 tote_queue_<name> */
     /* 0이면 제한 없음. 시도(claim) 횟수가 이 값에 닿은 작업의 nack·만료는 FAILED로 끝난다 */
     uint32_t max_attempts;
     uint32_t begin_timeout_ms;       /* 자기 트랜잭션이 다른 writer를 기다리는 시간. 0이면 기다리지 않고 BUSY */

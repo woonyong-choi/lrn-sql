@@ -6,7 +6,7 @@ INCLUDES = -Iinclude
 # macOS 26(Darwin 25) 이상에서는 ASan 런타임이 초기화 도중 자기 자신을
 # 재진입해(AsanInitInternal → ... → malloc → AsanInitFromRtl) spin lock 에
 # 걸린다. 프로세스가 main() 에 닿지 못하므로 ASan 을 켠 빌드는 무엇을 하든
-# 멈춘다. lrn-sql 의 문제가 아니라 플랫폼 문제이고, 빈 main() 으로도 재현된다.
+# 멈춘다. ToteDB 의 문제가 아니라 플랫폼 문제이고, 빈 main() 으로도 재현된다.
 # 그 환경에서는 UBSan 만 켠다. Linux CI 는 아래 기본값대로 둘 다 켠다.
 #
 #   make SANITIZE=address,undefined   강제로 둘 다
@@ -301,4 +301,4 @@ clean:
 -include src/queue/queue.mk
 
 # 기본 대상: DB와 큐를 묶은 공유 라이브러리(파이썬 바인딩이 쓴다)
-all: $(QUEUE_SHARED_LIB)
+all: $(TOTEDB_SHARED_LIB)

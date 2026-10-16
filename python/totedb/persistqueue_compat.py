@@ -1,4 +1,4 @@
-"""persist-queue 1.1.0 SQLiteAckQueue 호출을 AckQueue 위에서 받아 주는 호환 계층.
+"""persist-queue 1.1.0 SQLiteAckQueue 호출을 Queue 위에서 받아 주는 호환 계층.
 
 Markchain이 쓰는 put, get(id, block, raw), ack, nack, update, queue, clear_acked_data, shrink_disk_usage, close를
 같은 이름과 반환 모양으로 제공한다. 의미가 같지 않은 부분은 의도한 차이이며 아래에 모두 적었다.
@@ -27,9 +27,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from lrn_ackq.ack_queue import AckQueue, Claim, ClaimToken, ItemInfo, ItemState
-from lrn_ackq.database import Database
-from lrn_ackq.errors import LrnAckqError, NotFoundError, StaleError
+from totedb.queue import Queue, Claim, ClaimToken, ItemInfo, ItemState
+from totedb.database import Database
+from totedb.errors import ToteDBError, NotFoundError, StaleError
 
 __all__ = ["Empty", "SQLiteAckQueue", "UnknownClaimError"]
 
@@ -43,7 +43,7 @@ class Empty(Exception):  # noqa: N818 - persistqueue.exceptions.Empty와 같은 
     """가져올 작업이 없다."""
 
 
-class UnknownClaimError(LrnAckqError):
+class UnknownClaimError(ToteDBError):
     """이 프로세스가 claim한 적 없는 id에 ack·nack·update를 했다(fence를 알 수 없다)."""
 
 
@@ -83,7 +83,7 @@ class SQLiteAckQueue:
         directory = Path(path)
         directory.mkdir(parents=True, exist_ok=True)
         self._db = Database(directory / "data.lrdb")
-        self._queue = AckQueue(self._db, "ack_queue", max_attempts=max_attempts, clock=clock)
+        self._queue = Queue(self._db, "ack_queue", max_attempts=max_attempts, clock=clock)
         self._serializer: Serializer = serializer or _JsonSerializer()
         self._lease_ms = lease_ms
         self._lock = threading.RLock()

@@ -1,5 +1,5 @@
 {
-    "name": "lrn-sql Development Container",
+    "name": "ToteDB Development Container",
     "dockerFile": "Dockerfile",
     "remoteUser": "jungle",
     "customizations": {

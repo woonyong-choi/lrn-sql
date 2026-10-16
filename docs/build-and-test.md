@@ -12,7 +12,7 @@ README의 빠른 시작에 담지 않은 빌드 변수, 시험 대상, 외부 �
 | Python 바인딩 | 표준 라이브러리 ctypes |
 | 시험 의존성 | `libsqlite3-dev`, `sqlite3` CLI, pytest |
 
-`make all`은 DB와 큐를 묶은 공유 라이브러리 `build/queue-shared/liblrnackq.so`(macOS에서는 `.dylib`)를 `-O2`로 만든다. 이 라이브러리는 sanitizer를 켜지 않는다. Python 바인딩은 환경 변수 `LRN_ACKQ_LIB`가 가리키는 파일을 먼저 찾고, 없으면 `build/queue-shared/`를 찾는다.
+`make all`은 DB와 큐를 묶은 공유 라이브러리 `build/lib/libtotedb.so`(macOS에서는 `.dylib`)를 `-O2`로 만든다. 이 라이브러리는 sanitizer를 켜지 않는다. Python 바인딩은 환경 변수 `TOTEDB_LIB`가 가리키는 파일을 먼저 찾고, 없으면 `build/lib/`를 찾는다.
 
 시험 바이너리는 `SANITIZE` 변수로 sanitizer를 고른다. 기본값은 `address,undefined`다. `BUILD_DIR`를 바꾸면 sanitizer 설정이 다른 빌드를 따로 둘 수 있다.
 

@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 import pytest
-from lrn_ackq import Database, SqlError
+from totedb import Database, SqlError
 
 JOBS = 60
 WORKERS = 6
@@ -150,7 +150,7 @@ def test_function_signature_errors_are_distinct(tmp_path: Path, sql: str, code: 
 
 # #79·#64: 다른 스레드의 취소는 실행 중인 문장을 성공과 구별되는 오류로 끝내고, 다음 문장은 정상 실행된다
 def test_cancel_from_another_thread_is_distinct_from_success(tmp_path: Path) -> None:
-    from lrn_ackq.database import RESULT_E_CANCELLED
+    from totedb.database import RESULT_E_CANCELLED
 
     db = Database(tmp_path / "cancel.lrdb")
     db.execute("CREATE TABLE n (id INTEGER PRIMARY KEY)")
@@ -185,7 +185,7 @@ def test_cancel_from_another_thread_is_distinct_from_success(tmp_path: Path) -> 
 
 # #64 완료 조건 1: NULL·빈 값·NUL 포함 값·페이지보다 큰 값과 열 정보가 바인딩까지 손실 없이 온다
 def test_values_and_column_info_round_trip(tmp_path: Path) -> None:
-    from lrn_ackq import Column
+    from totedb import Column
 
     db = Database(tmp_path / "values.lrdb")
     db.execute("CREATE TABLE v (id INTEGER PRIMARY KEY, t TEXT, b BLOB, r REAL, n INTEGER NOT NULL)")
@@ -214,21 +214,21 @@ def test_values_and_column_info_round_trip(tmp_path: Path) -> None:
 
 # #64 완료 조건 2: 결과 상한을 넘으면 부분 행을 주지 않고 LimitError, 문장 오류는 분류·코드가 있는 SqlError
 def test_limit_and_errors_are_distinct_from_success(tmp_path: Path) -> None:
-    from lrn_ackq import LimitError
-    from lrn_ackq.database import _lib
+    from totedb import LimitError
+    from totedb.database import _lib
 
     db = Database(tmp_path / "limits.lrdb")
     db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT)")
     for i in range(1, 21):
         db.execute("INSERT INTO t VALUES (?, ?)", (i, "x" * 100))
-    previous = _lib.lrn_max_result_bytes()
+    previous = _lib.tote_max_result_bytes()
     try:
-        _lib.lrn_set_max_result_bytes(1000)
+        _lib.tote_set_max_result_bytes(1000)
         with pytest.raises(LimitError):
             db.execute("SELECT s FROM t")
         assert len(db.execute("SELECT s FROM t WHERE id = 1").rows) == 1
     finally:
-        _lib.lrn_set_max_result_bytes(previous)
+        _lib.tote_set_max_result_bytes(previous)
     with pytest.raises(SqlError) as raised:
         db.execute("SELECT * FROM missing")
     assert raised.value.error_class != 0 and raised.value.error_code != 0
@@ -237,7 +237,7 @@ def test_limit_and_errors_are_distinct_from_success(tmp_path: Path) -> None:
 
 # #64 완료 조건 3: 디코딩이 실패해도 C 버퍼는 해제된다
 def test_result_buffer_is_freed_when_decoding_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from lrn_ackq import database as module
+    from totedb import database as module
 
     freed: list[int] = []
     real_lib = module._lib
@@ -246,9 +246,9 @@ def test_result_buffer_is_freed_when_decoding_fails(tmp_path: Path, monkeypatch:
         def __getattr__(self, name: str) -> object:
             return getattr(real_lib, name)
 
-        def lrn_free(self, pointer: object) -> None:
+        def tote_free(self, pointer: object) -> None:
             freed.append(1)
-            real_lib.lrn_free(pointer)
+            real_lib.tote_free(pointer)
 
     def broken_decode(data: bytes) -> module.Result:
         raise ValueError("decoder failure")

@@ -19,7 +19,7 @@
 
 ## 개인 확장 (팀 과제 종료 후)
 
-커밋 범위: [`f70b243`](https://github.com/woonyong-choi/lrn-sql/commit/f70b243) (2026-08-01) ~ `da1624b` (2026-09-23), 23개 커밋.
+커밋 범위: [`f70b243`](https://github.com/woonyong-choi/totedb/commit/f70b243) (2026-08-01) ~ `da1624b` (2026-09-23), 23개 커밋.
 `git log --author='woonyong' --since=2026-06-01 --reverse --format='%h %ad %s' --date=short` 기준입니다.
 
 | 무엇이 달라졌나 | 커밋 | 파일 |

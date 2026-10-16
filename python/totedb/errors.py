@@ -10,7 +10,7 @@ __all__ = [
     "InternalError",
     "InvalidArgumentError",
     "LimitError",
-    "LrnAckqError",
+    "ToteDBError",
     "NotAppliedError",
     "NotFoundError",
     "NotInstalledError",
@@ -29,7 +29,7 @@ STATUS_BUSY = 4
 STATUS_EMPTY = 50
 
 
-class LrnAckqError(Exception):
+class ToteDBError(Exception):
     """이 패키지가 던지는 모든 예외의 기준 예외."""
 
     def __init__(self, message: str, *, status: int = -1) -> None:
@@ -37,71 +37,71 @@ class LrnAckqError(Exception):
         self.status = status
 
 
-class InvalidArgumentError(LrnAckqError):
+class InvalidArgumentError(ToteDBError):
     """인자 오류이거나 다른 database의 트랜잭션을 줬다."""
 
 
-class LimitError(LrnAckqError):
+class LimitError(ToteDBError):
     """payload·결과·메모리 예산 한도를 넘었다. 값을 자르지 않고 거절했다."""
 
 
-class BusyError(LrnAckqError):
+class BusyError(ToteDBError):
     """다른 writer가 있어 기다린 시간이 끝났다. 다시 시도할 수 있다."""
 
 
-class NotInstalledError(LrnAckqError):
+class NotInstalledError(ToteDBError):
     """큐 테이블이 없다. 열기는 만들지 않는다."""
 
 
-class NotFoundError(LrnAckqError):
+class NotFoundError(ToteDBError):
     """id가 없다."""
 
 
-class StaleError(LrnAckqError):
+class StaleError(ToteDBError):
     """fence가 현재 claim이 아니거나 상태가 맞지 않는다. 아무것도 바꾸지 않았다."""
 
 
-class ConflictError(LrnAckqError):
+class ConflictError(ToteDBError):
     """같은 idempotency key에 payload가 다르다."""
 
 
-class UnsupportedError(LrnAckqError):
+class UnsupportedError(ToteDBError):
     """트랜잭션 계층 없이 연 DB에 쓰기를 요청했다."""
 
 
-class StorageError(LrnAckqError):
+class StorageError(ToteDBError):
     """저장소 I/O 오류나 메모리 부족. commit 전이면 상태는 그대로다."""
 
 
-class NotAppliedError(LrnAckqError):
+class NotAppliedError(ToteDBError):
     """commit이 확정적으로 적용되지 않았다. 상태는 그대로다."""
 
 
-class UncertainError(LrnAckqError):
+class UncertainError(ToteDBError):
     """commit 결과를 알 수 없다. 성공으로 취급하면 안 되며 다시 열어 확인한다."""
 
 
-class PoisonedError(LrnAckqError):
+class PoisonedError(ToteDBError):
     """database가 불확실한 commit 뒤 더는 쓸 수 없다. 닫고 다시 연다."""
 
 
-class TransactionFailedError(LrnAckqError):
+class TransactionFailedError(ToteDBError):
     """호출자의 트랜잭션이 이미 실패 상태다. rollback 뒤 다시 한다."""
 
 
-class InternalError(LrnAckqError):
+class InternalError(ToteDBError):
     """라이브러리가 기대하지 못한 응답."""
 
 
-class CancelledError(LrnAckqError):
+class CancelledError(ToteDBError):
     """Database.cancel로 큐 연산이 취소됐다. 자기 트랜잭션이면 반영하지 않았다."""
 
 
-class DatabaseOpenError(LrnAckqError):
+class DatabaseOpenError(ToteDBError):
     """database 열기 실패(없음·잠김·손상·형식 미지원)."""
 
 
-class SqlError(LrnAckqError):
+class SqlError(ToteDBError):
     """문장이 오류 결과로 끝났다. 분류와 코드는 속성에 있다."""
 
     def __init__(self, message: str, *, error_class: int, error_code: int) -> None:
@@ -110,7 +110,7 @@ class SqlError(LrnAckqError):
         self.error_code = error_code
 
 
-_BY_STATUS: dict[int, type[LrnAckqError]] = {
+_BY_STATUS: dict[int, type[ToteDBError]] = {
     1: InvalidArgumentError,
     2: StorageError,
     3: LimitError,
@@ -142,10 +142,10 @@ def raise_for_status(status: int, name: str) -> None:
 
     Args:
         status: C 인터페이스가 돌려준 상태 값.
-        name: lrn_status_name이 돌려준 이름. 메시지에 쓴다.
+        name: tote_status_name이 돌려준 이름. 메시지에 쓴다.
 
     Raises:
-        LrnAckqError: status가 0이 아닐 때, 상태에 맞는 하위 예외.
+        ToteDBError: status가 0이 아닐 때, 상태에 맞는 하위 예외.
     """
     if status == STATUS_OK:
         return

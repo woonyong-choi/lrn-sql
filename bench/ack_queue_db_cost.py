@@ -10,7 +10,7 @@
 payload 크기에 따라 meta_scan이 늘어나면 SQL 계층이 projection 없이 행 전체를 읽는다는 뜻이다
 (이 스크립트가 그 여부를 보인다).
 
-사용법: LRN_ACKQ_LIB=... PYTHONPATH=python python3 bench/ack_queue_db_cost.py --sizes 100,200 --payloads 256,4096,16384
+사용법: TOTEDB_LIB=... PYTHONPATH=python python3 bench/ack_queue_db_cost.py --sizes 100,200 --payloads 256,4096,16384
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from lrn_ackq import Database
+from totedb import Database
 
 SCHEMA = (
     "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, state INTEGER NOT NULL, ready_at INTEGER NOT NULL,"
