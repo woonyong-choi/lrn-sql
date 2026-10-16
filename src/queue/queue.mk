@@ -31,12 +31,22 @@ $(TOTEDB_SHARED_LIB): $(TOTEDB_SHARED_SRCS) $(wildcard include/*/*.h) $(wildcard
 # Python 시험은 pytest가 필요하다. TOTEDB_PYTHON으로 pytest가 있는 인터프리터를 고른다.
 TOTEDB_PYTHON ?= $(PYTHON)
 
-test-ack-queue-python: $(TOTEDB_SHARED_LIB)
-	TOTEDB_LIB=$(abspath $(TOTEDB_SHARED_LIB)) PYTHONPATH=python $(TOTEDB_PYTHON) -m pytest -q tests/test_ack_queue_python.py tests/test_ack_queue_markchain_contract.py tests/test_database_python.py tests/test_multiprocess.py
+# 여러 언어 예제(#201)의 C worker. 공유 라이브러리와 같은 최적화 빌드로 공개 헤더 totedb.h만 쓴다
+OUTBOX_CONSUMER = $(BUILD_DIR)/outbox_consumer
+
+$(OUTBOX_CONSUMER): examples/outbox/consumer.c include/totedb.h $(TOTEDB_SHARED_LIB)
+	$(CC) -O2 -g $(WARNFLAGS) -Iinclude -o $@ $< -L$(dir $(TOTEDB_SHARED_LIB)) -ltotedb -Wl,-rpath,$(abspath $(dir $(TOTEDB_SHARED_LIB)))
+
+test-ack-queue-python: $(TOTEDB_SHARED_LIB) $(OUTBOX_CONSUMER)
+	TOTEDB_LIB=$(abspath $(TOTEDB_SHARED_LIB)) OUTBOX_CONSUMER=$(abspath $(OUTBOX_CONSUMER)) PYTHONPATH=python $(TOTEDB_PYTHON) -m pytest -q tests/test_ack_queue_python.py tests/test_ack_queue_markchain_contract.py tests/test_database_python.py tests/test_multiprocess.py tests/test_outbox_example.py
+
+# Python 생산자와 C worker가 같은 큐를 쓰는 예제를 실행한다
+example-outbox: $(TOTEDB_SHARED_LIB) $(OUTBOX_CONSUMER)
+	TOTEDB_LIB=$(abspath $(TOTEDB_SHARED_LIB)) PYTHONPATH=python $(TOTEDB_PYTHON) examples/outbox/run.py --consumer $(OUTBOX_CONSUMER)
 
 # 새 엔진·SQLite·PostgreSQL 3자 SQL 차분. SQLDIFF_DSN이 있으면 PostgreSQL까지 반드시 비교한다(psycopg 필요).
 test-sql-diff: $(TOTEDB_SHARED_LIB)
 	TOTEDB_LIB=$(abspath $(TOTEDB_SHARED_LIB)) PYTHONPATH=python $(TOTEDB_PYTHON) tests/sql_diff.py \
 		$(if $(SQLDIFF_DSN),--dsn $(SQLDIFF_DSN) --require-postgres)
 
-.PHONY: test-ack-queue-python test-sql-diff
+.PHONY: test-ack-queue-python test-sql-diff example-outbox
