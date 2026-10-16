@@ -29,11 +29,11 @@ static const char *const RESERVED[] = {
     "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
     "INDEX", "UNIQUE", "AND", "OR", "IN", "BETWEEN", "LIKE", "ESCAPE", "CASE", "WHEN", "THEN",
     "ELSE", "END", "CAST", "AS", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "DISTINCT",
-    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", NULL};
+    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
-    "ALL", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL",
+    "ALL", "RIGHT", "FULL", "NATURAL",
     "UNION", "EXCEPT", "INTERSECT", "RETURNING", "ON", "USING", "WINDOW", "OVER", "WITH", NULL};
 
 static bool fail(parser_t *p, sqlstmt_status_t status, sqlstmt_reason_t reason, size_t offset)
@@ -222,8 +222,12 @@ void sqlstmt_free(sqlstmt_t *statement)
             expr_free(statement->select.where);
             expr_free(statement->select.limit);
             expr_free(statement->select.offset);
-            name_clear(&statement->select.table);
-            name_clear(&statement->select.table_alias);
+            for (size_t i = 0; i < statement->select.source_count; i++) {
+                name_clear(&statement->select.sources[i].table);
+                name_clear(&statement->select.sources[i].alias);
+                expr_free(statement->select.sources[i].on);
+            }
+            free(statement->select.sources);
             break;
         case SQLSTMT_UPDATE:
             for (size_t i = 0; i < statement->update.assignment_count; i++) {
@@ -1015,6 +1019,54 @@ static bool parse_order(parser_t *p, sqlstmt_select_t *query)
     return true;
 }
 
+static bool parse_source(parser_t *p, sqlstmt_select_t *query, size_t *capacity, sqlstmt_join_t join)
+{
+    size_t offset = here_offset(p);
+    if (query->source_count == SQLSTMT_MAX_SOURCES) return fail(p, SQLSTMT_LIMIT, SQLSTMT_REASON_TOO_MANY_ITEMS, offset);
+    void *grown = reserve(p, query->sources, capacity, query->source_count, sizeof(*query->sources), offset);
+    if (grown == NULL) return false;
+    query->sources = grown;
+    sqlstmt_source_t *source = &query->sources[query->source_count++];
+    memset(source, 0, sizeof(*source));
+    source->join = join;
+    if (!parse_name(p, &source->table, false) || !parse_alias(p, &source->alias)) return false;
+    if (join != SQLSTMT_JOIN_INNER && join != SQLSTMT_JOIN_LEFT) return true;
+    if (word_is(current(p), "USING")) {
+        return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+    }
+    return expect_word(p, "ON") && parse_expr(p, &source->on);
+}
+
+static bool parse_from(parser_t *p, sqlstmt_select_t *query)
+{
+    size_t capacity = 0;
+    if (!parse_source(p, query, &capacity, SQLSTMT_JOIN_NONE)) return false;
+    for (;;) {
+        sqlstmt_join_t join;
+        if (take_punct(p, ",")) {
+            join = SQLSTMT_JOIN_CROSS;
+        } else if (take_word(p, "CROSS")) {
+            if (!expect_word(p, "JOIN")) return false;
+            join = SQLSTMT_JOIN_CROSS;
+        } else if (take_word(p, "INNER")) {
+            if (!expect_word(p, "JOIN")) return false;
+            join = SQLSTMT_JOIN_INNER;
+        } else if (take_word(p, "JOIN")) {
+            join = SQLSTMT_JOIN_INNER;
+        } else if (take_word(p, "LEFT")) {
+            take_word(p, "OUTER");
+            if (!expect_word(p, "JOIN")) return false;
+            join = SQLSTMT_JOIN_LEFT;
+        } else {
+            return true;
+        }
+        if (punct_is(current(p), "(")) {
+            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+        }
+        if (!parse_source(p, query, &capacity, join)) return false;
+    }
+}
+
 static bool parse_select(parser_t *p, sqlstmt_t *statement)
 {
     sqlstmt_select_t *query = &statement->select;
@@ -1027,13 +1079,7 @@ static bool parse_select(parser_t *p, sqlstmt_t *statement)
         query->items = grown;
         if (!parse_select_item(p, &query->items[query->item_count++])) return false;
     } while (take_punct(p, ","));
-    if (take_word(p, "FROM")) {
-        query->has_from = true;
-        if (!parse_name(p, &query->table, false) || !parse_alias(p, &query->table_alias)) return false;
-        if (punct_is(current(p), ",")) {
-            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
-        }
-    }
+    if (take_word(p, "FROM") && !parse_from(p, query)) return false;
     if (!parse_where(p, &query->where)) return false;
     if (take_word(p, "GROUP")) {
         if (!expect_word(p, "BY")) return false;
@@ -1375,7 +1421,8 @@ size_t sqlstmt_parse_peak_bytes(const lexer_statement_t *statement, const lexer_
     size_t items = statement->token_count < CATALOG_MAX_COLUMNS ? statement->token_count : CATALOG_MAX_COLUMNS;
     if (items < 4) items = 4;
     /* INSERT는 이름 배열과 값 배열을 함께 쥔다. 다른 문장은 이 합보다 작다 */
-    size_t element = sizeof(sqlstmt_name_t) + sizeof(sqlstmt_select_item_t) + sizeof(sqlstmt_order_t);
+    size_t element = sizeof(sqlstmt_name_t) + sizeof(sqlstmt_select_item_t) + sizeof(sqlstmt_order_t) +
+                     sizeof(sqlstmt_source_t);
     if (sizeof(sqlstmt_column_def_t) > element) element = sizeof(sqlstmt_column_def_t);
     if (sizeof(sqlstmt_assignment_t) > element) element = sizeof(sqlstmt_assignment_t);
     size_t total = sizeof(sqlstmt_t) + 3 * items * element;

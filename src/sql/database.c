@@ -675,29 +675,50 @@ static void work_settle(database_t *db, work_t *work, size_t peak)
 
 /* ── 식과 WHERE ── */
 
-/* 한 테이블의 열 이름 해석. qualifier는 테이블 이름이나 별칭이어야 한다 */
+/* FROM 원본 하나. 결합 행에서 이 원본의 열은 offset부터 view->column_count칸이다 */
 typedef struct {
     const catalog_table_view_t *view;
     const sqlstmt_name_t *table;
-    const sqlstmt_name_t *alias;
+    const sqlstmt_name_t *alias;       /* 없으면 NULL이나 size 0 */
+    size_t offset;
+    bool nullable;                     /* LEFT JOIN 쪽이라 NOT NULL 열도 NULL이 될 수 있다 */
+} source_ref_t;
+
+/* 열 이름 해석. 앞의 count개 원본만 본다(ON은 자기 원본까지만 본다). qualifier는 원본의 별칭이나 이름이다 */
+typedef struct {
+    const source_ref_t *sources;
+    size_t count;
 } resolver_t;
+
+static bool source_named(const source_ref_t *source, const sqlstmt_name_t *name)
+{
+    const sqlstmt_name_t *exposed = source->alias != NULL && source->alias->size > 0 ? source->alias : source->table;
+    return exposed->size == name->size && memcmp(exposed->bytes, name->bytes, name->size) == 0;
+}
 
 static size_t resolve_column(void *ctx, const sqlstmt_name_t *qualifier, const sqlstmt_name_t *name,
                              value_type_t *type)
 {
     const resolver_t *r = ctx;
-    if (qualifier->size > 0) {
-        bool by_alias = r->alias != NULL && r->alias->size > 0;
-        const sqlstmt_name_t *expected = by_alias ? r->alias : r->table;
-        if (expected == NULL || expected->size != qualifier->size ||
-            memcmp(expected->bytes, qualifier->bytes, qualifier->size) != 0) {
-            return SQLEVAL_NO_COLUMN;
-        }
+    size_t found = SQLEVAL_NO_COLUMN;
+    for (size_t i = 0; i < r->count; i++) {
+        const source_ref_t *source = &r->sources[i];
+        if (qualifier->size > 0 && !source_named(source, qualifier)) continue;
+        size_t column = find_column(source->view, name);
+        if (column == SIZE_MAX) continue;
+        if (found != SQLEVAL_NO_COLUMN) return SQLEVAL_AMBIGUOUS;
+        found = source->offset + column;
+        *type = source->view->columns[column].type;
     }
-    size_t column = find_column(r->view, name);
-    if (column == SIZE_MAX) return SQLEVAL_NO_COLUMN;
-    *type = r->view->columns[column].type;
-    return column;
+    return found;
+}
+
+/* 결합 행의 칸 번호가 속한 원본 */
+static size_t source_of(const resolver_t *r, size_t column)
+{
+    size_t i = 0;
+    while (i + 1 < r->count && column >= r->sources[i + 1].offset) i++;
+    return i;
 }
 
 /* 평가 오류를 결과로 바꾼다 */
@@ -1865,17 +1886,13 @@ static bool scan_secondary_row(void *context, heap_locator_t locator)
     return scan->status == DATABASE_EXEC_OK && !*scan->sink->stop;
 }
 
-/* 기본 키·보조 색인 탐침이 있으면 그것으로, 없으면 전체를 훑는다. table이 NULL이면 행 하나(FROM 없음)다 */
+/* 기본 키·보조 색인 탐침이 있으면 그것으로, 없으면 전체를 훑는다 */
 static database_exec_status_t scan_rows(database_t *db, const catalog_table_view_t *table, catalog_table_id_t id,
                                         heap_t *heap, const where_t *where, const bool *needed, value_t *row,
                                         const row_sink_t *sink)
 {
     if (*sink->stop || where->never) return DATABASE_EXEC_OK;
     bool matched = false;
-    if (table == NULL) {
-        database_exec_status_t status = where_matches(db, where, NULL, &matched);
-        return status == DATABASE_EXEC_OK && matched ? sink->fn(sink->ctx, NULL) : status;
-    }
     size_t n = table->column_count;
     size_t by_key = key_probe(table, heap, where);
     heap_secondary_spec_t secondary;
@@ -1930,7 +1947,7 @@ typedef struct {
     sqleval_resolve_fn resolve;
     sqleval_match_fn match;
     void *ctx;
-    const resolver_t *table;    /* 그룹이 아닌 질의의 테이블. 열 그대로 내보내기·*에 쓴다 */
+    const resolver_t *table;    /* FROM 원본들. 열 그대로 내보내기·*에 쓴다 */
 } compile_ctx_t;
 
 static bool compile_in(database_t *db, const sqlexpr_t *expr, const compile_ctx_t *cc, sqleval_prog_t **prog,
@@ -1944,12 +1961,30 @@ static bool compile_in(database_t *db, const sqlexpr_t *expr, const compile_ctx_
 
 static const char UNNAMED_COLUMN[] = "?column?";
 
-/* 선택 목록을 출력 열로 펼친다. *는 테이블 열 전부 */
+/* t.*가 가리키는 원본. 없으면 SIZE_MAX */
+static size_t star_source(const resolver_t *resolver, const sqlstmt_name_t *qualifier)
+{
+    for (size_t i = 0; i < resolver->count; i++) {
+        if (source_named(&resolver->sources[i], qualifier)) return i;
+    }
+    return SIZE_MAX;
+}
+
+static result_column_t column_meta(const resolver_t *resolver, size_t column)
+{
+    const source_ref_t *source = &resolver->sources[source_of(resolver, column)];
+    const catalog_column_t *def = &source->view->columns[column - source->offset];
+    return (result_column_t){(const uint8_t *)def->name, def->name_bytes, def->type, !def->not_null || source->nullable};
+}
+
+/* 선택 목록을 출력 열로 펼친다. *는 모든 원본의 열, t.*는 그 원본의 열이다 */
 static database_exec_status_t plan_outputs(database_t *db, const sqlstmt_select_t *select, const compile_ctx_t *cc,
                                            select_ctx_t *ctx, size_t *outs_bytes)
 {
     const resolver_t *resolver = cc->table;
-    const catalog_table_view_t *view = resolver != NULL ? resolver->view : NULL;
+    size_t width = resolver->count > 0 ? resolver->sources[resolver->count - 1].offset +
+                                             resolver->sources[resolver->count - 1].view->column_count
+                                       : 0;
     database_exec_status_t status = DATABASE_EXEC_OK;
     size_t total = 0;
     for (size_t i = 0; i < select->item_count; i++) {
@@ -1961,17 +1996,17 @@ static database_exec_status_t plan_outputs(database_t *db, const sqlstmt_select_
         if (cc->match != NULL) {
             return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_NOT_GROUPED, "그룹 질의에서는 *를 쓸 수 없습니다");
         }
-        if (view == NULL) return fail_result(db, RESULT_E_SEMANTIC, 2, "FROM 없이 *를 쓸 수 없습니다");
-        if (item->qualifier.size > 0) {
-            const sqlstmt_name_t *expected = resolver->alias != NULL && resolver->alias->size > 0 ? resolver->alias
-                                                                                                  : resolver->table;
-            if (expected->size != item->qualifier.size ||
-                memcmp(expected->bytes, item->qualifier.bytes, expected->size) != 0) {
-                return fail_result(db, RESULT_E_SEMANTIC, 1, "테이블이 없습니다: %.*s", name_len(item->qualifier.size),
-                                   (const char *)item->qualifier.bytes);
-            }
+        if (resolver->count == 0) return fail_result(db, RESULT_E_SEMANTIC, 2, "FROM 없이 *를 쓸 수 없습니다");
+        if (item->qualifier.size == 0) {
+            total += width;
+            continue;
         }
-        total += view->column_count;
+        size_t at = star_source(resolver, &item->qualifier);
+        if (at == SIZE_MAX) {
+            return fail_result(db, RESULT_E_SEMANTIC, 1, "테이블이 없습니다: %.*s", name_len(item->qualifier.size),
+                               (const char *)item->qualifier.bytes);
+        }
+        total += resolver->sources[at].view->column_count;
     }
     *outs_bytes = (total > 0 ? total : 1) * sizeof(select_out_t);
     ctx->outs = q_calloc(db, total > 0 ? total : 1, sizeof(select_out_t));
@@ -1979,24 +2014,28 @@ static database_exec_status_t plan_outputs(database_t *db, const sqlstmt_select_
     for (size_t i = 0; i < select->item_count && status == DATABASE_EXEC_OK; i++) {
         const sqlstmt_select_item_t *item = &select->items[i];
         if (item->star) {
-            for (size_t c = 0; c < view->column_count; c++) {
+            size_t from = 0, to = width;
+            if (item->qualifier.size > 0) {
+                const source_ref_t *source = &resolver->sources[star_source(resolver, &item->qualifier)];
+                from = source->offset;
+                to = from + source->view->column_count;
+            }
+            for (size_t c = from; c < to; c++) {
                 select_out_t *out = &ctx->outs[ctx->out_count++];
                 out->column = c;
-                out->meta = (result_column_t){(const uint8_t *)view->columns[c].name, view->columns[c].name_bytes,
-                                              view->columns[c].type, !view->columns[c].not_null};
+                out->meta = column_meta(resolver, c);
             }
             continue;
         }
         select_out_t *out = &ctx->outs[ctx->out_count++];
         const sqlexpr_t *expr = item->expr;
         out->meta.is_nullable = true;
-        if (cc->match == NULL && view != NULL && expr->kind == SQLEXPR_COLUMN) {
+        if (cc->match == NULL && expr->kind == SQLEXPR_COLUMN) {
             value_type_t type;
             size_t column = resolve_column((void *)resolver, &expr->qualifier, &expr->name, &type);
-            if (column != SQLEVAL_NO_COLUMN) {
+            if (column != SQLEVAL_NO_COLUMN && column != SQLEVAL_AMBIGUOUS) {
                 out->column = column;
-                out->meta = (result_column_t){(const uint8_t *)view->columns[column].name,
-                                              view->columns[column].name_bytes, type, !view->columns[column].not_null};
+                out->meta = column_meta(resolver, column);
             }
         }
         if (out->meta.name == NULL) {
@@ -2025,7 +2064,6 @@ static database_exec_status_t plan_keys(database_t *db, const sqlstmt_select_t *
     *keys_bytes = (select->order_count > 0 ? select->order_count : 1) * sizeof(select_key_t);
     ctx->keys = q_calloc(db, select->order_count > 0 ? select->order_count : 1, sizeof(select_key_t));
     if (ctx->keys == NULL) return DATABASE_EXEC_NOMEM;
-    size_t star_columns = cc->table != NULL ? cc->table->view->column_count : 0;
     for (size_t k = 0; k < select->order_count && status == DATABASE_EXEC_OK; k++) {
         const sqlstmt_order_t *order = &select->order[k];
         select_key_t *key = &ctx->keys[ctx->key_count++];
@@ -2047,7 +2085,11 @@ static database_exec_status_t plan_keys(database_t *db, const sqlstmt_select_t *
             for (size_t i = 0, out = 0; i < select->item_count && !by_alias; i++) {
                 const sqlstmt_select_item_t *item = &select->items[i];
                 if (item->star) {
-                    out += star_columns;
+                    for (size_t s = 0; s < cc->table->count; s++) {
+                        if (item->qualifier.size == 0 || source_named(&cc->table->sources[s], &item->qualifier)) {
+                            out += cc->table->sources[s].view->column_count;
+                        }
+                    }
                     continue;
                 }
                 if (item->alias.size == expr->name.size &&
@@ -2142,9 +2184,8 @@ static size_t group_match(void *ctx, const sqlexpr_t *expr, value_type_t *type)
 static size_t group_resolve(void *ctx, const sqlstmt_name_t *qualifier, const sqlstmt_name_t *name, value_type_t *type)
 {
     const group_plan_t *plan = ctx;
-    if (plan->table == NULL) return SQLEVAL_NO_COLUMN;
-    return resolve_column((void *)plan->table, qualifier, name, type) == SQLEVAL_NO_COLUMN ? SQLEVAL_NO_COLUMN
-                                                                                         : SQLEVAL_UNGROUPED;
+    size_t column = resolve_column((void *)plan->table, qualifier, name, type);
+    return column == SQLEVAL_NO_COLUMN || column == SQLEVAL_AMBIGUOUS ? column : SQLEVAL_UNGROUPED;
 }
 
 /* expr 안의 집계 호출을 모은다. 집계 안의 집계는 거절한다 */
@@ -2249,8 +2290,7 @@ static database_exec_status_t plan_groups(database_t *db, const sqlstmt_select_t
             expr = select->items[position - 1].expr;
         } else if (expr->kind == SQLEXPR_COLUMN && expr->qualifier.size == 0) {
             value_type_t unused;
-            bool is_column = table != NULL &&
-                             resolve_column((void *)table, &expr->qualifier, &expr->name, &unused) != SQLEVAL_NO_COLUMN;
+            bool is_column = resolve_column((void *)table, &expr->qualifier, &expr->name, &unused) != SQLEVAL_NO_COLUMN;
             for (size_t i = 0; i < select->item_count && !is_column; i++) {
                 if (!select->items[i].star && same_name(&select->items[i].alias, &expr->name)) {
                     expr = select->items[i].expr;
@@ -2497,20 +2537,295 @@ static bool select_is_grouped(const sqlstmt_select_t *select)
     return false;
 }
 
+/* ── 결합: 원본마다 한 단계인 중첩 루프. 앞 단계 값으로 색인 탐침을 만든다 ── */
+
+/* 최상위 AND로 나눈 조건 하나. level 단계에서 행을 받을 때 본다. after면 LEFT JOIN의 NULL 채움 뒤에 본다 */
+typedef struct {
+    sqleval_prog_t *prog;
+    size_t level;
+    bool after;
+} join_cond_t;
+
+/* 이 단계 원본의 열 = 앞 단계만 쓰는 식 */
+typedef struct {
+    size_t column;              /* 원본 안 열 번호 */
+    value_type_t type;
+    sqleval_prog_t *value;
+} join_probe_t;
+
+typedef struct join join_t;
+
+typedef struct {
+    join_t *join;
+    size_t level;
+    catalog_table_id_t id;
+    catalog_table_view_t view;
+    heap_t *heap;
+    bool left;
+    bool matched;               /* 이번 바깥 행에서 ON을 통과한 행이 있었는지 */
+    join_probe_t probes[WHERE_MAX_PROBES];
+    size_t probe_count;
+    row_sink_t sink;
+} join_level_t;
+
+struct join {
+    database_t *db;
+    join_level_t *levels;
+    size_t level_count;
+    source_ref_t *sources;
+    join_cond_t *conds;
+    size_t cond_count;
+    size_t cond_cap;
+    value_t *row;               /* 결합 행 */
+    size_t width;
+    bool *needed;               /* 결합 행에서 읽을 칸 */
+    bool *scratch;              /* 조건이 쓰는 칸 표시용 */
+    const row_sink_t *out;
+};
+
+static database_exec_status_t conds_hold(join_t *join, size_t level, bool after, bool *holds)
+{
+    *holds = true;
+    for (size_t i = 0; i < join->cond_count && *holds; i++) {
+        const join_cond_t *cond = &join->conds[i];
+        if (cond->level != level || cond->after != after) continue;
+        sqleval_error_t error = {SQLEVAL_OK, 0, NULL};
+        if (sqleval_test(cond->prog, join->row, holds, &error) != SQLEVAL_OK) return eval_failure(join->db, &error);
+    }
+    return DATABASE_EXEC_OK;
+}
+
+static database_exec_status_t join_run(join_t *join, size_t level);
+
+/* 이 단계 원본의 행 하나를 받았다 */
+static database_exec_status_t join_accept(void *context, const value_t *row)
+{
+    (void)row;
+    join_level_t *step = context;
+    join_t *join = step->join;
+    bool holds;
+    database_exec_status_t status = conds_hold(join, step->level, false, &holds);
+    if (status != DATABASE_EXEC_OK || !holds) return status;
+    step->matched = true;
+    status = conds_hold(join, step->level, true, &holds);
+    if (status != DATABASE_EXEC_OK || !holds) return status;
+    return join_run(join, step->level + 1);
+}
+
+/* 탐침 값을 계산해 이 단계의 where를 만든다. NULL이거나 열 형식으로 정확히 바꿀 수 없으면 맞는 행이 없다 */
+static database_exec_status_t join_probes(join_t *join, const join_level_t *step, where_t *where)
+{
+    database_t *db = join->db;
+    memset(where, 0, sizeof(*where));
+    for (size_t i = 0; i < step->probe_count && !where->never; i++) {
+        value_t value = {0};
+        sqleval_error_t error = {SQLEVAL_OK, 0, NULL};
+        if (sqleval_run(step->probes[i].value, join->row, &value, &error) != SQLEVAL_OK) return eval_failure(db, &error);
+        if (value.view.type == VALUE_NULL) {
+            where->never = true;
+            continue;
+        }
+        probe_t *probe = &where->probes[where->probe_count];
+        value_status_t cast = q_cast(db, &value.view, step->probes[i].type, &probe->literal);
+        value_clear(&value);
+        if (cast == VALUE_NOMEM) return DATABASE_EXEC_NOMEM;
+        if (cast != VALUE_OK) {
+            where->never = true;
+            continue;
+        }
+        probe->column = step->probes[i].column;
+        where->probe_count++;
+    }
+    return DATABASE_EXEC_OK;
+}
+
+static database_exec_status_t join_run(join_t *join, size_t level)
+{
+    if (level == join->level_count) return join->out->fn(join->out->ctx, join->row);
+    join_level_t *step = &join->levels[level];
+    const source_ref_t *source = &join->sources[level];
+    where_t where;
+    database_exec_status_t status = join_probes(join, step, &where);
+    step->matched = false;
+    if (status == DATABASE_EXEC_OK) {
+        status = scan_rows(join->db, &step->view, step->id, step->heap, &where, join->needed + source->offset,
+                           join->row + source->offset, &step->sink);
+    }
+    where_clear(join->db, &where);
+    if (status == DATABASE_EXEC_OK && step->left && !step->matched && !*join->out->stop) {
+        /* 맞는 행이 없으면 이 원본의 열을 NULL로 둔 행 하나 */
+        bool holds;
+        status = conds_hold(join, level, true, &holds);
+        if (status == DATABASE_EXEC_OK && holds) status = join_run(join, level + 1);
+    }
+    return status;
+}
+
+/* 맨 위 단계. FROM이 없으면 행 하나다 */
+static database_exec_status_t join_start(join_t *join)
+{
+    if (join->level_count > 0) return join_run(join, 0);
+    bool holds;
+    database_exec_status_t status = conds_hold(join, 0, false, &holds);
+    return status == DATABASE_EXEC_OK && holds ? join->out->fn(join->out->ctx, NULL) : status;
+}
+
+static size_t count_conjuncts(const sqlexpr_t *expr)
+{
+    if (expr == NULL) return 0;
+    if (expr->kind == SQLEXPR_BINARY && expr->op == SQLEXPR_OP_AND) {
+        return count_conjuncts(expr->args[0]) + count_conjuncts(expr->args[1]);
+    }
+    return 1;
+}
+
+/* prog이 쓰는 가장 뒤 단계. 열을 쓰지 않으면 0 */
+static size_t last_level(join_t *join, const sqleval_prog_t *prog, bool *uses_any)
+{
+    memset(join->scratch, 0, join->width > 0 ? join->width : 1);
+    sqleval_mark_columns(prog, join->scratch, join->width);
+    resolver_t all = {join->sources, join->level_count};
+    size_t level = 0;
+    *uses_any = false;
+    for (size_t c = 0; c < join->width; c++) {
+        if (!join->scratch[c]) continue;
+        *uses_any = true;
+        size_t at = source_of(&all, c);
+        if (at > level) level = at;
+    }
+    return level;
+}
+
+/* 열 = 식 꼴이면 그 단계의 색인 탐침으로 쓴다(조건 자체도 그대로 검사한다) */
+static database_exec_status_t try_probe(join_t *join, const sqlexpr_t *expr, const resolver_t *resolver, size_t level)
+{
+    if (expr->kind != SQLEXPR_BINARY || expr->op != SQLEXPR_OP_EQ || level >= join->level_count) {
+        return DATABASE_EXEC_OK;
+    }
+    join_level_t *step = &join->levels[level];
+    const source_ref_t *source = &join->sources[level];
+    for (size_t side = 0; side < 2 && step->probe_count < WHERE_MAX_PROBES; side++) {
+        const sqlexpr_t *column = expr->args[side], *other = expr->args[1 - side];
+        if (column->kind != SQLEXPR_COLUMN) continue;
+        value_type_t type;
+        size_t at = resolve_column((void *)resolver, &column->qualifier, &column->name, &type);
+        if (at == SQLEVAL_NO_COLUMN || at == SQLEVAL_AMBIGUOUS || at < source->offset ||
+            at >= source->offset + source->view->column_count) {
+            continue;
+        }
+        sqleval_prog_t *value = NULL;
+        database_exec_status_t status = DATABASE_EXEC_OK;
+        if (!compile_expr(join->db, other, resolver, &value, &status)) return status;
+        bool uses_any;
+        size_t needs = last_level(join, value, &uses_any);
+        if (uses_any && needs >= level) {
+            sqleval_free(value);
+            continue;
+        }
+        step->probes[step->probe_count++] = (join_probe_t){at - source->offset, type, value};
+        return DATABASE_EXEC_OK;
+    }
+    return DATABASE_EXEC_OK;
+}
+
+/* 조건을 최상위 AND로 나눠 단계에 배정한다. on_level이 SIZE_MAX면 WHERE다 */
+static database_exec_status_t add_conds(join_t *join, const sqlexpr_t *expr, const resolver_t *resolver,
+                                        size_t on_level, const char *clause)
+{
+    if (expr->kind == SQLEXPR_BINARY && expr->op == SQLEXPR_OP_AND) {
+        database_exec_status_t status = add_conds(join, expr->args[0], resolver, on_level, clause);
+        return status == DATABASE_EXEC_OK ? add_conds(join, expr->args[1], resolver, on_level, clause) : status;
+    }
+    database_t *db = join->db;
+    join_cond_t *cond = &join->conds[join->cond_count];
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    if (!compile_expr(db, expr, resolver, &cond->prog, &status)) return status;
+    join->cond_count++;
+    value_type_t type = sqleval_type(cond->prog);
+    if (type != VALUE_INTEGER && type != VALUE_NULL) {
+        return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_TYPE, "%s 조건은 참·거짓이어야 합니다", clause);
+    }
+    bool uses_any;
+    size_t level = last_level(join, cond->prog, &uses_any);
+    if (on_level != SIZE_MAX) {
+        cond->level = on_level;
+    } else {
+        cond->level = level;
+        /* LEFT JOIN 쪽 열을 보는 WHERE 조건은 NULL 채움 뒤에 본다 */
+        cond->after = level < join->level_count && join->levels[level].left;
+    }
+    return cond->after ? DATABASE_EXEC_OK : try_probe(join, expr, resolver, cond->level);
+}
+
+static void join_free(join_t *join)
+{
+    database_t *db = join->db;
+    for (size_t i = 0; i < join->level_count && join->levels != NULL; i++) {
+        heap_close(join->levels[i].heap);
+        for (size_t p = 0; p < join->levels[i].probe_count; p++) sqleval_free(join->levels[i].probes[p].value);
+    }
+    for (size_t i = 0; i < join->cond_count; i++) sqleval_free(join->conds[i].prog);
+    q_free(db, join->conds, (join->cond_cap > 0 ? join->cond_cap : 1) * sizeof(join_cond_t));
+    q_free(db, join->levels, (join->level_count > 0 ? join->level_count : 1) * sizeof(join_level_t));
+    q_free(db, join->sources, (join->level_count > 0 ? join->level_count : 1) * sizeof(source_ref_t));
+    if (join->row != NULL) clear_cells(join->row, join->width);
+    q_free(db, join->row, (join->width > 0 ? join->width : 1) * sizeof(value_t));
+    q_free(db, join->needed, join->width > 0 ? join->width : 1);
+    q_free(db, join->scratch, join->width > 0 ? join->width : 1);
+    memset(join, 0, sizeof(*join));
+}
+
+/* FROM 원본을 찾고 결합 행 배치를 정한다 */
+static database_exec_status_t join_open(database_t *db, const sqlstmt_select_t *select, join_t *join)
+{
+    memset(join, 0, sizeof(*join));
+    join->db = db;
+    size_t count = select->source_count;
+    join->levels = q_calloc(db, count > 0 ? count : 1, sizeof(join_level_t));
+    join->sources = q_calloc(db, count > 0 ? count : 1, sizeof(source_ref_t));
+    if (join->levels == NULL || join->sources == NULL) return DATABASE_EXEC_NOMEM;
+    join->level_count = count;
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    for (size_t i = 0; i < count; i++) {
+        const sqlstmt_source_t *from = &select->sources[i];
+        join_level_t *step = &join->levels[i];
+        if (!lookup_table(db, &from->table, &step->id, &step->view, &status)) return status;
+        step->join = join;
+        step->level = i;
+        step->left = from->join == SQLSTMT_JOIN_LEFT;
+        join->sources[i] = (source_ref_t){&step->view, &from->table, &from->alias, join->width, step->left};
+        join->width += step->view.column_count;
+        for (size_t k = 0; k < i; k++) {
+            const sqlstmt_name_t *name = from->alias.size > 0 ? &from->alias : &from->table;
+            if (source_named(&join->sources[k], name)) {
+                return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_AMBIGUOUS_COLUMN,
+                                   "FROM에 같은 이름이 두 번 나옵니다: %.*s", name_len(name->size),
+                                   (const char *)name->bytes);
+            }
+        }
+    }
+    size_t cells = join->width > 0 ? join->width : 1;
+    join->row = q_calloc(db, cells, sizeof(value_t));
+    join->needed = q_calloc(db, cells, 1);
+    join->scratch = q_calloc(db, cells, 1);
+    join->cond_cap = count_conjuncts(select->where);
+    for (size_t i = 0; i < count; i++) join->cond_cap += count_conjuncts(select->sources[i].on);
+    join->conds = q_calloc(db, join->cond_cap > 0 ? join->cond_cap : 1, sizeof(join_cond_t));
+    if (join->row == NULL || join->needed == NULL || join->scratch == NULL || join->conds == NULL) {
+        return DATABASE_EXEC_NOMEM;
+    }
+    for (size_t i = 0; i < count && status == DATABASE_EXEC_OK; i++) {
+        if (select->sources[i].on == NULL) continue;
+        resolver_t visible = {join->sources, i + 1};
+        status = add_conds(join, select->sources[i].on, &visible, i, "ON");
+    }
+    resolver_t all = {join->sources, count};
+    if (status == DATABASE_EXEC_OK && select->where != NULL) status = add_conds(join, select->where, &all, SIZE_MAX, "WHERE");
+    return status;
+}
+
 static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t *select, result_t **out)
 {
-    database_exec_status_t status = DATABASE_EXEC_OK;
-    catalog_table_id_t id = 0;
-    catalog_table_view_t view;
-    const catalog_table_view_t *table = NULL;
-    if (select->has_from) {
-        if (!lookup_table(db, &select->table, &id, &view, &status)) return status;
-        table = &view;
-    }
-    resolver_t resolver_storage = {table, &select->table, &select->table_alias};
-    const resolver_t *resolver = table != NULL ? &resolver_storage : NULL;
-    size_t n = table != NULL ? table->column_count : 0;
-    size_t row_bytes = (n > 0 ? n : 1) * sizeof(value_t);
     select_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.db = db;
@@ -2519,22 +2834,18 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     group_rows_t groups = {db, &plan, NULL, 0, 0};
     sqleval_prog_t *having = NULL;
     size_t outs_bytes = 0, keys_bytes = 0, cells_bytes = 0, views_bytes = 0, columns_bytes = 0;
-    bool *needed = q_calloc(db, n > 0 ? n : 1, sizeof(*needed));
-    value_t *row = q_calloc(db, n > 0 ? n : 1, sizeof(*row));
     result_column_t *columns = NULL;
-    heap_t *heap = NULL;
-    where_t where;
-    memset(&where, 0, sizeof(where));
-    if (needed == NULL || row == NULL) {
-        status = DATABASE_EXEC_NOMEM;
-        goto done;
-    }
+    join_t join;
+    database_exec_status_t status = join_open(db, select, &join);
+    if (status != DATABASE_EXEC_OK) goto done;
+    resolver_t resolver = {join.sources, join.level_count};
+    size_t n = join.width;
     bool grouped = select_is_grouped(select);
-    compile_ctx_t cc = {resolver != NULL ? resolve_column : NULL, NULL, (void *)resolver, resolver};
+    compile_ctx_t cc = {resolve_column, NULL, &resolver, &resolver};
     if (grouped) {
-        status = plan_groups(db, select, resolver, &plan);
+        status = plan_groups(db, select, &resolver, &plan);
         if (status != DATABASE_EXEC_OK) goto done;
-        cc = (compile_ctx_t){group_resolve, group_match, &plan, NULL};
+        cc = (compile_ctx_t){group_resolve, group_match, &plan, &resolver};
     }
     status = plan_outputs(db, select, &cc, &ctx, &outs_bytes);
     if (status != DATABASE_EXEC_OK) goto done;
@@ -2548,7 +2859,6 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
             goto done;
         }
     }
-    if (!compile_where(db, resolver, select->where, &where, &status)) goto done;
     if (!constant_count(db, select->limit, &ctx.has_limit, &ctx.limit, &status)) goto done;
     bool has_offset = false;
     if (!constant_count(db, select->offset, &has_offset, &ctx.offset, &status)) goto done;
@@ -2566,7 +2876,8 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         goto done;
     }
     for (size_t i = 0; i < ctx.out_count; i++) columns[i] = ctx.outs[i].meta;
-    /* 테이블에서 읽을 열: 그룹이면 GROUP BY·집계 인자가, 아니면 출력·정렬 식이 쓰는 열과 WHERE의 열 */
+    /* 읽을 칸: 그룹이면 GROUP BY·집계 인자가, 아니면 출력·정렬 식이 쓰는 칸과 조건·탐침이 쓰는 칸 */
+    bool *needed = join.needed;
     if (grouped) {
         for (size_t g = 0; g < plan.key_count; g++) sqleval_mark_columns(plan.key_progs[g], needed, n);
         for (size_t a = 0; a < plan.agg_count; a++) sqleval_mark_columns(plan.aggs[a].arg, needed, n);
@@ -2577,7 +2888,12 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         }
         for (size_t k = 0; k < ctx.key_count; k++) sqleval_mark_columns(ctx.keys[k].prog, needed, n);
     }
-    sqleval_mark_columns(where.prog, needed, n);
+    for (size_t i = 0; i < join.cond_count; i++) sqleval_mark_columns(join.conds[i].prog, needed, n);
+    for (size_t l = 0; l < join.level_count; l++) {
+        for (size_t p = 0; p < join.levels[l].probe_count; p++) {
+            sqleval_mark_columns(join.levels[l].probes[p].value, needed, n);
+        }
+    }
 
     result_builder_spec_t spec = {columns, ctx.out_count, NULL};
     result_status_t created = result_builder_create_ex(&spec, &db->ledger, &ctx.builder);
@@ -2590,8 +2906,8 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
         goto done;
     }
     if (ctx.has_limit && ctx.limit == 0) ctx.done = true;
-    if (table != NULL) {
-        heap_status_t opened = open_heap(db, table, id, &heap);
+    for (size_t l = 0; l < join.level_count; l++) {
+        heap_status_t opened = open_heap(db, &join.levels[l].view, join.levels[l].id, &join.levels[l].heap);
         if (opened != HEAP_OK) {
             status = heap_failure(db, opened, "open");
             goto done;
@@ -2599,7 +2915,9 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     }
     bool never_stop = false;
     row_sink_t sink = grouped ? (row_sink_t){group_collect, &groups, &never_stop} : (row_sink_t){emit_sink, &ctx, &ctx.done};
-    status = scan_rows(db, table, id, heap, &where, needed, row, &sink);
+    join.out = &sink;
+    for (size_t l = 0; l < join.level_count; l++) join.levels[l].sink = (row_sink_t){join_accept, &join.levels[l], sink.stop};
+    if (!*sink.stop) status = join_start(&join);
     if (status == DATABASE_EXEC_OK && grouped && !ctx.done) status = group_flush(db, &plan, &groups, having, &ctx);
     if (status == DATABASE_EXEC_OK && ctx.buffered) status = select_flush(&ctx);
     if (status != DATABASE_EXEC_OK) goto done;
@@ -2616,13 +2934,8 @@ static database_exec_status_t exec_select(database_t *db, const sqlstmt_select_t
     *out = rows;
 done:
     result_builder_destroy(&ctx.builder);
-    heap_close(heap);
     group_rows_free(&groups);
     select_rows_free(&ctx);
-    if (row != NULL) clear_cells(row, n);
-    q_free(db, row, row_bytes);
-    q_free(db, needed, (n > 0 ? n : 1) * sizeof(*needed));
-    where_clear(db, &where);
     sqleval_free(having);
     if (ctx.cells != NULL) owned_clear(db, ctx.cells, ctx.out_count);
     q_free(db, ctx.cells, cells_bytes);
@@ -2633,6 +2946,7 @@ done:
     for (size_t k = 0; ctx.keys != NULL && k < ctx.key_count; k++) sqleval_free(ctx.keys[k].prog);
     q_free(db, ctx.keys, keys_bytes);
     group_plan_free(db, &plan);
+    join_free(&join);
     return status;
 }
 
@@ -2894,7 +3208,8 @@ static database_exec_status_t exec_update(database_t *db, const sqlstmt_update_t
     catalog_table_view_t view;
     if (!lookup_table(db, &update->table, &id, &view, &status)) return status;
     size_t n = view.column_count;
-    resolver_t resolver = {&view, &update->table, NULL};
+    source_ref_t source = {&view, &update->table, NULL, 0, false};
+    resolver_t resolver = {&source, 1};
     size_t assign_count = update->assignment_count;
     size_t columns_bytes = (assign_count > 0 ? assign_count : 1) * sizeof(size_t);
     size_t progs_bytes = (assign_count > 0 ? assign_count : 1) * sizeof(sqleval_prog_t *);
@@ -3103,7 +3418,8 @@ static database_exec_status_t exec_delete(database_t *db, const sqlstmt_delete_t
     catalog_table_view_t view;
     if (!lookup_table(db, &del->table, &id, &view, &status)) return status;
     size_t n = view.column_count;
-    resolver_t resolver = {&view, &del->table, NULL};
+    source_ref_t source = {&view, &del->table, NULL, 0, false};
+    resolver_t resolver = {&source, 1};
 
     size_t row_bytes = n * sizeof(value_t);
     value_t *row = q_calloc(db, n, sizeof(*row));
