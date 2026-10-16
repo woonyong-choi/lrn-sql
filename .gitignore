@@ -1,12 +1,7 @@
 .DS_Store
 Thumbs.db
-build/
-build_mac/
-build_release/
-build_nosan/
 __pycache__/
 *.db
-.vscode/c_cpp_properties.json
 
 # 빌드 산출물은 커밋하지 않는다
 build*/

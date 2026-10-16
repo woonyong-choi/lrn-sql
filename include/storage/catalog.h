@@ -9,12 +9,12 @@
 
 /*
  * 다중 테이블 카탈로그: 이름과 안정적인 table ID로 테이블별 schema·행 수·identity 카운터·
- * 저장 locator를 보관하는 순수 메타데이터 모듈이다. 페이지를 할당·해제하거나 pager·db 전역
- * header를 읽고 쓰지 않는다. locator는 DB 공통 page allocator를 가진 호출자가 넘기는 값이다.
+ * 저장 locator를 보관하는 순수 메타데이터 모듈이다. 페이지를 할당·해제하거나 파일 header를
+ * 읽고 쓰지 않는다. locator는 DB 공통 page allocator를 가진 호출자가 넘기는 값이다.
  * 단일 스레드 계약이며 동시 접근은 호출하는 DB 계층이 직렬화한다.
  *
- * 이 단계는 메타데이터와 직렬화만 다룬다. 실제 행 CRUD, 파일 close/reopen, 원자적 게시,
- * SQL 연결은 table·pager·저장 형식(#77)·#8/#9·#50이 따로 연결해야 한다.
+ * 이 모듈은 메타데이터와 직렬화만 다룬다. 행 CRUD는 heap_store, 파일 저장과 원자적 게시는
+ * catalog_store·page_file, SQL 연결은 database가 맡는다.
  */
 
 typedef uint32_t catalog_table_id_t;

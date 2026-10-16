@@ -277,7 +277,7 @@ test-sqlite-session-diff: $(BUILD_DIR)/session_probe test-sqlite-session-diff-ha
 test-all: test test-overflow-file test-value-sqlite test-value-varchar test-database test-transaction test-session test-ack-queue test-ack-queue-python
 
 clean:
-	rm -rf $(BUILD_DIR) build-o2
+	rm -rf $(BUILD_DIR)
 
 .PHONY: test-runner test-fault test-result test-overflow-file test-value-sqlite test-value-varchar test-sqlite-session-diff test-sqlite-session-diff-harness
 

@@ -1,82 +1,77 @@
-# 빌드·테스트 상세
+# 빌드와 시험
 
-README의 "빠르게 실행하기"에 담지 않은 빌드 옵션, 플랫폼 문제, 테스트 스위트의 내용을 적습니다.
+README의 빠른 시작에 담지 않은 빌드 변수, 시험 대상, 외부 엔진과의 비교 방법, 플랫폼 문제를 적는다.
 
-## 빌드 옵션
+## 빌드
 
 | 항목 | 내용 |
 |---|---|
-| 언어 | C11 (`-Wall -Wextra -Werror`) |
-| 빌드 | GNU Make, GCC |
-| 런타임 의존성 | POSIX pthread만 사용. 외부 DB·파서·인덱스 라이브러리 없음 |
-| 진단 도구 | AddressSanitizer, UndefinedBehaviorSanitizer, gdb(스택 샘플링) |
-| 서버 경로 | 자체 HTTP 처리(keep-alive, 요청 읽기 타임아웃) |
-| 벤치마크 하니스 | Python 3 + psycopg2 (`bench/`), 대조군 PostgreSQL 16.13 |
+| 언어 | C11, `-Wall -Wextra -Werror` |
+| 도구 | GNU Make, GCC |
+| 런타임 의존성 | POSIX 파일 I/O와 pthread, libm |
+| Python 바인딩 | 표준 라이브러리 ctypes |
+| 시험 의존성 | `libsqlite3-dev`, `sqlite3` CLI, pytest |
 
-`SANITIZE` 변수로 sanitizer를 고릅니다. 기본값은 `address,undefined`이고,
-macOS 26(Darwin 25) 이상에서는 아래 이유로 `undefined`만 켜집니다.
+`make all`은 DB와 큐를 묶은 공유 라이브러리 `build/queue-shared/liblrnackq.so`(macOS에서는 `.dylib`)를 `-O2`로 만든다. 이 라이브러리는 sanitizer를 켜지 않는다. Python 바인딩은 환경 변수 `LRN_ACKQ_LIB`가 가리키는 파일을 먼저 찾고, 없으면 `build/queue-shared/`를 찾는다.
+
+시험 바이너리는 `SANITIZE` 변수로 sanitizer를 고른다. 기본값은 `address,undefined`다. `BUILD_DIR`를 바꾸면 sanitizer 설정이 다른 빌드를 따로 둘 수 있다.
 
 ```sh
-make SANITIZE=address,undefined test-all   # 강제로 둘 다 (CI와 동일)
-make BUILD_DIR=build-ubsan SANITIZE=undefined test-all
-make BUILD_DIR=build-nosan SANITIZE= all   # sanitizer 없이
+make test-all
+make SANITIZE=thread BUILD_DIR=build-tsan test-transaction test-session test-ack-queue
+make SANITIZE= BUILD_DIR=build-nosan test-database
 ```
 
-### 재현용 컴파일 가드
+## 시험 대상
 
-개선 전 동작을 현재 소스에서 그대로 빌드해, 같은 컴파일러·같은 주변 코드로 전후를 비교합니다.
-
-| 가드 | 되살리는 동작 |
+| 대상 | 검사하는 것 |
 |---|---|
-| `-DMINIDB_DISABLE_FREE_HINT` | 힙 빈 슬롯 힌트를 끄고 꼬리 페이지가 찰 때마다 힙 체인 전체를 재탐색 |
-| `-DMINIDB_DISABLE_INDEX_RANGE` | `INDEX_RANGE` 접근 경로를 끄고 범위 질의를 힙 스캔으로 |
-| `-DSEQ_INSERT_ROWS=N` | `make test-step3`의 순차 INSERT 회귀 검사 규모(기본 20,000) 변경 |
+| `make test` | 행 인코딩, overflow, 값, 카탈로그, lexer, 페이지 파일, 카탈로그 저장, 기본 키·TEXT 색인 트리 |
+| `make test-overflow-file` | overflow 체인의 파일 왕복 |
+| `make test-value-sqlite` | 값 비교·변환을 시스템 SQLite와 대조 |
+| `make test-value-varchar` | VARCHAR 경계 값과 UTF-8 판정 |
+| `make test-database` | SQL 문장 parser, heap 저장소, 문장 실행, SQLite 대조, I/O·할당 실패 주입, 메모리 한도 열기, 기본 키 색인 |
+| `make test-transaction` | 트랜잭션 상태 기계, writer 경합, commit 결과, 실패 주입 |
+| `make test-session` | 세션 메모리 예산과 결과 수명 |
+| `make test-ack-queue` | ACK 큐의 C API와 실패 주입 |
+| `make test-ack-queue-python` | Python 바인딩의 DB·트랜잭션·큐 계약 |
+| `make test-all` | 위 대상 전체 |
+| `make test-runner` | 시험 실행기와 실패 판정기 |
+| `make test-fault` | 실패 주입 런타임 |
+| `make test-result` | 결과 버퍼 인코딩과 할당 실패 |
+
+각 시험의 결과와 실패 주입 시드는 `build/fault/`에 JSON으로 남는다. CI는 이 폴더를 sanitizer별 산출물로 올린다.
+
+## 다른 엔진과 비교
+
+같은 SQL을 이 엔진, SQLite, PostgreSQL에 실행해 행과 오류 종류를 비교한다. 사례는 `tests/sql_diff_cases.py`에 있다. 엔진마다 의미가 다른 사례는 사례 안에 차이를 적고 `DIFF`로 보고한다.
+
+```sh
+make test-sql-diff
+make test-sql-diff SQLDIFF_DSN=postgresql://user:password@localhost:5432/sqldiff
+```
+
+`SQLDIFF_DSN`이 없으면 PostgreSQL 비교를 건너뛴다. `SQLDIFF_DSN`을 주면 PostgreSQL에 연결하지 못할 때 실패로 끝난다. PostgreSQL 비교에는 Python 패키지 `psycopg`와 `C` 정렬 규칙으로 만든 데이터베이스가 필요하다.
+
+두 연결이 같은 파일을 번갈아 쓰는 동작은 SQLite 3.51.0과 비교한다. 이 대상은 SQLite 소스를 내려받아 sha256을 확인한 뒤 공유 라이브러리로 빌드하므로 네트워크가 필요하다.
+
+```sh
+make SANITIZE= BUILD_DIR=build-sqlite test-sqlite-session-diff
+```
+
+## CI
+
+`.github/workflows/ci.yml`은 Ubuntu에서 아래 작업을 실행한다.
+
+| 작업 | 명령 |
+|---|---|
+| `test` (address, undefined) | `make SANITIZE=<sanitizer> test-all test-runner test-fault test-result` |
+| `test` (thread) | `make SANITIZE=thread test-transaction test-session test-ack-queue` |
+| `pg-compat` | PostgreSQL 18 서비스에 `make test-sql-diff`를 실행한 뒤 `make test-sqlite-session-diff` |
+| `actionlint` | 워크플로 파일 검사 |
 
 ## macOS에서 ASan 바이너리가 멈추는 문제
 
-**macOS 26(Darwin 25) + Apple clang 17에서는 ASan 바이너리가 `main()`에 닿기 전에 멈춥니다.**
-lrn-sql의 문제가 아니라 ASan 런타임 초기화가 자기 자신을 재진입하는 것으로,
-`int main(void){return 0;}` 한 줄을 `cc -fsanitize=address`로 빌드해도 똑같이 멈춥니다.
-스택은 `AsanInitInternal` → `InitializeShadowMemory` → `get_dyld_hdr` →
-`dyld_shared_cache_iterate_text_swift` → `malloc` → `__sanitizer_mz_malloc` →
-다시 `AsanInitFromRtl`로 들어가 spin lock에 걸립니다. UBSan 단독은 정상 동작합니다.
+macOS 26(Darwin 25)과 Apple clang 17에서는 ASan 바이너리가 `main()`에 닿기 전에 멈춘다. ASan 런타임 초기화가 자기 자신을 다시 부르는 문제이며 빈 `main()`을 `cc -fsanitize=address`로 빌드해도 같은 증상이 나온다. 스택은 `AsanInitInternal`, `InitializeShadowMemory`, `get_dyld_hdr`, `dyld_shared_cache_iterate_text_swift`, `malloc`, `__sanitizer_mz_malloc`를 거쳐 다시 `AsanInitFromRtl`로 들어가 spin lock에서 멈춘다. UBSan만 켠 빌드는 정상 동작한다.
 
-그래서 `Makefile`은 Darwin 25 이상에서 기본값을 `undefined`로 낮춥니다.
-ASan까지 켠 검사가 필요하면 저장소의 Dev Container(`.devcontainer/`)나 Linux에서 돌립니다.
-CI(Ubuntu)는 항상 `address,undefined` 둘 다 켭니다.
-
-## 테스트 스위트
-
-| 스위트 | 파일 | 검증 대상 | 개수 | 명령 |
-|---|---|---|---:|---|
-| MiniDB Test Suite | `tests/test_all.c` | 페이지·힙·B+Tree·재열기 | 76 | `make test` |
-| B+Tree Property | `tests/test_bptree_property.c` | 무작위 삽입·삭제 후 구조 불변식 8종, 범위 스캔 대조 | 215 | `make test-prop` |
-| Step 0 — `db_execute` | `tests/test_step0_db_execute.c` | 문장 실행 진입점 | 24 | `make test-step0` |
-| Step 1 — SQL Extension | `tests/test_step1_sql_ext.c` | 파싱·계획·조건·정렬·집계·`INDEX_RANGE`·EXPLAIN 일치 | 202 | `make test-step1` |
-| Step 2 — Concurrency | `tests/test_step2_concurrency.c` | S/X lock 호환성, 범위 lock, 동시 INSERT, HTTP 경로 | 52 | `make test-step2` |
-| Step 3 — Regression | `tests/test_step3_regression.c` | 고친 결함이 되살아나는지 | 24 | `make test-step3` |
-| 합계 | | | **593** | `make test-all` |
-
-숫자는 테스트 함수 개수가 아니라 **단언(assertion) 개수**의 합입니다.
-
-### B+Tree property test가 무엇을 하는가
-
-B+Tree는 오름차순 삽입만으로는 검증되지 않습니다. 그 모양은 리프가 오른쪽으로만 쪼개지는
-한 가지 경우일 뿐이라, 형제 재분배와 병합이 섞이는 삭제 경로를 밟지 못합니다.
-Property 스위트는 고정 시드 난수로 삽입·삭제를 섞어 돌리며 체크포인트마다 **트리 전체를 걸어**
-리프 깊이 일치·키 순증가·부모 separator 구간·최소 점유율·리프 체인 대칭·페이지 중복 없음·
-`parent_page_id` 정합·참조 모델 일치를 봅니다.
-이 검사가 껍데기가 아닌지는 결함 5종(불균형 분할, separator 오프바이원, 리프 체인 끊김,
-언더플로우 복구 비활성화, 범위 경계 제외 누락)을 일부러 심어 확인했고
-**전부 서로 다른 불변식에 걸렸습니다**. 자세한 것은 [`design.md`](design.md) §5.
-
-### 회귀 검사 (`make test-step3`, `make test-step2`)
-
-| 검사 | 무엇을 잡는가 |
-| --- | --- |
-| `test_repl_insert_releases_locks` | REPL 경로 문장이 끝난 뒤 lock이 남는 회귀. `db_execute()`의 `lock_release_all()`이 빠지면 executor가 gap check에서 잡은 X lock이 해제되지 않고 누적된다 |
-| `test_sequential_insert_no_heap_rescan` | DELETE 없는 순차 INSERT가 힙 체인을 다시 걷는 회귀. free slot 힌트가 사라지면 꼬리 페이지가 찰 때마다 전체 체인을 재탐색해 O(P²)로 붕괴한다 |
-
-sanitizer를 끈 빌드는 이 검사들을 대신하지 않습니다.
-CI(`.github/workflows/ci.yml`)는 Linux에서 `ASAN_OPTIONS=detect_leaks=1`,
-`UBSAN_OPTIONS=halt_on_error=1`로 `make test-all`을 실행합니다.
+`Makefile`은 Darwin 25 이상에서 `SANITIZE` 기본값을 `undefined`로 낮춘다. ASan을 켠 시험은 Linux나 저장소의 Dev Container(`.devcontainer/`)에서 실행한다.

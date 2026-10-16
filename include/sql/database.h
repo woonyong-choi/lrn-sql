@@ -12,7 +12,6 @@
 /*
  * 새 저장 형식(page_file) 위에서 CREATE·INSERT·SELECT·UPDATE·DELETE·DROP을 실행하는 데이터베이스.
  * 파일 하나에 테이블 여러 개가 있고 카탈로그(catalog_store)와 테이블별 heap(heap_store)을 연결한다.
- * 기존 pager·table·bptree·executor·main과 legacy parser는 쓰지도 바꾸지도 않는다.
  * 옛 MINIDB 파일이나 #77 단일 record root는 열지 않으며 자동으로 옮기지도 않는다.
  *
  * 실행 단위: database_exec 한 번은 SQL 문장 하나이며 문장마다 자동 commit이다. 문장이 둘 이상이면

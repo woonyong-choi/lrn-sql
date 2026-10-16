@@ -1,8 +1,7 @@
 {
-    "name": "MiniDB SQL Server Development Container",
+    "name": "lrn-sql Development Container",
     "dockerFile": "Dockerfile",
     "remoteUser": "jungle",
-    "forwardPorts": [8080, 9090],
     "customizations": {
         "vscode": {
             "extensions": [
