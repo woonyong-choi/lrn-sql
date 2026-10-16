@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "storage/catalog.h"
+#include "storage/le.h"
 
 #define FORMAT_VERSION 1u
 #define INDEX_FORMAT_VERSION 2u
@@ -497,16 +498,6 @@ static void put_u16(uint8_t *bytes, uint16_t value)
     for (unsigned i = 0; i < 2; i++) bytes[i] = (uint8_t)(value >> (i * 8));
 }
 
-static void put_u32(uint8_t *bytes, uint32_t value)
-{
-    for (unsigned i = 0; i < 4; i++) bytes[i] = (uint8_t)(value >> (i * 8));
-}
-
-static void put_u64(uint8_t *bytes, uint64_t value)
-{
-    for (unsigned i = 0; i < 8; i++) bytes[i] = (uint8_t)(value >> (i * 8));
-}
-
 static uint32_t checksum(const uint8_t *bytes, size_t size)
 {
     uint32_t hash = 2166136261u;
@@ -516,15 +507,15 @@ static uint32_t checksum(const uint8_t *bytes, size_t size)
 
 static uint8_t *encode_table(uint8_t *at, const table_t *table)
 {
-    put_u32(at, table->id);
+    le_put_u32(at, table->id);
     put_u16(at + 4, (uint16_t)table->name_bytes);
     put_u16(at + 6, table->primary_key_column);
     put_u16(at + 8, (uint16_t)table->column_count);
     at[10] = table->has_identity ? FLAG_IDENTITY : 0;
-    put_u64(at + 11, table->row_count);
-    put_u64(at + 19, table->next_identity);
-    put_u32(at + 27, table->heap_root);
-    put_u32(at + 31, table->primary_root);
+    le_put_u64(at + 11, table->row_count);
+    le_put_u64(at + 19, table->next_identity);
+    le_put_u32(at + 27, table->heap_root);
+    le_put_u32(at + 31, table->primary_root);
     at += TABLE_FIXED_BYTES;
     memcpy(at, table->names, table->name_bytes);
     at += table->name_bytes;
@@ -548,27 +539,27 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
     memcpy(buffer, "LRCT", 4);
     put_u16(buffer + 4, catalog->index_count > 0 ? INDEX_FORMAT_VERSION : FORMAT_VERSION);
     put_u16(buffer + 6, 0);
-    put_u32(buffer + 8, (uint32_t)total);
-    put_u64(buffer + 12, catalog->generation);
-    put_u32(buffer + 20, catalog->next_table_id);
-    put_u32(buffer + 24, (uint32_t)catalog->count);
+    le_put_u32(buffer + 8, (uint32_t)total);
+    le_put_u64(buffer + 12, catalog->generation);
+    le_put_u32(buffer + 20, catalog->next_table_id);
+    le_put_u32(buffer + 24, (uint32_t)catalog->count);
     uint8_t *at = buffer + HEADER_BYTES;
     for (size_t i = 0; i < catalog->count; i++) at = encode_table(at, &catalog->tables[i]);
     if (catalog->index_count > 0) {
-        put_u32(at, (uint32_t)catalog->index_count);
+        le_put_u32(at, (uint32_t)catalog->index_count);
         at += 4;
         for (size_t i = 0; i < catalog->index_count; i++) {
             const index_t *index = &catalog->indexes[i];
-            put_u32(at, index->table_id);
+            le_put_u32(at, index->table_id);
             put_u16(at + 4, index->column);
             put_u16(at + 6, (uint16_t)index->name_bytes);
             at[8] = index->unique ? 1 : 0;
-            put_u32(at + 9, index->root);
+            le_put_u32(at + 9, index->root);
             memcpy(at + INDEX_FIXED_BYTES, index->name, index->name_bytes);
             at += INDEX_FIXED_BYTES + index->name_bytes;
         }
     }
-    put_u32(at, checksum(buffer, (size_t)(at - buffer)));
+    le_put_u32(at, checksum(buffer, (size_t)(at - buffer)));
     *bytes = buffer;
     *size = total;
     return CATALOG_OK;

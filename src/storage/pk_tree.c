@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "storage/pk_tree.h"
+#include "storage/le.h"
 
 #define LEVEL_ANY (-1)
 
@@ -26,29 +27,6 @@ typedef struct {
 
 /* ── 바이트 보조 ── */
 
-static uint32_t get_u32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
-static void put_u32(uint8_t *p, uint32_t v)
-{
-    for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i));
-}
-
-static int64_t get_i64(const uint8_t *p)
-{
-    uint64_t v = 0;
-    for (unsigned i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i);
-    return (int64_t)v;
-}
-
-static void put_i64(uint8_t *p, int64_t value)
-{
-    uint64_t v = (uint64_t)value;
-    for (unsigned i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
-}
-
 /* ── 노드 접근 ── */
 
 static size_t entry_bytes(uint8_t level)
@@ -68,21 +46,21 @@ static uint8_t *entry_at(node_t *node, uint32_t index)
 
 static int64_t key_at(const node_t *node, uint32_t index)
 {
-    return get_i64(node->body + PK_TREE_HEADER_BYTES + (size_t)index * entry_bytes(node->level));
+    return (int64_t)le_get_u64(node->body + PK_TREE_HEADER_BYTES + (size_t)index * entry_bytes(node->level));
 }
 
 static heap_locator_t locator_at(const node_t *node, uint32_t index)
 {
     const uint8_t *entry = node->body + PK_TREE_HEADER_BYTES + (size_t)index * PK_TREE_LEAF_ENTRY_BYTES;
-    return (heap_locator_t){get_u32(entry + 8),
+    return (heap_locator_t){le_get_u32(entry + 8),
                             (uint16_t)((uint16_t)entry[12] | (uint16_t)entry[13] << 8)};
 }
 
 static void set_leaf(node_t *node, uint32_t index, int64_t key, heap_locator_t locator)
 {
     uint8_t *entry = entry_at(node, index);
-    put_i64(entry, key);
-    put_u32(entry + 8, locator.directory_index);
+    le_put_u64(entry, (uint64_t)key);
+    le_put_u32(entry + 8, locator.directory_index);
     entry[12] = (uint8_t)locator.slot;
     entry[13] = (uint8_t)(locator.slot >> 8);
     entry[14] = 0;
@@ -91,14 +69,14 @@ static void set_leaf(node_t *node, uint32_t index, int64_t key, heap_locator_t l
 
 static uint32_t child_at(const node_t *node, uint32_t index)
 {
-    return get_u32(node->body + PK_TREE_HEADER_BYTES + (size_t)index * PK_TREE_NODE_ENTRY_BYTES + 8);
+    return le_get_u32(node->body + PK_TREE_HEADER_BYTES + (size_t)index * PK_TREE_NODE_ENTRY_BYTES + 8);
 }
 
 static void set_child(node_t *node, uint32_t index, int64_t key, uint32_t child)
 {
     uint8_t *entry = entry_at(node, index);
-    put_i64(entry, key);
-    put_u32(entry + 8, child);
+    le_put_u64(entry, (uint64_t)key);
+    le_put_u32(entry + 8, child);
 }
 
 static bool same_locator(heap_locator_t a, heap_locator_t b)
@@ -157,12 +135,12 @@ static pk_status_t load_node(const pk_tree_io_t *io, uint32_t table_id, uint32_t
     if (status != PK_OK) return status;
     if (memcmp(node->body, PK_TREE_MAGIC, 4) != 0 ||
         ((uint32_t)node->body[4] | (uint32_t)node->body[5] << 8) != PK_TREE_VERSION ||
-        get_u32(node->body + 8) != table_id) {
+        le_get_u32(node->body + 8) != table_id) {
         return PK_CORRUPT;
     }
     node->level = node->body[6];
-    node->count = get_u32(node->body + 12);
-    node->stamp = get_u32(node->body + 16);
+    node->count = le_get_u32(node->body + 12);
+    node->stamp = le_get_u32(node->body + 16);
     if (!node_valid(node) || (expected_level != LEVEL_ANY && node->level != expected_level)) return PK_CORRUPT;
     return PK_OK;
 }
@@ -180,9 +158,9 @@ static pk_status_t store_node(const pk_tree_io_t *io, uint32_t table_id, node_t 
     memcpy(node->body, PK_TREE_MAGIC, 4);
     node->body[4] = (uint8_t)PK_TREE_VERSION;
     node->body[6] = node->level;
-    put_u32(node->body + 8, table_id);
-    put_u32(node->body + 12, node->count);
-    put_u32(node->body + 16, node->stamp);
+    le_put_u32(node->body + 8, table_id);
+    le_put_u32(node->body + 12, node->count);
+    le_put_u32(node->body + 16, node->stamp);
     memset(node->body + 20, 0, 4);
 
     uint32_t target = old_page;

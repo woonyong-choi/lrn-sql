@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "storage/page_file.h"
+#include "storage/le.h"
 
 #include "page_cache.h"
 #include "storage/checksum.h"
@@ -127,35 +128,6 @@ static void put_u16(uint8_t *at, uint16_t value)
     at[1] = (uint8_t)(value >> 8);
 }
 
-static void put_u32(uint8_t *at, uint32_t value)
-{
-    for (unsigned i = 0; i < 4; i++) at[i] = (uint8_t)(value >> (i * 8));
-}
-
-static void put_u64(uint8_t *at, uint64_t value)
-{
-    for (unsigned i = 0; i < 8; i++) at[i] = (uint8_t)(value >> (i * 8));
-}
-
-static uint16_t get_u16(const uint8_t *at)
-{
-    return (uint16_t)((uint16_t)at[0] | (uint16_t)at[1] << 8);
-}
-
-static uint32_t get_u32(const uint8_t *at)
-{
-    uint32_t value = 0;
-    for (unsigned i = 0; i < 4; i++) value |= (uint32_t)at[i] << (i * 8);
-    return value;
-}
-
-static uint64_t get_u64(const uint8_t *at)
-{
-    uint64_t value = 0;
-    for (unsigned i = 0; i < 8; i++) value |= (uint64_t)at[i] << (i * 8);
-    return value;
-}
-
 /* 체크섬 필드(28..31)를 뺀 페이지 전체의 CRC32C. 패딩 손상도 잡는다. */
 static uint32_t page_checksum(const uint8_t *page)
 {
@@ -169,11 +141,11 @@ static void encode_page(uint8_t *page, page_kind_t kind, uint32_t page_id, uint3
     memcpy(page, "LRPG", 4);
     put_u16(page + 4, ENVELOPE_VERSION);
     put_u16(page + 6, (uint16_t)kind);
-    put_u32(page + 8, page_id);
-    put_u32(page + 12, table_id);
-    put_u32(page + 16, body_len);
+    le_put_u32(page + 8, page_id);
+    le_put_u32(page + 12, table_id);
+    le_put_u32(page + 16, body_len);
     memcpy(page + PAGE_ENVELOPE_BYTES, body, body_len);
-    put_u32(page + 28, page_checksum(page));
+    le_put_u32(page + 28, page_checksum(page));
 }
 
 typedef enum {
@@ -198,16 +170,16 @@ static bool all_zero(const uint8_t *bytes, size_t size) { return memcmp(bytes, Z
 static slot_state_t decode_envelope(const uint8_t *page, uint32_t expect_id, envelope_t *out)
 {
     if (memcmp(page, "LRPG", 4) != 0) return SLOT_DAMAGED;
-    if (get_u32(page + 28) != page_checksum(page)) return SLOT_DAMAGED;
-    if (get_u16(page + 4) != ENVELOPE_VERSION) return SLOT_UNSUPPORTED;
-    uint32_t body_len = get_u32(page + 16);
-    if (get_u32(page + 8) != expect_id || body_len > PAGE_BODY_BYTES) return SLOT_DAMAGED;
+    if (le_get_u32(page + 28) != page_checksum(page)) return SLOT_DAMAGED;
+    if (le_get_u16(page + 4) != ENVELOPE_VERSION) return SLOT_UNSUPPORTED;
+    uint32_t body_len = le_get_u32(page + 16);
+    if (le_get_u32(page + 8) != expect_id || body_len > PAGE_BODY_BYTES) return SLOT_DAMAGED;
     if (!all_zero(page + 20, 8) || !all_zero(page + PAGE_ENVELOPE_BYTES + body_len,
                                              PAGE_FILE_PAGE_BYTES - PAGE_ENVELOPE_BYTES - body_len)) {
         return SLOT_DAMAGED;
     }
-    out->kind = (page_kind_t)get_u16(page + 6);
-    out->table_id = get_u32(page + 12);
+    out->kind = (page_kind_t)le_get_u16(page + 6);
+    out->table_id = le_get_u32(page + 12);
     out->body_len = body_len;
     return SLOT_VALID;
 }
@@ -235,18 +207,18 @@ static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file
     if (envelope.kind != PAGE_KIND_CONTROL || envelope.table_id != 0) return SLOT_DAMAGED;
     const uint8_t *body = page + PAGE_ENVELOPE_BYTES;
     if (envelope.body_len < 12 || memcmp(body, FILE_MAGIC, sizeof(FILE_MAGIC)) != 0) return SLOT_UNSUPPORTED;
-    if (get_u32(body + 8) != PAGE_FILE_FORMAT_VERSION) return SLOT_UNSUPPORTED;
+    if (le_get_u32(body + 8) != PAGE_FILE_FORMAT_VERSION) return SLOT_UNSUPPORTED;
     if (envelope.body_len < CONTROL_HEADER_BYTES) return SLOT_DAMAGED;
-    if (get_u32(body + 12) != PAGE_FILE_PAGE_BYTES) return SLOT_UNSUPPORTED;
-    if (get_u32(body + 16) != BYTE_ORDER_MARK) return SLOT_UNSUPPORTED;
+    if (le_get_u32(body + 12) != PAGE_FILE_PAGE_BYTES) return SLOT_UNSUPPORTED;
+    if (le_get_u32(body + 16) != BYTE_ORDER_MARK) return SLOT_UNSUPPORTED;
     page_file_control_t control = {
-        .generation = get_u64(body + 20),
-        .page_count = get_u32(body + 28),
-        .catalog_head = get_u32(body + 36),
-        .catalog_size = get_u32(body + 40),
-        .catalog_generation = get_u64(body + 44),
+        .generation = le_get_u64(body + 20),
+        .page_count = le_get_u32(body + 28),
+        .catalog_head = le_get_u32(body + 36),
+        .catalog_size = le_get_u32(body + 40),
+        .catalog_generation = le_get_u64(body + 44),
     };
-    if (get_u32(body + 32) != 0) return SLOT_DAMAGED;
+    if (le_get_u32(body + 32) != 0) return SLOT_DAMAGED;
     if (control.generation == 0 || control.generation % 2 != slot) return SLOT_DAMAGED;
     if (control.page_count < PAGE_FILE_CONTROL_PAGES || control.page_count > PAGE_FILE_MAX_PAGES) {
         return SLOT_DAMAGED;
@@ -259,8 +231,8 @@ static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file
          control.catalog_head >= control.page_count)) {
         return SLOT_DAMAGED;
     }
-    free_header_t free_list = {get_u32(body + 52), get_u32(body + 56), get_u32(body + 60), get_u32(body + 64),
-                               get_u32(body + 68)};
+    free_header_t free_list = {le_get_u32(body + 52), le_get_u32(body + 56), le_get_u32(body + 60), le_get_u32(body + 64),
+                               le_get_u32(body + 68)};
     uint64_t total = (uint64_t)free_list.reusable + free_list.aging;
     if (total > control.page_count - PAGE_FILE_CONTROL_PAGES || free_list.manifest > MANIFEST_MAX ||
         envelope.body_len != CONTROL_HEADER_BYTES + 8u * free_list.manifest + 4u * inline_ids(total) ||
@@ -282,19 +254,19 @@ static void encode_control_header(uint8_t *body, const page_file_control_t *cont
 {
     memset(body, 0, CONTROL_HEADER_BYTES);
     memcpy(body, FILE_MAGIC, sizeof(FILE_MAGIC));
-    put_u32(body + 8, PAGE_FILE_FORMAT_VERSION);
-    put_u32(body + 12, PAGE_FILE_PAGE_BYTES);
-    put_u32(body + 16, BYTE_ORDER_MARK);
-    put_u64(body + 20, control->generation);
-    put_u32(body + 28, control->page_count);
-    put_u32(body + 36, control->catalog_head);
-    put_u32(body + 40, control->catalog_size);
-    put_u64(body + 44, control->catalog_generation);
-    put_u32(body + 52, free_list->reusable);
-    put_u32(body + 56, free_list->aging);
-    put_u32(body + 60, free_list->chain_head);
-    put_u32(body + 64, free_list->chain_count);
-    put_u32(body + 68, free_list->manifest);
+    le_put_u32(body + 8, PAGE_FILE_FORMAT_VERSION);
+    le_put_u32(body + 12, PAGE_FILE_PAGE_BYTES);
+    le_put_u32(body + 16, BYTE_ORDER_MARK);
+    le_put_u64(body + 20, control->generation);
+    le_put_u32(body + 28, control->page_count);
+    le_put_u32(body + 36, control->catalog_head);
+    le_put_u32(body + 40, control->catalog_size);
+    le_put_u64(body + 44, control->catalog_generation);
+    le_put_u32(body + 52, free_list->reusable);
+    le_put_u32(body + 56, free_list->aging);
+    le_put_u32(body + 60, free_list->chain_head);
+    le_put_u32(body + 64, free_list->chain_count);
+    le_put_u32(body + 68, free_list->manifest);
 }
 
 /* ── 저수준 I/O: EINTR·짧은 I/O·EOF·ENOSPC를 처리한다 ── */
@@ -523,12 +495,12 @@ static page_file_status_t commit_complete(const page_file_t *file, const uint8_t
     const uint8_t *entries = control_page + PAGE_ENVELOPE_BYTES + CONTROL_HEADER_BYTES;
     uint8_t page[PAGE_FILE_PAGE_BYTES];
     for (uint32_t i = 0; i < header->manifest; i++) {
-        uint32_t id = get_u32(entries + 8u * i), sum = get_u32(entries + 8u * i + 4);
+        uint32_t id = le_get_u32(entries + 8u * i), sum = le_get_u32(entries + 8u * i + 4);
         if (id < PAGE_FILE_CONTROL_PAGES || id >= control->page_count) return PAGE_FILE_CORRUPT;
         page_file_status_t status = read_full(file, page, PAGE_FILE_PAGE_BYTES, (uint64_t)id * PAGE_FILE_PAGE_BYTES);
         if (status != PAGE_FILE_OK) return status;
         envelope_t envelope;
-        if (get_u32(page + 28) != sum || decode_envelope(page, id, &envelope) != SLOT_VALID) return PAGE_FILE_CORRUPT;
+        if (le_get_u32(page + 28) != sum || decode_envelope(page, id, &envelope) != SLOT_VALID) return PAGE_FILE_CORRUPT;
     }
     return PAGE_FILE_OK;
 }
@@ -724,7 +696,7 @@ static void note_write(page_file_t *file, uint32_t page_id, const uint8_t *page)
         file->needs_barrier = true;
         return;
     }
-    uint32_t sum = get_u32(page + 28);
+    uint32_t sum = le_get_u32(page + 28);
     for (uint32_t i = 0; i < file->manifest_len; i++) {
         if (file->manifest_ids[i] != page_id) continue;
         file->manifest_sums[i] = sum;
@@ -1013,8 +985,8 @@ static page_file_status_t load_free_list(page_file_t *file, const uint8_t *contr
             file->state[next] = PS_FRESH;
             list_push(&file->chain, next);
             const uint8_t *body = page + PAGE_ENVELOPE_BYTES;
-            next = get_u32(body);
-            count = get_u32(body + 4);
+            next = le_get_u32(body);
+            count = le_get_u32(body + 4);
             ids = body + CHAIN_HEADER_BYTES;
             if (count == 0 || count > CHAIN_IDS || count > total - at) {
                 status = PAGE_FILE_CORRUPT;
@@ -1022,7 +994,7 @@ static page_file_status_t load_free_list(page_file_t *file, const uint8_t *contr
             }
         }
         for (uint32_t i = 0; i < count; i++, at++) {
-            uint32_t id = get_u32(ids + 4u * i);
+            uint32_t id = le_get_u32(ids + 4u * i);
             if (!data_page_in_range(file, id) || file->state[id] != PS_USED) {
                 status = PAGE_FILE_CORRUPT;
                 break;
@@ -1072,7 +1044,7 @@ static uint32_t cursor_next(free_cursor_t *cursor)
 
 static void put_ids(uint8_t *at, free_cursor_t *cursor, uint32_t count)
 {
-    for (uint32_t i = 0; i < count; i++) put_u32(at + 4u * i, cursor_next(cursor));
+    for (uint32_t i = 0; i < count; i++) le_put_u32(at + 4u * i, cursor_next(cursor));
 }
 
 /* commit이 받은 사슬 페이지를 돌려준다(새 페이지라 곧바로 재사용 목록으로 간다) */
@@ -1137,8 +1109,8 @@ page_file_status_t page_file_commit(page_file_t *file)
     for (size_t i = 0; i < next_chain.len && status == PAGE_FILE_OK; i++) {
         uint32_t count = left < CHAIN_IDS ? (uint32_t)left : CHAIN_IDS;
         memset(chain_body, 0, sizeof(chain_body));
-        put_u32(chain_body, i + 1 < next_chain.len ? next_chain.items[i + 1] : PAGE_FILE_NO_PAGE);
-        put_u32(chain_body + 4, count);
+        le_put_u32(chain_body, i + 1 < next_chain.len ? next_chain.items[i + 1] : PAGE_FILE_NO_PAGE);
+        le_put_u32(chain_body + 4, count);
         put_ids(chain_body + CHAIN_HEADER_BYTES, &cursor, count);
         left -= count;
         uint32_t id = next_chain.items[i];
@@ -1170,8 +1142,8 @@ page_file_status_t page_file_commit(page_file_t *file)
     if (!barrier) header.manifest = file->manifest_len;
     encode_control_header(body, &next, &header);
     for (uint32_t i = 0; i < header.manifest; i++) {
-        put_u32(body + CONTROL_HEADER_BYTES + 8u * i, file->manifest_ids[i]);
-        put_u32(body + CONTROL_HEADER_BYTES + 8u * i + 4, file->manifest_sums[i]);
+        le_put_u32(body + CONTROL_HEADER_BYTES + 8u * i, file->manifest_ids[i]);
+        le_put_u32(body + CONTROL_HEADER_BYTES + 8u * i + 4, file->manifest_sums[i]);
     }
     uint32_t ids_at = CONTROL_HEADER_BYTES + 8u * header.manifest;
     cursor = (free_cursor_t){{&file->reusable, &file->aging, &file->pending, &file->chain}, 0, 0};
