@@ -200,14 +200,19 @@ def judge(query: dict[str, Any], results: dict[str, tuple[str, Any]]) -> tuple[s
     return "PASS", ""
 
 
-def run_case(case: dict[str, Any], workdir: Path, dsn: str | None) -> list[Verdict]:
-    engines: dict[str, Any] = {"ours": Lrn(workdir), "sqlite": Sqlite()}
+def run_case(case: dict[str, Any], workdir: Path, dsn: str | None, *, require_postgres: bool) -> list[Verdict]:
     pg_note = ""
+    postgres = None
     if dsn:
         try:
-            engines["postgres"] = Postgres(dsn)
-        except Exception as err:  # noqa: BLE001
-            pg_note = f"postgres 연결 실패: {err}"
+            postgres = Postgres(dsn)
+        except Exception as err:  # noqa: BLE001 - 연결 실패의 종류와 상관없이 같은 판정이다
+            pg_note = f"postgres 연결 실패: {str(err).splitlines()[0]}"
+            if require_postgres:
+                return [Verdict(case["name"], "(연결)", "FAIL", pg_note)]
+    engines: dict[str, Any] = {"ours": Lrn(workdir), "sqlite": Sqlite()}
+    if postgres is not None:
+        engines["postgres"] = postgres
     verdicts: list[Verdict] = []
     try:
         for sql in case.get("setup", []):
@@ -244,7 +249,7 @@ def main() -> int:
         for case in CASES:
             if args.only and args.only not in case["name"]:
                 continue
-            for verdict in run_case(case, Path(tmp), args.dsn or None):
+            for verdict in run_case(case, Path(tmp), args.dsn or None, require_postgres=args.require_postgres):
                 counts[verdict.outcome] = counts.get(verdict.outcome, 0) + 1
                 if verdict.outcome != "PASS":
                     print(f"  {verdict.outcome} [{verdict.case}] {verdict.sql}\n      {verdict.detail}")
