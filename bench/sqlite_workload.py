@@ -365,7 +365,7 @@ def _scalar(result: dict[str, Any]) -> int:
 # vars: t = 강제 종료 횟수, r = 다시 열기 비용, q = 검증 문장 비용, f = 파일 크기
 # basis: estimate
 def _recovery(engine: str, path: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
-    """진행 중인 변경 문장 도중 프로세스를 SIGKILL로 끝내고, 다시 열어 첫 응답까지의 시간과 원자성을 확인한다."""
+    """진행 중인 변경 문장 도중 프로세스를 SIGKILL로 끝내고, 다시 열어 기본 키 조회 하나에 답할 때까지의 시간과 원자성을 확인한다."""
     timeout = config["statement_timeout_seconds"]
     randomizer = random.Random(config["seed"])
     trials = []
@@ -383,8 +383,9 @@ def _recovery(engine: str, path: Path, config: dict[str, Any]) -> list[dict[str,
         size = path.stat().st_size
         began = time.monotonic_ns()
         reopened = Worker(engine, path)
-        after = _scalar(reopened.execute("SELECT COUNT(*) FROM items", timeout))
+        reopened.execute("SELECT label FROM groups WHERE id = 0", timeout)
         reopen_ns = time.monotonic_ns() - began
+        after = _scalar(reopened.execute("SELECT COUNT(*) FROM items", timeout))
         crashed = _scalar(reopened.execute("SELECT COUNT(*) FROM items WHERE note = 'crash'", timeout))
         reopened.close()
         if after != before or crashed not in (0, marked):

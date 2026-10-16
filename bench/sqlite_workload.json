@@ -10,7 +10,7 @@
   "mixed_operations": 2000,
   "mixed": "point 60%, 50-row range 10%, update by id 20%, insert 7%, delete by id 3%; one autocommit statement each, results compared every statement",
   "recovery_trials": 5,
-  "recovery": "SIGKILL 0-20 ms after sending an UPDATE of about half the rows; reopen time is process start to first COUNT(*) answer; acknowledged rows and all-or-nothing UPDATE are checked",
+  "recovery": "SIGKILL 0-20 ms after sending an UPDATE of about half the rows; reopen time is process start to the answer of one primary-key lookup; acknowledged rows and all-or-nothing UPDATE are checked",
   "memory_guard": "native encoded result capped at 512 MiB; observed peak RSS over 2 GiB aborts after a statement; macOS rejects RLIMIT_DATA, not an OS hard cap",
   "build_flags": ["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror"],
   "measurement": "native prepare/parse, execute, all typed rows encoded, result release; excludes IPC, row sorting, oracle comparison",
