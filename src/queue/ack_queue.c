@@ -1,7 +1,7 @@
 /*
  * ack_queue.c — 선택형 ACK 큐(#140). 세션(session.h)의 SQL과 트랜잭션 API만 쓴다.
  *
- * 테이블 ackq_<name>: id(identity), state(0 READY 1 LEASED 2 ACKED 3 FAILED), ready_at, lease_until(밀리초),
+ * 테이블 tote_queue_<name>: id(identity), state(0 READY 1 LEASED 2 ACKED 3 FAILED), ready_at, lease_until(밀리초),
  * fence(claim마다 +1), attempts(claim 횟수), idem(idempotency key, 없으면 ''), payload(BLOB), note(마지막 이유).
  * 상태별 조회는 state 보조 색인(같은 상태 안에서 id 순서)과 ORDER BY id LIMIT으로 맞는 행 k개만 읽는다.
  */
@@ -283,7 +283,7 @@ static ackq_status_t make_queue(session_t *session, const ackq_options_t *option
     if (queue == NULL) return ACKQ_NOMEM;
     queue->db = session_database(session);
     snprintf(queue->name, sizeof(queue->name), "%s", options->name);
-    snprintf(queue->table, sizeof(queue->table), "ackq_%s", options->name);
+    snprintf(queue->table, sizeof(queue->table), "tote_queue_%s", options->name);
     queue->max_attempts = options->max_attempts;
     queue->begin_timeout_ms = options->begin_timeout_ms;
     queue->now_ms = options->now_ms;

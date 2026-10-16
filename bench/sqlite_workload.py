@@ -262,7 +262,7 @@ def _complex_queries(
             raise RuntimeError(f"invalid SQLite reference query: {sql}")
         if results["mini"]["error"] not in (0, 1, 2):
             raise RuntimeError(
-                f"unexpected lrn-sql failure: {sql}: {results['mini']['message']}"
+                f"unexpected ToteDB failure: {sql}: {results['mini']['message']}"
             )
         status = "unsupported" if results["mini"]["error"] else "supported"
         if status == "supported":

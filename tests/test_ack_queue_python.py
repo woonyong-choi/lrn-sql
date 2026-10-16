@@ -1,6 +1,6 @@
 """Python 어댑터 시험(#140 완료 조건 1과 2의 Python 쪽). 합성 데이터만 쓴다.
 
-공유 라이브러리가 필요하다: `make test-ack-queue-python`이 빌드하고 LRN_ACKQ_LIB로 알려 준다.
+공유 라이브러리가 필요하다: `make test-ack-queue-python`이 빌드하고 TOTEDB_LIB로 알려 준다.
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from lrn_ackq import (
-    AckQueue,
+from totedb import (
+    Queue,
     BusyError,
     ClaimToken,
     ConflictError,
@@ -23,7 +23,7 @@ from lrn_ackq import (
     StaleError,
     UncertainError,
 )
-from lrn_ackq.errors import raise_for_status
+from totedb.errors import raise_for_status
 
 
 class FakeClock:
@@ -55,23 +55,23 @@ def test_database_without_queue_supports_crud_and_creates_no_queue_table(db: Dat
 
     assert db.execute("SELECT id, body FROM notes").rows == ((1, "다라"),)
     with pytest.raises(SqlError):
-        db.execute("SELECT id FROM ackq_jobs")
+        db.execute("SELECT id FROM tote_queue_jobs")
     with pytest.raises(NotInstalledError):
-        AckQueue(db, "jobs", install=False)
+        Queue(db, "jobs", install=False)
     db.execute("DELETE FROM notes WHERE id = 1")
     assert db.execute("SELECT id FROM notes").rows == ()
 
 
 def test_queue_install_creates_table_only_when_requested(db: Database) -> None:
-    queue = AckQueue(db, "jobs")
+    queue = Queue(db, "jobs")
 
-    assert db.execute("SELECT id FROM ackq_jobs").rows == ()
+    assert db.execute("SELECT id FROM tote_queue_jobs").rows == ()
     queue.close()
-    AckQueue(db, "jobs", install=False).close()
+    Queue(db, "jobs", install=False).close()
 
 
 def test_queue_put_get_ack_roundtrips_payload_and_fence(db: Database, clock: FakeClock) -> None:
-    queue = AckQueue(db, "jobs", clock=clock)
+    queue = Queue(db, "jobs", clock=clock)
 
     first = queue.put(b"alpha")
     claim = queue.get(500)
@@ -85,7 +85,7 @@ def test_queue_put_get_ack_roundtrips_payload_and_fence(db: Database, clock: Fak
 
 
 def test_queue_nack_retry_delay_and_terminal_failure(db: Database, clock: FakeClock) -> None:
-    queue = AckQueue(db, "jobs", max_attempts=2, clock=clock)
+    queue = Queue(db, "jobs", max_attempts=2, clock=clock)
     queue.put(b"retry")
 
     claim = queue.get(1000)
@@ -106,7 +106,7 @@ def test_queue_nack_retry_delay_and_terminal_failure(db: Database, clock: FakeCl
 
 
 def test_queue_stale_claim_after_lease_expiry_is_rejected(db: Database, clock: FakeClock) -> None:
-    queue = AckQueue(db, "jobs", clock=clock)
+    queue = Queue(db, "jobs", clock=clock)
     queue.put(b"work")
     old = queue.get(100)
     assert old is not None
@@ -126,7 +126,7 @@ def test_queue_stale_claim_after_lease_expiry_is_rejected(db: Database, clock: F
 
 
 def test_queue_update_changes_payload_before_and_during_claim(db: Database, clock: FakeClock) -> None:
-    queue = AckQueue(db, "jobs", clock=clock)
+    queue = Queue(db, "jobs", clock=clock)
     item = queue.put(b"v1")
 
     queue.update(item.id, b"v2")
@@ -141,7 +141,7 @@ def test_queue_update_changes_payload_before_and_during_claim(db: Database, cloc
 
 
 def test_queue_put_idempotency_key_same_payload_dedupes_and_different_conflicts(db: Database) -> None:
-    queue = AckQueue(db, "jobs")
+    queue = Queue(db, "jobs")
 
     first = queue.put(b"same", "key-1")
     again = queue.put(b"same", "key-1")
@@ -153,7 +153,7 @@ def test_queue_put_idempotency_key_same_payload_dedupes_and_different_conflicts(
 
 
 def test_queue_list_items_pages_without_payload_copy(db: Database) -> None:
-    queue = AckQueue(db, "jobs")
+    queue = Queue(db, "jobs")
     for index in range(7):
         queue.put(f"payload-{index}".encode())
 
@@ -168,7 +168,7 @@ def test_queue_list_items_pages_without_payload_copy(db: Database) -> None:
 def test_queue_restart_preserves_state_and_fence_continues(tmp_path: Path, clock: FakeClock) -> None:
     path = tmp_path / "db.lrdb"
     with Database(path) as db:
-        queue = AckQueue(db, "jobs", clock=clock)
+        queue = Queue(db, "jobs", clock=clock)
         queue.put(b"a", "key-a")
         queue.put(b"b")
         claim_a = queue.get(5000)
@@ -179,7 +179,7 @@ def test_queue_restart_preserves_state_and_fence_continues(tmp_path: Path, clock
         queue.close()
 
     with Database(path) as db:
-        queue = AckQueue(db, "jobs", install=False, clock=clock)
+        queue = Queue(db, "jobs", install=False, clock=clock)
         assert (queue.stats().acked, queue.stats().leased) == (1, 1)
         assert queue.put(b"a", "key-a").duplicate is True
         clock.now_ms += 5000
@@ -194,7 +194,7 @@ def test_queue_restart_preserves_state_and_fence_continues(tmp_path: Path, clock
 def test_queue_ack_in_same_transaction_commits_or_rolls_back_with_business_update(
     db: Database, clock: FakeClock
 ) -> None:
-    queue = AckQueue(db, "jobs", clock=clock)
+    queue = Queue(db, "jobs", clock=clock)
     db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT NOT NULL)")
     db.execute("INSERT INTO orders VALUES (1, 'new')")
     queue.put(b"order-1")
@@ -215,7 +215,7 @@ def test_queue_ack_in_same_transaction_commits_or_rolls_back_with_business_updat
 
 
 def test_queue_transaction_from_other_database_is_rejected(db: Database, tmp_path: Path) -> None:
-    queue = AckQueue(db, "jobs")
+    queue = Queue(db, "jobs")
     queue.put(b"x")
     claim = queue.get(1000)
     assert claim is not None
@@ -235,12 +235,12 @@ def test_transaction_begin_while_writer_open_raises_busy_after_timeout(db: Datab
 
 def test_database_close_closes_its_queues_and_busy_transaction_keeps_it_open(tmp_path: Path) -> None:
     db = Database(tmp_path / "db.lrdb", busy_timeout_s=0.05)
-    queue = AckQueue(db, "jobs")
+    queue = Queue(db, "jobs")
     txn = db.begin()
 
     with pytest.raises(BusyError):
         db.close()
-    assert db.execute("SELECT id FROM ackq_jobs").rows == ()
+    assert db.execute("SELECT id FROM tote_queue_jobs").rows == ()
     txn.rollback()
     db.close()
 
@@ -250,7 +250,7 @@ def test_database_close_closes_its_queues_and_busy_transaction_keeps_it_open(tmp
 
 def test_queue_concurrent_get_gives_each_item_to_one_worker(db: Database) -> None:
     db.busy_timeout_s = 10.0
-    queue = AckQueue(db, "jobs")
+    queue = Queue(db, "jobs")
     for index in range(30):
         queue.put(f"p{index}".encode())
     seen: list[int] = []
@@ -285,7 +285,7 @@ def test_raise_for_status_maps_status_to_exception(status: int, name: str, error
 
 
 def test_claim_token_ack_works_for_explicit_id_and_fence(db: Database, clock: FakeClock) -> None:
-    queue = AckQueue(db, "jobs", clock=clock)
+    queue = Queue(db, "jobs", clock=clock)
     item = queue.put(b"t")
     claim = queue.get(1000)
     assert claim is not None

@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Protocol, Union
 
-from lrn_ackq._native import Param, load_library
-from lrn_ackq.errors import (
+from totedb._native import Param, load_library
+from totedb.errors import (
     STATUS_BUSY,
     BusyError,
     InvalidArgumentError,
@@ -70,7 +70,7 @@ class Result:
 
 def status_name(status: int) -> str:
     """상태 값의 이름(메시지용)."""
-    return str(_lib.lrn_status_name(status).decode("ascii"))
+    return str(_lib.tote_status_name(status).decode("ascii"))
 
 
 def check(status: int) -> None:
@@ -155,7 +155,7 @@ def _decode_cell(reader: _Reader) -> SqlValue:
 
 
 def decode_result(data: bytes) -> Result:
-    """lrndb_exec가 만든 버퍼를 Result로 바꾼다.
+    """tote_exec가 만든 버퍼를 Result로 바꾼다.
 
     Raises:
         SqlError: 버퍼가 오류 결과일 때.
@@ -189,7 +189,7 @@ def run_sql(
     array, keep = _pack_params(params)
     out = ctypes.c_void_p()
     size = ctypes.c_size_t()
-    status = _lib.lrndb_exec(
+    status = _lib.tote_exec(
         db_handle, txn_handle, sql.encode("utf-8"), array, len(params), ctypes.byref(out), ctypes.byref(size)
     )
     del keep
@@ -197,7 +197,7 @@ def run_sql(
     try:
         return decode_result(ctypes.string_at(out, size.value))
     finally:
-        _lib.lrn_free(out)
+        _lib.tote_free(out)
 
 
 class Database:
@@ -211,7 +211,7 @@ class Database:
         busy_timeout_s: float = DEFAULT_BUSY_TIMEOUT_S,
     ) -> None:
         handle = ctypes.c_void_p()
-        check(_lib.lrndb_open(os.fsencode(path), 1 if create else 0, ctypes.byref(handle)))
+        check(_lib.tote_open(os.fsencode(path), 1 if create else 0, ctypes.byref(handle)))
         self._handle: ctypes.c_void_p | None = handle
         self._queues: set[Closable] = set()
         self.busy_timeout_s = busy_timeout_s
@@ -247,7 +247,7 @@ class Database:
             BusyError: 기다린 시간 안에 시작하지 못했을 때.
         """
         out = ctypes.c_void_p()
-        status = retry_busy(lambda: _lib.lrndb_begin(self.handle, ctypes.byref(out)), self.busy_timeout_s)
+        status = retry_busy(lambda: _lib.tote_begin(self.handle, ctypes.byref(out)), self.busy_timeout_s)
         if status == STATUS_BUSY:
             raise BusyError("another writer holds the database", status=status)
         check(status)
@@ -260,7 +260,7 @@ class Database:
         반영하지 않는다. 게시를 시작한 문장은 취소와 무관하게 끝난다. 끝나는 순간과 겹친 요청은 같은 세션의
         다음 문장 하나에 적용될 수 있다.
         """
-        _lib.lrndb_cancel(self.handle)
+        _lib.tote_cancel(self.handle)
 
     def register_queue(self, queue: Closable) -> None:
         """이 DB를 쓰는 큐를 등록한다. DB를 닫을 때 먼저 닫힌다(큐는 DB보다 오래 살 수 없다)."""
@@ -276,7 +276,7 @@ class Database:
             return
         for queue in list(self._queues):
             queue.close()
-        status = _lib.lrndb_close(ctypes.byref(self._handle))
+        status = _lib.tote_close(ctypes.byref(self._handle))
         check(status)
         self._handle = None
 
@@ -306,7 +306,7 @@ class Transaction:
     @property
     def is_failed(self) -> bool:
         """문장 오류로 실패 상태이면 commit할 수 없고 rollback만 된다."""
-        return self._handle is not None and bool(_lib.lrndb_txn_failed(self._handle))
+        return self._handle is not None and bool(_lib.tote_txn_failed(self._handle))
 
     def execute(self, sql: str, params: Sequence[SqlValue] = ()) -> Result:
         """이 트랜잭션 안에서 문장 하나를 실행한다."""
@@ -315,12 +315,12 @@ class Transaction:
     def commit(self) -> None:
         """확정한다. 결과를 알 수 없으면 UncertainError이며 성공으로 취급하면 안 된다."""
         handle, self._handle = self.handle, None
-        check(_lib.lrndb_commit(ctypes.byref(handle)))
+        check(_lib.tote_commit(ctypes.byref(handle)))
 
     def rollback(self) -> None:
         """모두 버린다."""
         handle, self._handle = self.handle, None
-        check(_lib.lrndb_rollback(ctypes.byref(handle)))
+        check(_lib.tote_rollback(ctypes.byref(handle)))
 
     def __enter__(self) -> Transaction:
         return self

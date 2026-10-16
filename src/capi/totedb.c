@@ -1,16 +1,16 @@
 /*
- * ack_queue_capi.c — 다른 언어에서 부르는 평탄한 C 인터페이스(#140). 설명은 include/queue/ack_queue_capi.h.
+ * totedb.c — 다른 언어에서 부르는 평탄한 C 인터페이스(#140). 설명은 include/totedb.h.
  *
- * 불변 조건: 핸들을 쓰는 모든 호출은 lrndb_t의 mutex 안에서 세션을 쓴다. 결과(result_t)는 읽는 동안 database의
+ * 불변 조건: 핸들을 쓰는 모든 호출은 tote_db_t의 mutex 안에서 세션을 쓴다. 결과(result_t)는 읽는 동안 database의
  * 상태를 참조하므로 실행부터 인코딩·해제까지 같은 잠금 구간에서 끝낸다. 다른 database의 트랜잭션은 잠그거나 실행하기
  * 전에 거절한다. db가 살아 있는 큐·트랜잭션 핸들을 세어 두고 하나라도 있으면 닫지 않는다.
  * 세션: 트랜잭션 밖의 호출은 연결의 자동 commit 세션을, 트랜잭션 안의 호출은 그 트랜잭션의 세션을 쓴다. 그래서 한
  * 스레드가 트랜잭션을 연 동안 다른 스레드의 자동 commit 문장이 그 트랜잭션에 섞이지 않는다. 지금 실행 중인 세션은
- * cancel_lock 아래 running에 둔다. 세션을 닫기 전에 running을 지우므로 lrndb_cancel이 닫힌 세션을 건드리지 않는다.
+ * cancel_lock 아래 running에 둔다. 세션을 닫기 전에 running을 지우므로 tote_cancel이 닫힌 세션을 건드리지 않는다.
  */
 #define _POSIX_C_SOURCE 200809L
 
-#include "queue/ack_queue_capi.h"
+#include "totedb.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -22,7 +22,7 @@
 #include "sql/result.h"
 #include "sql/session.h"
 
-struct lrndb {
+struct tote_db {
     session_pool_t *pool;
     session_db_t *db;
     session_t *autocommit;        /* 트랜잭션 밖의 문장과 큐 연산 */
@@ -33,45 +33,45 @@ struct lrndb {
     size_t live_txns;
 };
 
-struct lrnq {
-    lrndb_t *db;
+struct tote_queue {
+    tote_db_t *db;
     ackq_t *queue;
 };
 
-struct lrntxn {
-    lrndb_t *db;
+struct tote_txn {
+    tote_db_t *db;
     session_t *session;           /* 이 트랜잭션만 쓰는 세션 */
 };
 
-static _Atomic size_t g_max_result_bytes = LRN_DEFAULT_MAX_RESULT_BYTES;
+static _Atomic size_t g_max_result_bytes = TOTE_DEFAULT_MAX_RESULT_BYTES;
 
-void lrn_set_max_result_bytes(size_t limit)
+void tote_set_max_result_bytes(size_t limit)
 {
     /* 버퍼 용량을 두 배로 키울 때 size_t가 넘치지 않도록 절반으로 제한한다 */
     atomic_store(&g_max_result_bytes, limit > SIZE_MAX / 2 ? SIZE_MAX / 2 : limit);
 }
 
-size_t lrn_max_result_bytes(void)
+size_t tote_max_result_bytes(void)
 {
     return atomic_load(&g_max_result_bytes);
 }
 
-const char *lrn_status_name(int status)
+const char *tote_status_name(int status)
 {
     switch (status) {
-        case LRN_EMPTY: return "EMPTY";
-        case LRN_DB_INVALID: return "DB_INVALID";
-        case LRN_DB_IO: return "DB_IO";
-        case LRN_DB_CORRUPT: return "DB_CORRUPT";
-        case LRN_DB_LOCKED: return "DB_LOCKED";
-        case LRN_DB_UNSUPPORTED: return "DB_UNSUPPORTED";
-        case LRN_DB_NOMEM: return "DB_NOMEM";
-        case LRN_DB_NOT_FOUND: return "DB_NOT_FOUND";
+        case TOTE_EMPTY: return "EMPTY";
+        case TOTE_DB_INVALID: return "DB_INVALID";
+        case TOTE_DB_IO: return "DB_IO";
+        case TOTE_DB_CORRUPT: return "DB_CORRUPT";
+        case TOTE_DB_LOCKED: return "DB_LOCKED";
+        case TOTE_DB_UNSUPPORTED: return "DB_UNSUPPORTED";
+        case TOTE_DB_NOMEM: return "DB_NOMEM";
+        case TOTE_DB_NOT_FOUND: return "DB_NOT_FOUND";
         default: return ackq_status_name((ackq_status_t)status);
     }
 }
 
-void lrn_free(void *pointer)
+void tote_free(void *pointer)
 {
     free(pointer);
 }
@@ -79,58 +79,58 @@ void lrn_free(void *pointer)
 static int map_database_status(database_status_t status)
 {
     switch (status) {
-        case DATABASE_OK: return LRN_OK;
-        case DATABASE_IO: return LRN_DB_IO;
-        case DATABASE_CORRUPT: return LRN_DB_CORRUPT;
-        case DATABASE_LOCKED: return LRN_DB_LOCKED;
-        case DATABASE_UNSUPPORTED: return LRN_DB_UNSUPPORTED;
-        case DATABASE_NOMEM: return LRN_DB_NOMEM;
-        default: return LRN_DB_INVALID;
+        case DATABASE_OK: return TOTE_OK;
+        case DATABASE_IO: return TOTE_DB_IO;
+        case DATABASE_CORRUPT: return TOTE_DB_CORRUPT;
+        case DATABASE_LOCKED: return TOTE_DB_LOCKED;
+        case DATABASE_UNSUPPORTED: return TOTE_DB_UNSUPPORTED;
+        case DATABASE_NOMEM: return TOTE_DB_NOMEM;
+        default: return TOTE_DB_INVALID;
     }
 }
 
 static int map_session_status(session_status_t status)
 {
     switch (status) {
-        case SESSION_OK: return LRN_OK;
+        case SESSION_OK: return TOTE_OK;
         case SESSION_BUSY: return ACKQ_BUSY;
-        case SESSION_NOMEM: return LRN_DB_NOMEM;
-        default: return LRN_DB_INVALID;
+        case SESSION_NOMEM: return TOTE_DB_NOMEM;
+        default: return TOTE_DB_INVALID;
     }
 }
 
 /* 연결의 세션 풀은 한도가 없다. 예산이 필요한 호출자는 session.h를 직접 쓴다. */
 static const session_limits_t UNLIMITED = {SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX, 0};
 
-static void close_parts(lrndb_t *handle)
+static void close_parts(tote_db_t *handle)
 {
     if (handle->autocommit != NULL) session_close(handle->autocommit);
     if (handle->db != NULL) session_pool_close_database(handle->db, NULL);
     if (handle->pool != NULL) session_pool_close(handle->pool);
 }
 
-int lrndb_open(const char *path, int create, lrndb_t **out)
+int tote_open(const char *path, int create, tote_db_t **out)
 {
-    if (out == NULL) return LRN_DB_INVALID;
+    if (out == NULL) return TOTE_DB_INVALID;
     *out = NULL;
-    if (path == NULL) return LRN_DB_INVALID;
+    if (path == NULL) return TOTE_DB_INVALID;
     if (access(path, F_OK) != 0) {
-        if (!create) return LRN_DB_NOT_FOUND;
+        if (!create) return TOTE_DB_NOT_FOUND;
         database_t *fresh = NULL;
         database_status_t created = database_create(path, &fresh);
         if (created != DATABASE_OK) return map_database_status(created);
-        if (database_close(fresh) != DATABASE_OK) return LRN_DB_IO;
+        if (database_close(fresh) != DATABASE_OK) return TOTE_DB_IO;
     }
-    lrndb_t *handle = calloc(1, sizeof(*handle));
-    if (handle == NULL) return LRN_DB_NOMEM;
+    tote_db_t *handle = calloc(1, sizeof(*handle));
+    if (handle == NULL) return TOTE_DB_NOMEM;
     int status = map_session_status(session_pool_open(&UNLIMITED, &handle->pool));
     database_status_t opened = DATABASE_OK;
-    if (status == LRN_OK) {
+    if (status == TOTE_OK) {
         session_status_t made = session_pool_open_transactional(handle->pool, path, NULL, &handle->db, &opened);
         status = opened != DATABASE_OK ? map_database_status(opened) : map_session_status(made);
     }
-    if (status == LRN_OK) status = map_session_status(session_open(handle->db, &handle->autocommit));
-    if (status != LRN_OK) {
+    if (status == TOTE_OK) status = map_session_status(session_open(handle->db, &handle->autocommit));
+    if (status != TOTE_OK) {
         close_parts(handle);
         free(handle);
         return status;
@@ -138,13 +138,13 @@ int lrndb_open(const char *path, int create, lrndb_t **out)
     pthread_mutex_init(&handle->mutex, NULL);
     pthread_mutex_init(&handle->cancel_lock, NULL);
     *out = handle;
-    return LRN_OK;
+    return TOTE_OK;
 }
 
-int lrndb_close(lrndb_t **db)
+int tote_close(tote_db_t **db)
 {
-    if (db == NULL || *db == NULL) return LRN_OK;
-    lrndb_t *handle = *db;
+    if (db == NULL || *db == NULL) return TOTE_OK;
+    tote_db_t *handle = *db;
     pthread_mutex_lock(&handle->mutex);
     if (handle->live_queues > 0 || handle->live_txns > 0) {
         pthread_mutex_unlock(&handle->mutex);
@@ -163,7 +163,7 @@ int lrndb_close(lrndb_t **db)
     return status != SESSION_OK ? map_session_status(status) : map_database_status(closed);
 }
 
-void lrndb_cancel(lrndb_t *db)
+void tote_cancel(tote_db_t *db)
 {
     if (db == NULL) return;
     pthread_mutex_lock(&db->cancel_lock);
@@ -171,15 +171,15 @@ void lrndb_cancel(lrndb_t *db)
     pthread_mutex_unlock(&db->cancel_lock);
 }
 
-/* mutex 안에서 부른다. 실행하는 동안 lrndb_cancel이 이 세션을 취소할 수 있다. */
-static void set_running(lrndb_t *db, session_t *session)
+/* mutex 안에서 부른다. 실행하는 동안 tote_cancel이 이 세션을 취소할 수 있다. */
+static void set_running(tote_db_t *db, session_t *session)
 {
     pthread_mutex_lock(&db->cancel_lock);
     db->running = session;
     pthread_mutex_unlock(&db->cancel_lock);
 }
 
-static session_t *session_for(lrndb_t *db, lrntxn_t *txn)
+static session_t *session_for(tote_db_t *db, tote_txn_t *txn)
 {
     return txn != NULL ? txn->session : db->autocommit;
 }
@@ -196,7 +196,7 @@ typedef struct {
 static void put_bytes(buffer_t *b, const void *bytes, size_t size)
 {
     if (b->error != ACKQ_OK) return;
-    size_t limit = lrn_max_result_bytes();
+    size_t limit = tote_max_result_bytes();
     if (size > limit || b->size > limit - size) {
         b->error = ACKQ_LIMIT;
         return;
@@ -322,22 +322,22 @@ static void encode_result(buffer_t *b, result_t *result)
 }
 
 /* 입력 매개변수를 view로 바꾼다. 실패하면 상태를 돌려주고 *views는 NULL이다. */
-static int build_views(const lrn_param_t *params, size_t count, value_view_t **views)
+static int build_views(const tote_param_t *params, size_t count, value_view_t **views)
 {
     *views = NULL;
-    if (count == 0) return LRN_OK;
+    if (count == 0) return TOTE_OK;
     value_view_t *built = calloc(count, sizeof(*built));
     if (built == NULL) return ACKQ_NOMEM;
     for (size_t i = 0; i < count; i++) {
-        const lrn_param_t *p = &params[i];
+        const tote_param_t *p = &params[i];
         switch (p->type) {
-            case LRN_PARAM_NULL: built[i] = (value_view_t){VALUE_NULL, 0, 0.0, NULL, 0}; break;
-            case LRN_PARAM_INTEGER: built[i] = (value_view_t){VALUE_INTEGER, p->integer, 0.0, NULL, 0}; break;
-            case LRN_PARAM_REAL: built[i] = (value_view_t){VALUE_REAL, 0, p->real, NULL, 0}; break;
-            case LRN_PARAM_TEXT:
+            case TOTE_PARAM_NULL: built[i] = (value_view_t){VALUE_NULL, 0, 0.0, NULL, 0}; break;
+            case TOTE_PARAM_INTEGER: built[i] = (value_view_t){VALUE_INTEGER, p->integer, 0.0, NULL, 0}; break;
+            case TOTE_PARAM_REAL: built[i] = (value_view_t){VALUE_REAL, 0, p->real, NULL, 0}; break;
+            case TOTE_PARAM_TEXT:
                 built[i] = (value_view_t){VALUE_TEXT, 0, 0.0, p->size > 0 ? p->bytes : NULL, p->size};
                 break;
-            case LRN_PARAM_BLOB:
+            case TOTE_PARAM_BLOB:
                 built[i] = (value_view_t){VALUE_BLOB, 0, 0.0, p->size > 0 ? p->bytes : NULL, p->size};
                 break;
             default:
@@ -346,10 +346,10 @@ static int build_views(const lrn_param_t *params, size_t count, value_view_t **v
         }
     }
     *views = built;
-    return LRN_OK;
+    return TOTE_OK;
 }
 
-int lrndb_exec(lrndb_t *db, lrntxn_t *txn, const char *sql, const lrn_param_t *params, size_t param_count,
+int tote_exec(tote_db_t *db, tote_txn_t *txn, const char *sql, const tote_param_t *params, size_t param_count,
                uint8_t **out, size_t *out_size)
 {
     if (db == NULL || sql == NULL || out == NULL || out_size == NULL || (param_count > 0 && params == NULL)) {
@@ -360,7 +360,7 @@ int lrndb_exec(lrndb_t *db, lrntxn_t *txn, const char *sql, const lrn_param_t *p
     if (txn != NULL && txn->db != db) return ACKQ_INVALID;   /* 다른 database의 트랜잭션은 실행 전에 거절 */
     value_view_t *views;
     int status = build_views(params, param_count, &views);
-    if (status != LRN_OK) return status;
+    if (status != TOTE_OK) return status;
     lexer_binding_t binding = {views, param_count};
     result_t *result = NULL;
     buffer_t buffer = {0};
@@ -385,7 +385,7 @@ int lrndb_exec(lrndb_t *db, lrntxn_t *txn, const char *sql, const lrn_param_t *p
     }
     *out = buffer.data;
     *out_size = buffer.size;
-    return LRN_OK;
+    return TOTE_OK;
 }
 
 /* ── 트랜잭션 ── */
@@ -393,7 +393,7 @@ int lrndb_exec(lrndb_t *db, lrntxn_t *txn, const char *sql, const lrn_param_t *p
 static int map_txn(txn_status_t status)
 {
     switch (status) {
-        case TXN_OK: return LRN_OK;
+        case TXN_OK: return TOTE_OK;
         case TXN_BUSY:
         case TXN_TIMEOUT: return ACKQ_BUSY;
         case TXN_NOMEM: return ACKQ_NOMEM;
@@ -406,45 +406,45 @@ static int map_txn(txn_status_t status)
     }
 }
 
-int lrndb_begin(lrndb_t *db, lrntxn_t **out)
+int tote_begin(tote_db_t *db, tote_txn_t **out)
 {
     if (db == NULL || out == NULL) return ACKQ_INVALID;
     *out = NULL;
-    lrntxn_t *handle = calloc(1, sizeof(*handle));
+    tote_txn_t *handle = calloc(1, sizeof(*handle));
     if (handle == NULL) return ACKQ_NOMEM;
     session_txn_options_t options = {TXN_GUARANTEE_DURABLE, 0};
     pthread_mutex_lock(&db->mutex);
-    int status = session_open(db->db, &handle->session) == SESSION_OK ? LRN_OK : ACKQ_NOMEM;
-    if (status == LRN_OK) {
+    int status = session_open(db->db, &handle->session) == SESSION_OK ? TOTE_OK : ACKQ_NOMEM;
+    if (status == TOTE_OK) {
         txn_status_t begun = session_txn_begin(handle->session, &options);
         status = map_txn(begun);
         if (begun != TXN_OK) session_close(handle->session);
     }
-    if (status == LRN_OK) db->live_txns++;
+    if (status == TOTE_OK) db->live_txns++;
     pthread_mutex_unlock(&db->mutex);
-    if (status != LRN_OK) {
+    if (status != TOTE_OK) {
         free(handle);
         return status;
     }
     handle->db = db;
     *out = handle;
-    return LRN_OK;
+    return TOTE_OK;
 }
 
 /* mutex 안에서 부른다. 트랜잭션 세션을 닫고 핸들을 해제한다. */
-static void forget_txn(lrntxn_t **txn)
+static void forget_txn(tote_txn_t **txn)
 {
-    lrntxn_t *handle = *txn;
+    tote_txn_t *handle = *txn;
     session_close(handle->session);
     handle->db->live_txns--;
     free(handle);
     *txn = NULL;
 }
 
-int lrndb_commit(lrntxn_t **txn)
+int tote_commit(tote_txn_t **txn)
 {
     if (txn == NULL || *txn == NULL) return ACKQ_INVALID;
-    lrndb_t *db = (*txn)->db;
+    tote_db_t *db = (*txn)->db;
     pthread_mutex_lock(&db->mutex);
     txn_status_t status = session_txn_commit((*txn)->session, NULL);
     /* 실패 상태(INVALID)이면 트랜잭션이 남으므로 rollback으로 정리한다 */
@@ -454,10 +454,10 @@ int lrndb_commit(lrntxn_t **txn)
     return map_txn(status);
 }
 
-int lrndb_rollback(lrntxn_t **txn)
+int tote_rollback(tote_txn_t **txn)
 {
     if (txn == NULL || *txn == NULL) return ACKQ_INVALID;
-    lrndb_t *db = (*txn)->db;
+    tote_db_t *db = (*txn)->db;
     pthread_mutex_lock(&db->mutex);
     txn_status_t status = session_txn_rollback((*txn)->session);
     forget_txn(txn);
@@ -465,19 +465,19 @@ int lrndb_rollback(lrntxn_t **txn)
     return map_txn(status);
 }
 
-int lrndb_txn_failed(const lrntxn_t *txn)
+int tote_txn_failed(const tote_txn_t *txn)
 {
     return txn != NULL && session_txn_failed(txn->session) ? 1 : 0;
 }
 
 /* ── 큐 ── */
 
-int lrnq_open(lrndb_t *db, const char *name, int install, uint32_t max_attempts, lrn_clock_fn clock,
-              void *clock_ctx, lrnq_t **out)
+int tote_queue_open(tote_db_t *db, const char *name, int install, uint32_t max_attempts, tote_clock_fn clock,
+              void *clock_ctx, tote_queue_t **out)
 {
     if (db == NULL || out == NULL) return ACKQ_INVALID;
     *out = NULL;
-    lrnq_t *handle = calloc(1, sizeof(*handle));
+    tote_queue_t *handle = calloc(1, sizeof(*handle));
     if (handle == NULL) return ACKQ_NOMEM;
     ackq_options_t options = {0};
     options.name = name;
@@ -496,13 +496,13 @@ int lrnq_open(lrndb_t *db, const char *name, int install, uint32_t max_attempts,
     }
     handle->db = db;
     *out = handle;
-    return LRN_OK;
+    return TOTE_OK;
 }
 
-void lrnq_close(lrnq_t **queue)
+void tote_queue_close(tote_queue_t **queue)
 {
     if (queue == NULL || *queue == NULL) return;
-    lrndb_t *db = (*queue)->db;
+    tote_db_t *db = (*queue)->db;
     pthread_mutex_lock(&db->mutex);
     ackq_close(&(*queue)->queue);
     db->live_queues--;
@@ -526,7 +526,7 @@ void lrnq_close(lrnq_t **queue)
         pthread_mutex_unlock(&(q)->db->mutex);                                \
     } while (0)
 
-int lrnq_put(lrnq_t *q, lrntxn_t *txn, const uint8_t *payload, size_t size, const char *idem_key, uint64_t *id,
+int tote_queue_put(tote_queue_t *q, tote_txn_t *txn, const uint8_t *payload, size_t size, const char *idem_key, uint64_t *id,
              int *duplicate)
 {
     int status;
@@ -536,46 +536,46 @@ int lrnq_put(lrnq_t *q, lrntxn_t *txn, const uint8_t *payload, size_t size, cons
     return status;
 }
 
-int lrnq_get(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t lease_ms, lrnq_item_t *item)
+int tote_queue_get(tote_queue_t *q, tote_txn_t *txn, uint64_t id, uint64_t lease_ms, tote_queue_item_t *item)
 {
     int status;
     ackq_claim_t claim = {0};
     size_t count = 0;
     if (item == NULL) return ACKQ_INVALID;
-    *item = (lrnq_item_t){0};
+    *item = (tote_queue_item_t){0};
     if (id == 0) {
         QUEUE_CALL(q, txn, ackq_claim(q->queue, session, 1, lease_ms, &claim, &count));
-        if (status == ACKQ_OK && count == 0) return LRN_EMPTY;
+        if (status == ACKQ_OK && count == 0) return TOTE_EMPTY;
     } else {
         QUEUE_CALL(q, txn, ackq_claim_id(q->queue, session, id, lease_ms, &claim));
     }
     if (status != ACKQ_OK) return status;
-    *item = (lrnq_item_t){claim.id, claim.fence, claim.attempts, claim.lease_until_ms, claim.payload, claim.payload_size};
-    return LRN_OK;
+    *item = (tote_queue_item_t){claim.id, claim.fence, claim.attempts, claim.lease_until_ms, claim.payload, claim.payload_size};
+    return TOTE_OK;
 }
 
-void lrnq_item_free(lrnq_item_t *item)
+void tote_queue_item_free(tote_queue_item_t *item)
 {
     if (item == NULL) return;
     free(item->payload);
-    *item = (lrnq_item_t){0};
+    *item = (tote_queue_item_t){0};
 }
 
-int lrnq_ack(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence)
+int tote_queue_ack(tote_queue_t *q, tote_txn_t *txn, uint64_t id, uint64_t fence)
 {
     int status;
     QUEUE_CALL(q, txn, ackq_ack(q->queue, session, id, fence));
     return status;
 }
 
-int lrnq_fail(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence, const char *reason)
+int tote_queue_fail(tote_queue_t *q, tote_txn_t *txn, uint64_t id, uint64_t fence, const char *reason)
 {
     int status;
     QUEUE_CALL(q, txn, ackq_fail(q->queue, session, id, fence, reason));
     return status;
 }
 
-int lrnq_nack(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence, uint64_t retry_delay_ms, const char *reason,
+int tote_queue_nack(tote_queue_t *q, tote_txn_t *txn, uint64_t id, uint64_t fence, uint64_t retry_delay_ms, const char *reason,
               int *terminal)
 {
     int status;
@@ -585,35 +585,35 @@ int lrnq_nack(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence, uint64_t re
     return status;
 }
 
-int lrnq_update(lrnq_t *q, lrntxn_t *txn, uint64_t id, uint64_t fence, const uint8_t *payload, size_t size)
+int tote_queue_update(tote_queue_t *q, tote_txn_t *txn, uint64_t id, uint64_t fence, const uint8_t *payload, size_t size)
 {
     int status;
     QUEUE_CALL(q, txn, ackq_update(q->queue, session, id, fence, payload, size));
     return status;
 }
 
-int lrnq_recover(lrnq_t *q, lrntxn_t *txn, size_t limit, size_t *recovered)
+int tote_queue_recover(tote_queue_t *q, tote_txn_t *txn, size_t limit, size_t *recovered)
 {
     int status;
     QUEUE_CALL(q, txn, ackq_recover(q->queue, session, limit, recovered));
     return status;
 }
 
-int lrnq_release_leases(lrnq_t *q, lrntxn_t *txn, size_t limit, size_t *released)
+int tote_queue_release_leases(tote_queue_t *q, tote_txn_t *txn, size_t limit, size_t *released)
 {
     int status;
     QUEUE_CALL(q, txn, ackq_release_leases(q->queue, session, limit, released));
     return status;
 }
 
-int lrnq_purge(lrnq_t *q, lrntxn_t *txn, int include_failed, size_t limit, size_t *purged)
+int tote_queue_purge(tote_queue_t *q, tote_txn_t *txn, int include_failed, size_t limit, size_t *purged)
 {
     int status;
     QUEUE_CALL(q, txn, ackq_purge(q->queue, session, include_failed != 0, limit, purged));
     return status;
 }
 
-int lrnq_stats(lrnq_t *q, lrntxn_t *txn, uint64_t counts[4])
+int tote_queue_stats(tote_queue_t *q, tote_txn_t *txn, uint64_t counts[4])
 {
     int status;
     ackq_stats_t stats = {0};
@@ -626,7 +626,7 @@ int lrnq_stats(lrnq_t *q, lrntxn_t *txn, uint64_t counts[4])
     return status;
 }
 
-int lrnq_list(lrnq_t *q, lrntxn_t *txn, uint64_t after_id, size_t limit, int with_payload, lrnq_listitem_t *items,
+int tote_queue_list(tote_queue_t *q, tote_txn_t *txn, uint64_t after_id, size_t limit, int with_payload, tote_queue_list_item_t *items,
               size_t *count)
 {
     int status;
@@ -643,7 +643,7 @@ int lrnq_list(lrnq_t *q, lrntxn_t *txn, uint64_t after_id, size_t limit, int wit
     if (status == ACKQ_OK) {
         for (size_t i = 0; i < n; i++) {
             const ackq_item_t *src = &raw_items[i];
-            items[i] = (lrnq_listitem_t){.id = src->id,
+            items[i] = (tote_queue_list_item_t){.id = src->id,
                                          .state = (int32_t)src->state,
                                          .fence = src->fence,
                                          .attempts = src->attempts,
@@ -661,7 +661,7 @@ int lrnq_list(lrnq_t *q, lrntxn_t *txn, uint64_t after_id, size_t limit, int wit
     return status;
 }
 
-void lrnq_list_free(lrnq_listitem_t *items, size_t count)
+void tote_queue_list_free(tote_queue_list_item_t *items, size_t count)
 {
     if (items == NULL) return;
     for (size_t i = 0; i < count; i++) {

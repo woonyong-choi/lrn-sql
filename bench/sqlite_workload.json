@@ -15,7 +15,7 @@
   "build_flags": ["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror"],
   "measurement": "native prepare/parse, execute, all typed rows encoded, result release; excludes IPC, row sorting, oracle comparison",
   "cache": "warm process and OS cache; reopening does not imply cold cache; no OS cache purge",
-  "durability": "one SQL statement per autocommit; SQLite DELETE/FULL/fullfsync OFF versus lrn-sql COW/fsync; power-loss equivalence unverified",
+  "durability": "one SQL statement per autocommit; SQLite DELETE/FULL/fullfsync OFF versus ToteDB COW/fsync; power-loss equivalence unverified",
   "oracle": "exact sorted typed row multiset and affected row count, including NULL/text/blob boundaries; mismatches fail the run",
   "capacity": "stop both engines at same completed insert after load timeout; truncated size is reported and is never counted as requested size",
   "unmeasured": ["allocator peak", "lock waiting", "temporary disk", "power loss", "concurrent writers", "ACK queue"],

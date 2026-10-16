@@ -1,9 +1,9 @@
 """반복 이벤트 집계를 같은 데이터·같은 SQL로 비교한다(#42). 합성 데이터만 쓴다.
 
-비교 대상: 이 엔진(lrn_ackq), SQLite(색인 없음), SQLite + 커버링 색인, DuckDB(설치돼 있을 때).
+비교 대상: 이 엔진(totedb), SQLite(색인 없음), SQLite + 커버링 색인, DuckDB(설치돼 있을 때).
 모든 엔진의 결과가 같아야 시간을 기록한다. 시간은 Python 호출을 포함한 왕복이며 판정에 쓰지 않는다.
 
-    LRN_ACKQ_LIB=build/queue-shared/liblrnackq.so PYTHONPATH=python python3 bench/aggregate_compare.py --rows 100000
+    TOTEDB_LIB=build/lib/libtotedb.so PYTHONPATH=python python3 bench/aggregate_compare.py --rows 100000
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from lrn_ackq import Database
+from totedb import Database
 
 KINDS = 16
 USERS = 1000

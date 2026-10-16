@@ -1,8 +1,9 @@
-<h1 align="center">lrn-sql</h1>
+<h1 align="center">ToteDB</h1>
 
 <p align="center">
-  파일 하나에 SQL 테이블과 선택형 ACK 큐를 담는 C 임베디드 데이터베이스<br>
-  <a href="https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml"><img src="https://github.com/woonyong-choi/lrn-sql/actions/workflows/ci.yml/badge.svg" alt="CI"></a><br>
+  Transactional Outbox Table Engine<br>
+  앱 안에 넣는 SQL 데이터베이스와, 같은 트랜잭션에 들어가는 작업 큐<br>
+  <a href="https://github.com/woonyong-choi/totedb/actions/workflows/ci.yml"><img src="https://github.com/woonyong-choi/totedb/actions/workflows/ci.yml/badge.svg" alt="CI"></a><br>
   <a href="#빠른-시작">빠른 시작</a> · <a href="#작동-방식">작동 방식</a> · <a href="#상태">상태</a>
 </p>
 
@@ -14,22 +15,22 @@
 GCC, GNU Make, Python 3이 필요합니다. 저장소를 받아 공유 라이브러리를 빌드하세요.
 
 ```sh
-git clone https://github.com/woonyong-choi/lrn-sql.git
-cd lrn-sql
+git clone https://github.com/woonyong-choi/totedb.git
+cd totedb
 make all
 ```
 
 아래 내용을 `demo.py`로 저장하세요. 테이블을 만들고, 행 갱신과 큐 작업 추가를 한 트랜잭션으로 확정한 뒤 작업을 꺼내 처리합니다.
 
 ```python
-from lrn_ackq import AckQueue, Database
+from totedb import Database, Queue
 
 with Database("demo.db") as db:
     db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)")
     db.execute("INSERT INTO users VALUES (?, ?, ?), (?, ?, ?)", [1, "Alice", 25, 2, "Bob", 31])
     print(db.execute("SELECT name, age FROM users WHERE age > ? ORDER BY age", [20]).rows)
 
-    queue = AckQueue(db, "jobs")
+    queue = Queue(db, "jobs")
     with db.begin() as txn:
         txn.execute("UPDATE users SET age = age + 1 WHERE name = ?", ["Alice"])
         queue.put(b"send-welcome-mail", txn=txn)
@@ -51,7 +52,7 @@ QueueStats(ready=0, leased=0, acked=1, failed=0)
 
 ## 해결하는 문제
 
-로컬 프로그램이 업무 데이터와 작업 큐를 따로 저장하면 한쪽만 commit되어 작업이 사라지거나 두 번 실행될 수 있습니다. lrn-sql은 큐를 같은 DB 파일의 테이블로 두어 업무 갱신과 큐 변경을 한 트랜잭션으로 확정합니다. 큐를 설치하지 않으면 큐 테이블이나 객체가 생기지 않고 SQL DB로만 동작합니다. 여러 프로세스가 같은 파일에 동시에 써야 하거나 넓은 SQL 호환이 필요하면 SQLite나 PostgreSQL이 더 맞습니다.
+로컬 프로그램이 업무 데이터와 작업 큐를 따로 저장하면 한쪽만 commit되어 작업이 사라지거나 두 번 실행될 수 있습니다. ToteDB은 큐를 같은 DB 파일의 테이블로 두어 업무 갱신과 큐 변경을 한 트랜잭션으로 확정합니다. 큐를 설치하지 않으면 큐 테이블이나 객체가 생기지 않고 SQL DB로만 동작합니다. 여러 프로세스가 같은 파일에 동시에 써야 하거나 넓은 SQL 호환이 필요하면 SQLite나 PostgreSQL이 더 맞습니다.
 
 ## 작동 방식
 

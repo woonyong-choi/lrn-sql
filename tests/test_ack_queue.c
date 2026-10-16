@@ -623,8 +623,8 @@ static void test_wrong_database_and_read_only(void)
     assert(database_create(path_b, &created) == DATABASE_OK && database_close(created) == DATABASE_OK);
     session_t *b = open_conn(path_b, true, true, NULL);
     assert(b != NULL);
-    assert(exec_ok(b, "CREATE TABLE ackq_jobs (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)"));
-    assert(exec_ok(b, "INSERT INTO ackq_jobs VALUES (1, 'other-db')"));
+    assert(exec_ok(b, "CREATE TABLE tote_queue_jobs (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)"));
+    assert(exec_ok(b, "INSERT INTO tote_queue_jobs VALUES (1, 'other-db')"));
     session_t *foreign = NULL;
     assert((foreign = begin_txn(b)) != NULL);
     CHECK(session_database(foreign) != session_database(a) && session_database(foreign) == session_database(b), "소속 확인");
@@ -646,7 +646,7 @@ static void test_wrong_database_and_read_only(void)
     CHECK(ackq_list(qa, foreign, 0, 1, false, listed, &count) == ACKQ_INVALID, "list 거절");
     CHECK(!session_txn_failed(foreign), "거절은 남의 트랜잭션을 실패시키지 않는다");
     CHECK(commit_txn(&foreign) == TXN_OK, "남의 트랜잭션은 영향 없이 commit된다");
-    CHECK(scalar_int(b, "SELECT id FROM ackq_jobs WHERE marker = 'other-db'") == 1 && scalar_int(b, "SELECT id FROM ackq_jobs") == 1,
+    CHECK(scalar_int(b, "SELECT id FROM tote_queue_jobs WHERE marker = 'other-db'") == 1 && scalar_int(b, "SELECT id FROM tote_queue_jobs") == 1,
           "다른 database의 같은 이름 테이블이 바뀌지 않았다");
     CHECK(ackq_stats(qa, a, &stats) == ACKQ_OK && stats.leased == 1 && stats.acked == 0 && stats.ready == 0,
           "이 큐도 바뀌지 않았다");

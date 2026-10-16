@@ -5,7 +5,7 @@
   persist-queue   persist-queue 1.1.0 SQLiteAckQueue(Markchain 설정: multithreading, auto_resume, JSON).
                   기본 SQLite 보증은 journal_mode=WAL, synchronous=FULL(실제 값을 읽어 결과에 남긴다).
   sqlite-lease    이 스크립트의 표준 라이브러리 sqlite3 기준군. lease·fence·상태 index를 갖고 WAL + synchronous=FULL.
-  lrn             lrn_ackq(이 이슈의 큐). COW 게시 commit(fsync 뒤 응답, DURABLE).
+  lrn             totedb(이 이슈의 큐). COW 게시 commit(fsync 뒤 응답, DURABLE).
 같은 payload(결정적 합성 JSON 객체), 같은 내구성 수준(FULL/DURABLE끼리 비교), 같은 스레드 수, 같은
 보존 정책(ack된 작업을 끝에서 모두 지움)을 쓴다. 한 측정은 따로 띄운 프로세스에서 하고 `ru_maxrss`의 증가분을 메모리로
 보고한다(이전 최고치를 넘은 만큼만 잡히므로 작은 작업은 0일 수 있다). 시간은 벽시계(perf_counter)다.
@@ -17,7 +17,7 @@ lrn 큐의 claim·ack는 state 보조 색인과 기본 키 조회를 쓴다(ack_
   worker  python3 bench/ack_queue_compare.py worker --system lrn --n 200 --payload-bytes 256 --threads 1
   비교    python3 bench/ack_queue_compare.py compare --sizes 200,1000 --payloads 256,16384 --threads 1,4 --repeats 3
   대기열  python3 bench/ack_queue_compare.py pending --n 500 --payload-bytes 65536
-필요한 것: LRN_ACKQ_LIB(공유 라이브러리), PYTHONPATH=python, persist-queue 1.1.0이 import되는 파이썬.
+필요한 것: TOTEDB_LIB(공유 라이브러리), PYTHONPATH=python, persist-queue 1.1.0이 import되는 파이썬.
 """
 
 # ruff: noqa: ANN401 - 비교군 객체(persist-queue·sqlite·lrn)는 서로 다른 타입이라 Any로 받는다
@@ -184,11 +184,11 @@ class SqliteLease:
 
 class Lrn:
     def __init__(self, directory: Path) -> None:
-        from lrn_ackq import AckQueue, Database  # noqa: PLC0415
+        from totedb import Queue, Database  # noqa: PLC0415
 
         self.name = "lrn"
         self.db = Database(directory / "db.lrdb", busy_timeout_s=120.0)
-        self.queue = AckQueue(self.db, "jobs")
+        self.queue = Queue(self.db, "jobs")
         self.synchronous = "cow-fsync"
 
     def put(self, item: dict[str, Any]) -> int:

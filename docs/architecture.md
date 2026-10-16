@@ -1,13 +1,13 @@
 # 아키텍처
 
-lrn-sql은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데이터베이스다. 응용 프로그램은 C API(`session`·`database`)나 공유 라이브러리 `liblrnackq`를 거친 Python 패키지 `lrn_ackq`로 부르며, 선택형 ACK 큐는 같은 DB 위에 테이블 하나로 설치된다.
+ToteDB은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데이터베이스다. 응용 프로그램은 C API(`session`·`database`)나 공유 라이브러리 `libtotedb`를 거친 Python 패키지 `totedb`로 부르며, 선택형 ACK 큐는 같은 DB 위에 테이블 하나로 설치된다.
 
 ## 외부 연결
 
 | 외부 요소 | 종류 | 주고받는 것 |
 |---|---|---|
 | 응용 프로그램(C) | 외부 프로그램 | `database_exec`·`database_txn_*` 호출과 결과 버퍼 |
-| 응용 프로그램(Python) | 외부 프로그램 | `lrn_ackq.Database`·`AckQueue` 호출, ctypes로 `liblrnackq`의 `lrndb_*`·`lrnq_*` 함수 |
+| 응용 프로그램(Python) | 외부 프로그램 | `totedb.Database`·`Queue` 호출, ctypes로 `libtotedb`의 `tote_*`·`tote_queue_*` 함수 |
 | DB 파일 | 파일 | 8192바이트 페이지. `flock`으로 한 프로세스의 한 핸들만 쓰기로 연다 |
 | 운영체제 | 운영체제 | `pread`·`pwrite`·`fsync`, pthread mutex와 조건 변수 |
 
@@ -28,9 +28,9 @@ lrn-sql은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데�
 | `database_txn` | 여러 문장을 한 게시로 확정하는 트랜잭션 핸들 | C11 | `src/sql/database_txn.c` |
 | `result` | 결과 집합과 오류를 바이트 버퍼로 인코딩 | C11 | `src/sql/result.c` |
 | `session` | 연결 하나. 문장 실행, 트랜잭션, 예산 세 단계(문장·세션·풀), 결과 수명, 취소 | C11, pthread | `src/sql/session.c` |
-| `ack_queue` | 선택형 ACK 큐. 큐 하나가 테이블 `ackq_<name>` 하나다 | C11, `session`의 SQL·트랜잭션 API | `src/queue/ack_queue.c`, `src/queue/ack_queue_sql.c` |
-| `ack_queue_capi` | 다른 언어용 평탄한 C 인터페이스 `lrndb_*`·`lrnq_*`. 연결마다 자동 commit 세션 하나, 트랜잭션마다 세션 하나 | C11, 공유 라이브러리 | `src/queue/ack_queue_capi.c` |
-| `lrn_ackq` | Python 바인딩. `Database`·`Transaction`·`AckQueue` | Python 3, ctypes | `python/lrn_ackq` |
+| `ack_queue` | 선택형 ACK 큐. 큐 하나가 테이블 `tote_queue_<name>` 하나다 | C11, `session`의 SQL·트랜잭션 API | `src/queue/ack_queue.c`, `src/queue/ack_queue_sql.c` |
+| `totedb` | 다른 언어용 평탄한 C 인터페이스 `tote_*`·`tote_queue_*`. 연결마다 자동 commit 세션 하나, 트랜잭션마다 세션 하나 | C11, 공유 라이브러리 | `src/capi/totedb.c` |
+| `totedb` | Python 바인딩. `Database`·`Transaction`·`Queue` | Python 3, ctypes | `python/totedb` |
 
 ## 처리 흐름
 
@@ -81,4 +81,4 @@ lrn-sql은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데�
 | 경로 | 내용 | 쓰는 구성 요소 |
 |---|---|---|
 | 응용 프로그램이 정한 DB 파일 경로 | 제어 페이지, 카탈로그, 행·색인 페이지, 큐 테이블 | `page_file` |
-| `build/queue-shared/liblrnackq.so` | Python 바인딩이 읽는 공유 라이브러리. macOS에서는 `.dylib` | `lrn_ackq` |
+| `build/lib/libtotedb.so` | Python 바인딩이 읽는 공유 라이브러리. macOS에서는 `.dylib` | `totedb` |
