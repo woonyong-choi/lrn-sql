@@ -409,6 +409,37 @@ CASES = [
         ],
     },
     {
+        "name": "correlated",
+        "setup": PEOPLE + [
+            "CREATE TABLE orders (oid INTEGER PRIMARY KEY, person INTEGER, item TEXT NOT NULL, qty INTEGER NOT NULL)",
+            "INSERT INTO orders VALUES (10, 1, 'pen', 2), (11, 1, 'ink', 1), (12, 2, 'pad', 5), (13, 4, 'pen', 1), "
+            "(14, 9, 'cup', 3), (15, NULL, 'box', 1)",
+            "CREATE INDEX orders_person ON orders (person)",
+        ],
+        "queries": [
+            "SELECT p.id FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person = p.id)",
+            "SELECT p.id FROM people p WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.person = p.id)",
+            "SELECT id FROM people WHERE EXISTS (SELECT 1 FROM orders WHERE person = people.id AND qty > 1)",
+            "SELECT p.name, (SELECT COUNT(*) FROM orders o WHERE o.person = p.id) FROM people p ORDER BY p.id",
+            "SELECT p.name, (SELECT SUM(qty) FROM orders o WHERE o.person = p.id) AS total FROM people p ORDER BY total NULLS FIRST, p.id",
+            "SELECT p.name, (SELECT MAX(o.item) FROM orders o WHERE o.person = p.id AND o.qty >= p.age / 20) FROM people p ORDER BY 1",
+            "SELECT o.oid FROM orders o WHERE o.qty = (SELECT MAX(qty) FROM orders x WHERE x.person = o.person) ORDER BY 1",
+            "SELECT p.id FROM people p WHERE p.id IN (SELECT o.person FROM orders o WHERE o.qty > p.id) ORDER BY 1",
+            "SELECT p.id FROM people p WHERE 2 <= (SELECT COUNT(*) FROM orders o WHERE o.person = p.id)",
+            "SELECT p.id FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person = p.id AND EXISTS (SELECT 1 FROM people q WHERE q.id = o.person AND q.city = p.city))",
+            "SELECT p.id FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE EXISTS (SELECT 1 FROM people q WHERE q.id = o.person AND q.age = p.age AND q.id <> p.id))",
+            "SELECT p.id, o.oid FROM people p JOIN orders o ON o.person = p.id WHERE o.qty = (SELECT MIN(qty) FROM orders z WHERE z.person = p.id) ORDER BY 1, 2",
+            "SELECT city, (SELECT COUNT(*) FROM people q WHERE q.city = c.city) FROM (SELECT DISTINCT city FROM people) c ORDER BY 1 NULLS FIRST",
+            "UPDATE orders SET qty = qty + 10 WHERE EXISTS (SELECT 1 FROM people p WHERE p.id = orders.person AND p.city = 'seoul')",
+            "UPDATE orders SET item = (SELECT name FROM people p WHERE p.id = orders.person) WHERE person IS NOT NULL AND person < 5",
+            "SELECT * FROM orders ORDER BY oid",
+            "DELETE FROM orders WHERE NOT EXISTS (SELECT 1 FROM people p WHERE p.id = orders.person) RETURNING oid",
+            "SELECT * FROM orders ORDER BY oid",
+            {"sql": "SELECT p.id, (SELECT o.oid FROM orders o WHERE o.person = p.id) FROM people p", "differs": {"like": "postgres", "reason": "스칼라 서브쿼리가 두 행 이상이면 오류(SQLite는 첫 행)"}},
+            {"sql": "SELECT p.id FROM people p WHERE EXISTS (SELECT 1 FROM orders o WHERE o.person = p.nope)", "error": True},
+        ],
+    },
+    {
         "name": "dml",
         "setup": [
             "CREATE TABLE stock (id INTEGER PRIMARY KEY, item TEXT NOT NULL, qty INTEGER NOT NULL, price REAL)",
