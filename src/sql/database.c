@@ -2787,7 +2787,8 @@ static database_exec_status_t scan_rows(database_t *db, const catalog_table_view
         secondary_scan_t scan = {db, heap, where, &where->probes[by_secondary], row, needed, sink, DATABASE_EXEC_OK};
         heap_status_t visited = heap_secondary_visit_equal(heap, secondary, &where->probes[by_secondary].literal.view,
                                                            scan_secondary_row, &scan);
-        if (scan.status != DATABASE_EXEC_OK) return scan.status;
+        /* LIMIT을 채워 방문을 멈추면 색인은 멈춤을 NOMEM으로 알린다. 오류가 아니다 */
+        if (scan.status != DATABASE_EXEC_OK || *sink->stop) return scan.status;
         return visited == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, visited, "index lookup");
     }
     heap_cursor_t *cursor = NULL;

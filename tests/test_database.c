@@ -718,6 +718,8 @@ static void test_secondary_index_many_duplicates(void)
     }
     CHECK(count == 480, "분할된 색인 잎에서 480개 행 반환");
     result_release(&result);
+    /* #189: LIMIT을 채워 색인 순회를 멈춘 것은 오류가 아니다 */
+    expect_text(db, "SELECT count(*) FROM (SELECT id FROM t WHERE label = 'same' LIMIT 2)", "[1] 2");
     db = reopen(db, true);
     expect_text(db, "SELECT id FROM t WHERE label = 'missing'", "[0]");
     assert(database_close(db) == DATABASE_OK);
