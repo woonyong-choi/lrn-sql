@@ -29,11 +29,11 @@ static const char *const RESERVED[] = {
     "SET", "DELETE", "DROP", "NOT", "NULL", "PRIMARY", "KEY", "AUTOINCREMENT", "IS",
     "INDEX", "UNIQUE", "AND", "OR", "IN", "BETWEEN", "LIKE", "ESCAPE", "CASE", "WHEN", "THEN",
     "ELSE", "END", "CAST", "AS", "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "DISTINCT",
-    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", "RETURNING", "UNION", "ALL", "EXCEPT", "INTERSECT", "WITH", NULL};
+    "TRUE", "FALSE", "EXISTS", "GROUP", "HAVING", "JOIN", "INNER", "LEFT", "OUTER", "CROSS", "ON", "RETURNING", "UNION", "ALL", "EXCEPT", "INTERSECT", "WITH", "RIGHT", NULL};
 
 /* 알지만 지원하지 않는 절·연산자. 이름 자리나 문장 끝에서 만나면 UNSUPPORTED다. */
 static const char *const UNSUPPORTED_WORDS[] = {
-    "RIGHT", "FULL", "NATURAL", "USING", "WINDOW", "OVER", "RECURSIVE", NULL};
+    "FULL", "NATURAL", "USING", "WINDOW", "OVER", "RECURSIVE", NULL};
 
 static bool fail(parser_t *p, sqlstmt_status_t status, sqlstmt_reason_t reason, size_t offset)
 {
@@ -1126,7 +1126,7 @@ static bool parse_source(parser_t *p, sqlstmt_select_t *query, size_t *capacity,
     } else if (!parse_name(p, &source->table, false) || !parse_alias(p, &source->alias)) {
         return false;
     }
-    if (join != SQLSTMT_JOIN_INNER && join != SQLSTMT_JOIN_LEFT) return true;
+    if (join != SQLSTMT_JOIN_INNER && join != SQLSTMT_JOIN_LEFT && join != SQLSTMT_JOIN_RIGHT) return true;
     if (word_is(current(p), "USING")) {
         return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
     }
@@ -1153,6 +1153,15 @@ static bool parse_from(parser_t *p, sqlstmt_select_t *query)
             take_word(p, "OUTER");
             if (!expect_word(p, "JOIN")) return false;
             join = SQLSTMT_JOIN_LEFT;
+        } else if (word_is(current(p), "RIGHT")) {
+            /* 결합은 왼쪽부터 쌓으므로 RIGHT는 첫 결합에서만 뒤집어 실행할 수 있다 */
+            if (query->source_count != 1) {
+                return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+            }
+            p->pos++;
+            take_word(p, "OUTER");
+            if (!expect_word(p, "JOIN")) return false;
+            join = SQLSTMT_JOIN_RIGHT;
         } else {
             return true;
         }

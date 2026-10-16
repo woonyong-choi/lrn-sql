@@ -507,6 +507,10 @@ static void join_forms(void)
     assert(name_is(&q->sources[1].alias, "x") && name_is(&q->sources[4].alias, "y") && q->sources[0].alias.size == 0);
     assert(q->sources[5].on->kind == SQLEXPR_BINARY && q->sources[5].on->op == SQLEXPR_OP_AND);
     free_clean(statement);
+    statement = parse_ok("SELECT * FROM a RIGHT OUTER JOIN b ON b.k = a.k LEFT JOIN c ON TRUE");
+    assert(statement->select.sources[1].join == SQLSTMT_JOIN_RIGHT && statement->select.sources[1].on != NULL);
+    assert(statement->select.sources[2].join == SQLSTMT_JOIN_LEFT);
+    free_clean(statement);
 
     char sql[2048] = "SELECT 1 FROM t0";
     for (int i = 1; i <= SQLSTMT_MAX_SOURCES; i++) snprintf(sql + strlen(sql), sizeof(sql) - strlen(sql), ", t%d", i);
@@ -794,7 +798,8 @@ static void select_and_where_errors(void)
     expect_syntax("SELECT * FROM t JOIN u", SQLSTMT_REASON_UNEXPECTED_END, 22);
     expect_syntax("SELECT * FROM t LEFT u ON 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 21);
     expect_syntax("SELECT * FROM t CROSS JOIN u ON 1", SQLSTMT_REASON_TRAILING_TOKENS, 29);
-    expect_unsupported("SELECT * FROM t RIGHT JOIN u ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
+    expect_unsupported("SELECT * FROM t JOIN v ON 1 RIGHT JOIN u ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 28);
+    expect_syntax("SELECT * FROM t RIGHT u ON 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 22);
     expect_unsupported("SELECT * FROM t NATURAL JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t JOIN u USING (a)", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 23);
     expect_unsupported("SELECT * FROM t JOIN (u) ON 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 21);
