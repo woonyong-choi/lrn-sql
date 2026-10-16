@@ -8,6 +8,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <sqlite3.h>
 
@@ -239,7 +240,7 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--version") == 0) { puts(sqlite3_libversion()); return 0; }
     if (argc != 3) return 2;
     engine_t engine = {.path = argv[2], .is_sqlite = strcmp(argv[1], "sqlite") == 0};
-    int opened = open_engine(&engine, 1);
+    int opened = open_engine(&engine, access(engine.path, F_OK) != 0);  /* 있는 파일은 다시 연다(복구 측정) */
     if (opened != 0) { fprintf(stderr, "open status %d\n", opened); return 2; }
     char *line = NULL;
     size_t capacity = 0;
