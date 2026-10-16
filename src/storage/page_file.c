@@ -16,13 +16,42 @@ _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
                "record page body must equal the page_file body");
 
 #define EINTR_RETRY_MAX 100
-#define CONTROL_BODY_BYTES 52u
+#define CONTROL_HEADER_BYTES 68u
+#define CONTROL_INLINE_IDS ((PAGE_BODY_BYTES - CONTROL_HEADER_BYTES) / 4u)
+#define CHAIN_HEADER_BYTES 8u
+#define CHAIN_IDS ((PAGE_BODY_BYTES - CHAIN_HEADER_BYTES) / 4u)
 #define BYTE_ORDER_MARK 0x01020304u
 #define PARTIAL_SUFFIX ".partial"
 
-/* 제어 본문 배치(52바이트): magic 8, 형식 u32, 페이지 크기 u32, byte order u32, 세대 u64,
- * page_count u32, 예약 u32(0), 카탈로그 head u32, size u32, 카탈로그 세대 u64 */
+/*
+ * 제어 본문 배치: magic 8, 형식 u32, 페이지 크기 u32, byte order u32, 세대 u64, page_count u32, 예약 u32(0),
+ * 카탈로그 head u32, size u32, 카탈로그 세대 u64, 재사용 수 u32, 대기 수 u32, 사슬 head u32, 사슬 길이 u32,
+ * 그 뒤에 빈 페이지 번호(재사용 다음 대기 순서)를 CONTROL_INLINE_IDS개까지. 나머지는 사슬 페이지에
+ * 이어 쓴다. 사슬 본문: 다음 사슬 u32, 이 페이지의 번호 수 u32, 번호들.
+ */
 static const uint8_t FILE_MAGIC[8] = {'L', 'R', 'S', 'Q', 'L', 'D', 'B', 0};
+
+/* 쓰기 핸들이 아는 페이지 하나의 상태 */
+typedef enum {
+    PS_USED,       /* 게시된 상태가 가리킬 수 있다 */
+    PS_FRESH,      /* 마지막 commit 뒤에 받았다. 어느 제어 페이지도 가리킨 적 없다 */
+    PS_PENDING,    /* 이번 commit에서 놓았다 */
+    PS_AGING,      /* 직전 commit에서 놓았다. fallback 세대가 가리킬 수 있다 */
+    PS_REUSABLE,   /* 두 제어 슬롯 모두 가리키지 않는다 */
+    PS_DISCARDED   /* 새 페이지였다가 놓았다. 재사용 목록과 새 페이지 목록에 함께 있다 */
+} page_state_t;
+
+typedef struct {
+    uint32_t reusable;
+    uint32_t aging;
+    uint32_t chain_head;
+    uint32_t chain_count;
+} free_header_t;
+
+typedef struct {
+    uint32_t *items;
+    size_t len, cap;
+} id_list_t;
 
 struct page_file {
     int fd;
@@ -39,12 +68,13 @@ struct page_file {
     uint32_t staged_head;
     uint32_t staged_size;
     uint64_t staged_generation;
-    uint32_t *pending;
-    size_t pending_len, pending_cap;
-    uint32_t *aging;      /* 직전 commit이 더는 가리키지 않게 된 페이지. 한 번 더 commit해야 재사용된다 */
-    size_t aging_len, aging_cap;
-    uint32_t *reusable;
-    size_t reusable_len, reusable_cap;
+    uint8_t *state;         /* 쓰기 핸들만. 페이지마다 page_state_t. 길이 state_cap >= page_count */
+    size_t state_cap;
+    id_list_t pending;
+    id_list_t aging;        /* 직전 commit이 더는 가리키지 않게 된 페이지. 한 번 더 commit해야 재사용된다 */
+    id_list_t reusable;
+    id_list_t fresh;        /* 마지막 commit 뒤에 받은 페이지(PS_FRESH·PS_DISCARDED) */
+    id_list_t chain;        /* 현재 제어 페이지가 가리키는 빈 목록 사슬 페이지 */
     size_t cache_pages;     /* 이 핸들의 캐시 상한. 계상은 이 값으로 한다 */
     page_cache_t *cache;    /* 처음 쓰일 때 만든다. 만들지 못하면 NULL로 두고 캐시 없이 동작한다 */
     bool cache_tried;
@@ -177,19 +207,29 @@ static bool is_blank(const uint8_t *page)
     return true;
 }
 
-static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file_control_t *out)
+static uint32_t inline_ids(uint64_t total)
+{
+    return total < CONTROL_INLINE_IDS ? (uint32_t)total : CONTROL_INLINE_IDS;
+}
+
+static uint32_t chain_pages_for(uint64_t total)
+{
+    if (total <= CONTROL_INLINE_IDS) return 0;
+    return (uint32_t)((total - CONTROL_INLINE_IDS + CHAIN_IDS - 1) / CHAIN_IDS);
+}
+
+static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file_control_t *out,
+                                   free_header_t *free_out)
 {
     if (is_blank(page)) return SLOT_BLANK;
     envelope_t envelope;
     slot_state_t state = decode_envelope(page, slot, &envelope);
     if (state != SLOT_VALID) return state;
-    if (envelope.kind != PAGE_KIND_CONTROL || envelope.table_id != 0 ||
-        envelope.body_len != CONTROL_BODY_BYTES) {
-        return SLOT_DAMAGED;
-    }
+    if (envelope.kind != PAGE_KIND_CONTROL || envelope.table_id != 0) return SLOT_DAMAGED;
     const uint8_t *body = page + PAGE_ENVELOPE_BYTES;
-    if (memcmp(body, FILE_MAGIC, sizeof(FILE_MAGIC)) != 0) return SLOT_UNSUPPORTED;
+    if (envelope.body_len < 12 || memcmp(body, FILE_MAGIC, sizeof(FILE_MAGIC)) != 0) return SLOT_UNSUPPORTED;
     if (get_u32(body + 8) != PAGE_FILE_FORMAT_VERSION) return SLOT_UNSUPPORTED;
+    if (envelope.body_len < CONTROL_HEADER_BYTES) return SLOT_DAMAGED;
     if (get_u32(body + 12) != PAGE_FILE_PAGE_BYTES) return SLOT_UNSUPPORTED;
     if (get_u32(body + 16) != BYTE_ORDER_MARK) return SLOT_UNSUPPORTED;
     page_file_control_t control = {
@@ -212,13 +252,27 @@ static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file
          control.catalog_head >= control.page_count)) {
         return SLOT_DAMAGED;
     }
+    free_header_t free_list = {get_u32(body + 52), get_u32(body + 56), get_u32(body + 60), get_u32(body + 64)};
+    uint64_t total = (uint64_t)free_list.reusable + free_list.aging;
+    if (total > control.page_count - PAGE_FILE_CONTROL_PAGES ||
+        envelope.body_len != CONTROL_HEADER_BYTES + 4u * inline_ids(total) ||
+        free_list.chain_count != chain_pages_for(total)) {
+        return SLOT_DAMAGED;
+    }
+    if ((free_list.chain_count == 0) != (free_list.chain_head == PAGE_FILE_NO_PAGE)) return SLOT_DAMAGED;
+    if (free_list.chain_head != PAGE_FILE_NO_PAGE &&
+        (free_list.chain_head < PAGE_FILE_CONTROL_PAGES || free_list.chain_head >= control.page_count)) {
+        return SLOT_DAMAGED;
+    }
     *out = control;
+    if (free_out != NULL) *free_out = free_list;
     return SLOT_VALID;
 }
 
-static void encode_control_body(uint8_t *body, const page_file_control_t *control)
+/* 본문 앞 CONTROL_HEADER_BYTES를 채운다. 번호는 호출자가 뒤에 쓴다 */
+static void encode_control_header(uint8_t *body, const page_file_control_t *control, const free_header_t *free_list)
 {
-    memset(body, 0, CONTROL_BODY_BYTES);
+    memset(body, 0, CONTROL_HEADER_BYTES);
     memcpy(body, FILE_MAGIC, sizeof(FILE_MAGIC));
     put_u32(body + 8, PAGE_FILE_FORMAT_VERSION);
     put_u32(body + 12, PAGE_FILE_PAGE_BYTES);
@@ -228,6 +282,10 @@ static void encode_control_body(uint8_t *body, const page_file_control_t *contro
     put_u32(body + 36, control->catalog_head);
     put_u32(body + 40, control->catalog_size);
     put_u64(body + 44, control->catalog_generation);
+    put_u32(body + 52, free_list->reusable);
+    put_u32(body + 56, free_list->aging);
+    put_u32(body + 60, free_list->chain_head);
+    put_u32(body + 64, free_list->chain_count);
 }
 
 /* ── 저수준 I/O: EINTR·짧은 I/O·EOF·ENOSPC를 처리한다 ── */
@@ -300,9 +358,12 @@ static void free_handle(page_file_t *file)
 {
     free(file->path);
     free(file->partial_path);
-    free(file->pending);
-    free(file->aging);
-    free(file->reusable);
+    free(file->state);
+    free(file->pending.items);
+    free(file->aging.items);
+    free(file->reusable.items);
+    free(file->fresh.items);
+    free(file->chain.items);
     page_cache_destroy(file->cache);
     free(file);
 }
@@ -441,13 +502,17 @@ page_file_status_t page_file_publish(page_file_t *file)
 
 /* ── 열기·닫기 ── */
 
+static page_file_status_t load_free_list(page_file_t *file, const uint8_t *control_page, const free_header_t *header);
+
 static page_file_status_t pick_control(const uint8_t pages[2][PAGE_FILE_PAGE_BYTES],
-                                       page_file_control_t *chosen, page_file_open_info_t *info)
+                                       page_file_control_t *chosen, free_header_t *chosen_free,
+                                       page_file_open_info_t *info)
 {
     page_file_control_t controls[2];
+    free_header_t frees[2];
     slot_state_t states[2];
     for (uint32_t slot = 0; slot < 2; slot++) {
-        states[slot] = decode_control(pages[slot], slot, &controls[slot]);
+        states[slot] = decode_control(pages[slot], slot, &controls[slot], &frees[slot]);
     }
     memset(info, 0, sizeof(*info));
     if (states[0] == SLOT_UNSUPPORTED || states[1] == SLOT_UNSUPPORTED) return PAGE_FILE_UNSUPPORTED;
@@ -461,11 +526,13 @@ static page_file_status_t pick_control(const uint8_t pages[2][PAGE_FILE_PAGE_BYT
         /* 세대는 두 슬롯에 번갈아 쓰이므로 차이가 1이 아니면 한쪽 쓰기가 사라진 것이다. */
         if ((a > b ? a - b : b - a) != 1) return PAGE_FILE_CORRUPT;
         *chosen = a > b ? controls[0] : controls[1];
+        *chosen_free = a > b ? frees[0] : frees[1];
         return PAGE_FILE_OK;
     }
     uint32_t good = states[0] == SLOT_VALID ? 0 : 1;
     uint32_t other = 1 - good;
     *chosen = controls[good];
+    *chosen_free = frees[good];
     if (states[other] == SLOT_BLANK) {
         info->blank_slots = 1;
         /* 두 번째 세대부터는 반대편 슬롯에도 내용이 있어야 한다. 0으로 지워졌다면 손상이다. */
@@ -528,6 +595,7 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
     uint8_t pages[2][PAGE_FILE_PAGE_BYTES];
     struct stat st;
     page_file_control_t chosen;
+    free_header_t chosen_free;
     page_file_open_info_t local_info;
     status = PAGE_FILE_OK;
     if (fstat(fd, &st) != 0) {
@@ -546,9 +614,14 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
         status = read_full(file, pages[slot], PAGE_FILE_PAGE_BYTES,
                            (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
     }
-    if (status == PAGE_FILE_OK) status = pick_control(pages, &chosen, &local_info);
+    if (status == PAGE_FILE_OK) status = pick_control(pages, &chosen, &chosen_free, &local_info);
     if (status == PAGE_FILE_OK && (uint64_t)st.st_size < (uint64_t)chosen.page_count * PAGE_FILE_PAGE_BYTES) {
         status = PAGE_FILE_CORRUPT; /* 파일이 제어 페이지가 약속한 길이보다 짧다 */
+    }
+    if (status == PAGE_FILE_OK && writable) {
+        /* 빈 목록은 쓰기 핸들만 쓴다. 읽기 핸들은 읽지 않는다 */
+        file->page_count = chosen.page_count;
+        status = load_free_list(file, pages[chosen.generation % 2], &chosen_free);
     }
     if (status != PAGE_FILE_OK) {
         int err = errno;
@@ -662,10 +735,15 @@ page_file_status_t page_file_read(page_file_t *file, uint32_t page_id, page_kind
 page_file_status_t page_file_write(page_file_t *file, uint32_t page_id, page_kind_t kind,
                                    uint32_t table_id, const uint8_t body[PAGE_BODY_BYTES])
 {
-    if (file == NULL || body == NULL || !file->writable || kind == PAGE_KIND_CONTROL) {
+    if (file == NULL || body == NULL || !file->writable || kind == PAGE_KIND_CONTROL || kind == PAGE_KIND_FREE_LIST) {
         return PAGE_FILE_INVALID;
     }
     if (!data_page_in_range(file, page_id)) return PAGE_FILE_INVALID;
+    if (file->poisoned) {
+        /* 게시 결과를 모르는 핸들은 어느 세대가 가리킬지 모르는 페이지를 덮어쓰지 않는다 */
+        errno = EIO;
+        return PAGE_FILE_IO;
+    }
     uint8_t page[PAGE_FILE_PAGE_BYTES];
     encode_page(page, kind, page_id, table_id, PAGE_BODY_BYTES, body);
     uint64_t offset = (uint64_t)page_id * PAGE_FILE_PAGE_BYTES;
@@ -706,35 +784,60 @@ page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
 
 /* ── 할당·해제 ── */
 
-static bool grow(uint32_t **list, size_t *cap, size_t needed)
+static bool list_grow(id_list_t *list, size_t needed)
 {
-    if (needed <= *cap) return true;
-    size_t next = *cap == 0 ? 8 : *cap;
+    if (needed <= list->cap) return true;
+    size_t next = list->cap == 0 ? 8 : list->cap;
     while (next < needed) next *= 2;
-    uint32_t *bigger = realloc(*list, next * sizeof(uint32_t));
+    uint32_t *bigger = realloc(list->items, next * sizeof(uint32_t));
     if (bigger == NULL) return false;
-    *list = bigger;
-    *cap = next;
+    list->items = bigger;
+    list->cap = next;
     return true;
 }
 
-static bool contains(const uint32_t *list, size_t length, uint32_t id)
+/* 공간은 ensure_capacity가 미리 잡는다 */
+static void list_push(id_list_t *list, uint32_t id) { list->items[list->len++] = id; }
+
+/*
+ * 페이지 상태 배열과 목록들이 페이지 n장을 담을 공간을 미리 잡는다. 서로 다른 페이지만 담으므로 어느 목록도 n을
+ * 넘지 않고, 그래서 release와 commit 성공 뒤의 이동은 할당하지 않는다.
+ */
+static bool ensure_capacity(page_file_t *file, size_t n)
 {
-    for (size_t i = 0; i < length; i++) {
-        if (list[i] == id) return true;
+    if (n > file->state_cap) {
+        size_t next = file->state_cap == 0 ? 8 : file->state_cap;
+        while (next < n) next *= 2;
+        uint8_t *bigger = realloc(file->state, next);
+        if (bigger == NULL) return false;
+        memset(bigger + file->state_cap, PS_USED, next - file->state_cap);
+        file->state = bigger;
+        file->state_cap = next;
     }
-    return false;
+    return list_grow(&file->pending, n) && list_grow(&file->aging, n) && list_grow(&file->reusable, n) &&
+           list_grow(&file->fresh, n);
 }
 
 page_file_status_t page_file_alloc(page_file_t *file, uint32_t *page_id)
 {
     if (file == NULL || page_id == NULL || !file->writable) return PAGE_FILE_INVALID;
-    if (file->reusable_len > 0) {
-        *page_id = file->reusable[--file->reusable_len];
+    if (file->poisoned) {
+        errno = EIO;
+        return PAGE_FILE_IO;
+    }
+    if (file->reusable.len > 0) {
+        uint32_t id = file->reusable.items[--file->reusable.len];
+        if (file->state[id] != PS_DISCARDED) list_push(&file->fresh, id);  /* 버린 새 페이지는 이미 목록에 있다 */
+        file->state[id] = PS_FRESH;
+        *page_id = id;
         return PAGE_FILE_OK;
     }
     if (file->page_count >= PAGE_FILE_MAX_PAGES) return PAGE_FILE_LIMIT;
-    *page_id = file->page_count++;
+    if (!ensure_capacity(file, (size_t)file->page_count + 1)) return PAGE_FILE_NOMEM;
+    uint32_t id = file->page_count++;
+    file->state[id] = PS_FRESH;
+    list_push(&file->fresh, id);
+    *page_id = id;
     return PAGE_FILE_OK;
 }
 
@@ -743,29 +846,119 @@ page_file_status_t page_file_release(page_file_t *file, uint32_t page_id)
     if (file == NULL || !file->writable || !data_page_in_range(file, page_id)) {
         return PAGE_FILE_INVALID;
     }
-    if (contains(file->pending, file->pending_len, page_id) ||
-        contains(file->aging, file->aging_len, page_id) ||
-        contains(file->reusable, file->reusable_len, page_id)) {
-        return PAGE_FILE_INVALID; /* 이중 해제 */
+    switch ((page_state_t)file->state[page_id]) {
+        case PS_USED:
+            file->state[page_id] = PS_PENDING;
+            list_push(&file->pending, page_id);
+            return PAGE_FILE_OK;
+        case PS_FRESH:
+            /* 어느 제어 페이지도 가리킨 적 없어 곧바로 다시 쓸 수 있다 */
+            file->state[page_id] = PS_DISCARDED;
+            list_push(&file->reusable, page_id);
+            return PAGE_FILE_OK;
+        default:
+            return PAGE_FILE_INVALID; /* 이중 해제 */
     }
-    if (!grow(&file->pending, &file->pending_cap, file->pending_len + 1)) return PAGE_FILE_NOMEM;
-    file->pending[file->pending_len++] = page_id;
-    return PAGE_FILE_OK;
+}
+
+bool page_file_is_fresh(const page_file_t *file, uint32_t page_id)
+{
+    return file != NULL && file->writable && data_page_in_range(file, page_id) && file->state[page_id] == PS_FRESH;
+}
+
+void page_file_restore_pending(page_file_t *file)
+{
+    if (file == NULL || !file->writable) return;
+    for (size_t i = 0; i < file->pending.len; i++) file->state[file->pending.items[i]] = PS_USED;
+    file->pending.len = 0;
+}
+
+void page_file_release_fresh(page_file_t *file)
+{
+    if (file == NULL || !file->writable) return;
+    for (size_t i = 0; i < file->fresh.len; i++) {
+        uint32_t id = file->fresh.items[i];
+        if (file->state[id] != PS_FRESH) continue;
+        file->state[id] = PS_DISCARDED;
+        list_push(&file->reusable, id);
+    }
 }
 
 size_t page_file_pending_release_count(const page_file_t *file)
 {
-    return file != NULL ? file->pending_len : 0;
+    return file != NULL ? file->pending.len : 0;
 }
 
 size_t page_file_aging_release_count(const page_file_t *file)
 {
-    return file != NULL ? file->aging_len : 0;
+    return file != NULL ? file->aging.len : 0;
 }
 
 size_t page_file_reusable_count(const page_file_t *file)
 {
-    return file != NULL ? file->reusable_len : 0;
+    return file != NULL ? file->reusable.len : 0;
+}
+
+/*
+ * 열 때 제어 페이지와 사슬에서 빈 목록을 읽는다. 번호마다 범위와 중복을 확인한다(사슬 페이지는 읽는 동안
+ * PS_FRESH로 표시해 빈 목록과 겹치면 거절하고 끝나면 PS_USED로 돌린다).
+ */
+static page_file_status_t load_free_list(page_file_t *file, const uint8_t *control_page, const free_header_t *header)
+{
+    if (!ensure_capacity(file, file->page_count) || !list_grow(&file->chain, header->chain_count)) {
+        return PAGE_FILE_NOMEM;
+    }
+    uint64_t total = (uint64_t)header->reusable + header->aging;
+    uint64_t at = 0;
+    const uint8_t *ids = control_page + PAGE_ENVELOPE_BYTES + CONTROL_HEADER_BYTES;
+    uint32_t inline_count = inline_ids(total);
+    uint8_t page[PAGE_FILE_PAGE_BYTES];
+    uint32_t next = header->chain_head;
+    page_file_status_t status = PAGE_FILE_OK;
+    for (uint32_t chain_index = 0; status == PAGE_FILE_OK && at < total; chain_index++) {
+        uint32_t count = inline_count;
+        if (chain_index > 0) {
+            envelope_t envelope;
+            if (chain_index > header->chain_count || !data_page_in_range(file, next) ||
+                file->state[next] != PS_USED) {
+                status = PAGE_FILE_CORRUPT;
+                break;
+            }
+            status = read_full(file, page, PAGE_FILE_PAGE_BYTES, (uint64_t)next * PAGE_FILE_PAGE_BYTES);
+            if (status != PAGE_FILE_OK) break;
+            if (decode_envelope(page, next, &envelope) != SLOT_VALID || envelope.kind != PAGE_KIND_FREE_LIST ||
+                envelope.table_id != 0 || envelope.body_len != PAGE_BODY_BYTES) {
+                status = PAGE_FILE_CORRUPT;
+                break;
+            }
+            file->state[next] = PS_FRESH;
+            list_push(&file->chain, next);
+            const uint8_t *body = page + PAGE_ENVELOPE_BYTES;
+            next = get_u32(body);
+            count = get_u32(body + 4);
+            ids = body + CHAIN_HEADER_BYTES;
+            if (count == 0 || count > CHAIN_IDS || count > total - at) {
+                status = PAGE_FILE_CORRUPT;
+                break;
+            }
+        }
+        for (uint32_t i = 0; i < count; i++, at++) {
+            uint32_t id = get_u32(ids + 4u * i);
+            if (!data_page_in_range(file, id) || file->state[id] != PS_USED) {
+                status = PAGE_FILE_CORRUPT;
+                break;
+            }
+            bool reusable = at < header->reusable;
+            file->state[id] = reusable ? PS_REUSABLE : PS_AGING;
+            list_push(reusable ? &file->reusable : &file->aging, id);
+        }
+    }
+    if (status == PAGE_FILE_OK && (file->chain.len != header->chain_count || next != PAGE_FILE_NO_PAGE)) {
+        status = PAGE_FILE_CORRUPT;
+    }
+    for (size_t i = 0; i < file->chain.len; i++) file->state[file->chain.items[i]] = PS_USED;
+    if (status == PAGE_FILE_CORRUPT) errno = EBADMSG;
+    return status;
 }
 
 /* ── commit ── */
@@ -782,6 +975,33 @@ page_file_status_t page_file_stage_catalog(page_file_t *file, uint32_t head, uin
     return PAGE_FILE_OK;
 }
 
+/* commit 뒤의 빈 목록을 차례로 읽는다: 재사용(지금 재사용 + 지금 대기) 다음 대기(지금 보류 + 옛 사슬) */
+typedef struct {
+    const id_list_t *parts[4];
+    int part;
+    size_t index;
+} free_cursor_t;
+
+static uint32_t cursor_next(free_cursor_t *cursor)
+{
+    while (cursor->index >= cursor->parts[cursor->part]->len) {
+        cursor->part++;
+        cursor->index = 0;
+    }
+    return cursor->parts[cursor->part]->items[cursor->index++];
+}
+
+static void put_ids(uint8_t *at, free_cursor_t *cursor, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++) put_u32(at + 4u * i, cursor_next(cursor));
+}
+
+/* commit이 받은 사슬 페이지를 돌려준다(새 페이지라 곧바로 재사용 목록으로 간다) */
+static void undo_chain(page_file_t *file, const id_list_t *chain)
+{
+    for (size_t i = chain->len; i > 0; i--) page_file_release(file, chain->items[i - 1]);
+}
+
 page_file_status_t page_file_commit(page_file_t *file)
 {
     if (file == NULL || !file->writable) return PAGE_FILE_INVALID;
@@ -792,20 +1012,31 @@ page_file_status_t page_file_commit(page_file_t *file)
     }
     file->commit_outcome = PAGE_FILE_COMMIT_NOT_APPLIED;
     if (file->committed.generation >= UINT64_MAX - 1) return PAGE_FILE_LIMIT;
-    /* 성공한 commit 뒤에 실패할 수 있는 할당은 미리 해 둔다. */
-    if (!grow(&file->reusable, &file->reusable_cap, file->reusable_len + file->aging_len) ||
-        !grow(&file->aging, &file->aging_cap, file->pending_len)) {
-        return PAGE_FILE_NOMEM;
-    }
 
-    uint64_t needed = (uint64_t)file->page_count * PAGE_FILE_PAGE_BYTES;
-    if (needed > file->file_bytes) {
-        /* 할당만 하고 쓰지 않은 페이지도 파일 길이 안에 두어 다시 열 때 잘린 파일로 보이지 않게 한다. */
-        if (ftruncate(file->fd, (off_t)needed) != 0) return PAGE_FILE_IO;
-        file->file_bytes = needed;
+    /*
+     * 빈 목록이 제어 페이지에 다 들어가지 않으면 사슬 페이지를 받는다. 재사용 목록에서 받으면 적을 번호도 하나 준다.
+     * 받은 사슬 페이지는 새 페이지라 실패하면 그대로 돌려준다.
+     */
+    id_list_t next_chain = {NULL, 0, 0};
+    for (;;) {
+        uint64_t total = (uint64_t)file->reusable.len + file->aging.len + file->pending.len + file->chain.len;
+        if (next_chain.len >= chain_pages_for(total)) break;
+        uint32_t id;
+        page_file_status_t taken = list_grow(&next_chain, next_chain.len + 1) ? page_file_alloc(file, &id)
+                                                                               : PAGE_FILE_NOMEM;
+        if (taken != PAGE_FILE_OK) {
+            undo_chain(file, &next_chain);
+            free(next_chain.items);
+            return taken;
+        }
+        list_push(&next_chain, id);
     }
-    page_file_status_t status = sync_file(file);
-    if (status != PAGE_FILE_OK) return status;
+    free_header_t header = {(uint32_t)(file->reusable.len + file->aging.len),
+                            (uint32_t)(file->pending.len + file->chain.len), PAGE_FILE_NO_PAGE,
+                            (uint32_t)next_chain.len};
+    if (next_chain.len > 0) header.chain_head = next_chain.items[0];
+    free_cursor_t cursor = {{&file->reusable, &file->aging, &file->pending, &file->chain}, 0, 0};
+    uint64_t total = (uint64_t)header.reusable + header.aging;
 
     page_file_control_t next = {
         .generation = file->committed.generation + 1,
@@ -814,35 +1045,86 @@ page_file_status_t page_file_commit(page_file_t *file)
         .catalog_size = file->staged_size,
         .catalog_generation = file->staged_generation,
     };
-    uint8_t body[CONTROL_BODY_BYTES];
+    uint8_t body[PAGE_BODY_BYTES];
     uint8_t page[PAGE_FILE_PAGE_BYTES];
-    encode_control_body(body, &next);
+    uint32_t inline_count = inline_ids(total);
+    encode_control_header(body, &next, &header);
+    put_ids(body + CONTROL_HEADER_BYTES, &cursor, inline_count);
+    uint32_t control_bytes = CONTROL_HEADER_BYTES + 4u * inline_count;
     uint32_t slot = (uint32_t)(next.generation % 2);
-    encode_page(page, PAGE_KIND_CONTROL, slot, 0, CONTROL_BODY_BYTES, body);
+
+    page_file_status_t status = PAGE_FILE_OK;
+    uint64_t left = total - inline_count;
+    uint8_t chain_body[PAGE_BODY_BYTES];
+    for (size_t i = 0; i < next_chain.len && status == PAGE_FILE_OK; i++) {
+        uint32_t count = left < CHAIN_IDS ? (uint32_t)left : CHAIN_IDS;
+        memset(chain_body, 0, sizeof(chain_body));
+        put_u32(chain_body, i + 1 < next_chain.len ? next_chain.items[i + 1] : PAGE_FILE_NO_PAGE);
+        put_u32(chain_body + 4, count);
+        put_ids(chain_body + CHAIN_HEADER_BYTES, &cursor, count);
+        left -= count;
+        uint32_t id = next_chain.items[i];
+        encode_page(page, PAGE_KIND_FREE_LIST, id, 0, PAGE_BODY_BYTES, chain_body);
+        page_cache_drop(file->cache, id);
+        status = write_full(file, page, sizeof(page), (uint64_t)id * PAGE_FILE_PAGE_BYTES);
+        uint64_t end = ((uint64_t)id + 1) * PAGE_FILE_PAGE_BYTES;
+        if (status == PAGE_FILE_OK && end > file->file_bytes) file->file_bytes = end;
+    }
+
+    uint64_t needed = (uint64_t)file->page_count * PAGE_FILE_PAGE_BYTES;
+    if (status == PAGE_FILE_OK && needed > file->file_bytes) {
+        /* 할당만 하고 쓰지 않은 페이지도 파일 길이 안에 두어 다시 열 때 잘린 파일로 보이지 않게 한다. */
+        if (ftruncate(file->fd, (off_t)needed) != 0) status = PAGE_FILE_IO;
+        else file->file_bytes = needed;
+    }
+    if (status == PAGE_FILE_OK) status = sync_file(file);
+    if (status != PAGE_FILE_OK) {
+        int err = errno;
+        if (!file->poisoned) undo_chain(file, &next_chain);
+        free(next_chain.items);
+        errno = err;
+        return status;
+    }
+
+    encode_page(page, PAGE_KIND_CONTROL, slot, 0, control_bytes, body);
     /* 여기서부터는 실패해도 디스크에 새 세대가 남았는지 알 수 없다. */
     file->commit_outcome = PAGE_FILE_COMMIT_UNKNOWN;
     status = write_full(file, page, sizeof(page), (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
+    if (status != PAGE_FILE_OK) file->poisoned = true;
+    if (status == PAGE_FILE_OK) status = sync_file(file);
     if (status != PAGE_FILE_OK) {
-        file->poisoned = true;
+        free(next_chain.items);
         return status;
     }
-    status = sync_file(file);
-    if (status != PAGE_FILE_OK) return status;
 
     file->commit_outcome = PAGE_FILE_COMMIT_APPLIED;
     file->committed = next;
     /*
-     * 이전 commit이 놓은 페이지는 방금 commit으로 두 제어 슬롯(현재와 fallback) 모두 더는 가리키지
-     * 않으므로 이제 재사용할 수 있다. 이번에 놓은 페이지는 fallback 세대가 아직 가리킬 수 있어 한 번 더
-     * commit한 뒤에야 재사용한다.
+     * 새 페이지는 이제 게시된 상태의 일부다. 이전 commit이 놓은 페이지는 방금 commit으로 두 제어 슬롯(현재와
+     * fallback) 모두 더는 가리키지 않으므로 재사용할 수 있다. 이번에 놓은 페이지와 옛 사슬은 fallback 세대가
+     * 아직 가리킬 수 있어 한 번 더 commit한 뒤에야 재사용한다. 목록 순서는 방금 쓴 빈 목록과 같다.
      */
-    for (size_t i = 0; i < file->aging_len; i++) file->reusable[file->reusable_len++] = file->aging[i];
-    /* 놓은 페이지가 없으면 두 목록이 NULL일 수 있어 길이 0이어도 memcpy를 부르지 않는다 */
-    if (file->pending_len > 0) {
-        memcpy(file->aging, file->pending, file->pending_len * sizeof(*file->pending));
+    for (size_t i = 0; i < file->fresh.len; i++) {
+        uint32_t id = file->fresh.items[i];
+        file->state[id] = file->state[id] == PS_FRESH ? PS_USED : PS_REUSABLE;
     }
-    file->aging_len = file->pending_len;
-    file->pending_len = 0;
+    file->fresh.len = 0;
+    for (size_t i = 0; i < file->aging.len; i++) {
+        file->state[file->aging.items[i]] = PS_REUSABLE;
+        list_push(&file->reusable, file->aging.items[i]);
+    }
+    file->aging.len = 0;
+    for (size_t i = 0; i < file->pending.len; i++) {
+        file->state[file->pending.items[i]] = PS_AGING;
+        list_push(&file->aging, file->pending.items[i]);
+    }
+    file->pending.len = 0;
+    for (size_t i = 0; i < file->chain.len; i++) {
+        file->state[file->chain.items[i]] = PS_AGING;
+        list_push(&file->aging, file->chain.items[i]);
+    }
+    free(file->chain.items);
+    file->chain = next_chain;
     return PAGE_FILE_OK;
 }
 
@@ -907,9 +1189,10 @@ size_t page_file_handle_bytes(const page_file_t *file)
 
 size_t page_file_list_peak_bytes(uint32_t page_count)
 {
-    size_t cap = (size_t)page_count * 2;
-    if (cap < 8) cap = 8;
-    return 4 * cap * sizeof(uint32_t);
+    size_t cap = 8;
+    while (cap < page_count) cap *= 2;
+    /* 상태 배열과 목록 다섯이 각각 cap. 늘 때는 하나씩 옛 배열(cap/2)이 함께 있다 */
+    return cap + cap / 2 + 5 * cap * sizeof(uint32_t) + cap / 2 * sizeof(uint32_t);
 }
 
 size_t page_file_open_peak_bytes(const char *path)

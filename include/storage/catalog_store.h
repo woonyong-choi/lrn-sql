@@ -39,8 +39,10 @@ typedef enum {
 } catalog_store_status_t;
 
 /*
- * 카탈로그를 저장하고 commit한다. 제어 쓰기를 시도하기 전에 실패하면(IO·NOMEM·LIMIT 등) 제어
- * 페이지는 이전 세대를 가리키고 이전 카탈로그는 그대로 읽히며, 새 체인은 해제한다. 제어 쓰기를
+ * 카탈로그를 저장하고 commit한다. 옛 체인은 commit 전에 놓아 그 commit의 빈 목록에 함께 적는다. 호출자도 새
+ * 상태가 가리키지 않는 페이지를 이 호출 전에 놓는다(page_file_release). 제어 쓰기를 시도하기 전에 실패하면
+ * (IO·NOMEM·LIMIT·STALE 등) 제어 페이지는 이전 세대를 가리키고 이전 카탈로그는 그대로 읽히며, 새 체인은 해제하고
+ * 보류 해제(호출자가 놓은 것 포함)는 page_file_restore_pending으로 되돌린다. 제어 쓰기를
  * 시도한 뒤의 실패는 CATALOG_STORE_OUTCOME_UNKNOWN이며 어느 세대가 남았는지 알 수 없다.
  * poison된 핸들은 아무것도 쓰지 않고 IO로 거절한다.
  * catalog_generation(catalog)가 저장된 값보다 작으면 STALE이다.

@@ -36,8 +36,6 @@ typedef struct {
     bool failed;
     bool inside;                 /* 지금 실행 중인 문장이 이 작업의 문장이다(작업 카탈로그 기준으로 읽는다) */
     catalog_t *cat;              /* 작업 카탈로그. NULL이면 바꾼 것이 없다 */
-    page_list_t fresh;           /* 작업이 만들어 지금 가리키는 페이지 */
-    page_list_t superseded;      /* 작업이 만들었다가 대체한 페이지. 어느 제어 페이지도 가리킨 적 없다 */
     page_list_t old_committed;   /* 게시된 상태가 가리키고 작업이 대체한 페이지. 게시 성공 뒤에만 놓는다 */
     size_t res_cat;              /* resident로 계상한 작업 카탈로그 몫 */
     size_t res_lists;            /* resident로 계상한 위 목록들의 상한 */
@@ -186,17 +184,6 @@ static void list_push(page_list_t *list, uint32_t page)
 {
     assert(list->len < list->cap);
     list->items[list->len++] = page;
-}
-
-/* page가 있으면 지우고 true. 순서는 바뀐다 */
-static bool list_take(page_list_t *list, uint32_t page)
-{
-    for (size_t i = 0; i < list->len; i++) {
-        if (list->items[i] != page) continue;
-        list->items[i] = list->items[--list->len];
-        return true;
-    }
-    return false;
 }
 
 static void list_free(page_list_t *list)
@@ -834,8 +821,7 @@ static database_exec_status_t stage_adopt(database_t *db, work_t *work, heap_bat
                                           size_t drop_count, result_t *success, result_t **out)
 {
     size_t old_total = finished->old_count + drop_count;
-    if (!list_reserve(&db->work.fresh, finished->new_count) || !list_reserve(&db->work.superseded, old_total) ||
-        !list_reserve(&db->work.old_committed, old_total)) {
+    if (!list_reserve(&db->work.old_committed, old_total)) {
         publish_discard(db, work, batch, &success);
         return DATABASE_EXEC_NOMEM;
     }
@@ -844,18 +830,15 @@ static database_exec_status_t stage_adopt(database_t *db, work_t *work, heap_bat
         publish_discard(db, work, batch, &success);
         return DATABASE_EXEC_NOMEM;
     }
-    /* 여기서부터 실패하지 않는다 */
-    for (size_t i = 0; i < finished->old_count; i++) {
-        uint32_t page = finished->old_pages[i];
-        if (list_take(&db->work.fresh, page)) list_push(&db->work.superseded, page);
+    /*
+     * 여기서부터 실패하지 않는다. 이 작업의 앞선 문장이 만든 페이지(아직 어느 제어 페이지도 가리킨 적 없다)는 곧바로
+     * 놓아 다음 문장이 다시 쓴다(새 페이지의 release는 실패하지 않는다). 게시된 상태가 가리키는 페이지는 게시 뒤에 놓는다.
+     */
+    for (size_t i = 0; i < finished->old_count + drop_count; i++) {
+        uint32_t page = i < finished->old_count ? finished->old_pages[i] : drop_pages[i - finished->old_count];
+        if (page_file_is_fresh(db->file, page)) page_file_release(db->file, page);
         else list_push(&db->work.old_committed, page);
     }
-    for (size_t i = 0; i < drop_count; i++) {
-        uint32_t page = drop_pages[i];
-        if (list_take(&db->work.fresh, page)) list_push(&db->work.superseded, page);
-        else list_push(&db->work.old_committed, page);
-    }
-    for (size_t i = 0; i < finished->new_count; i++) list_push(&db->work.fresh, finished->new_pages[i]);
     catalog_close(db->work.cat);
     db->work.cat = work->cat;
     q_release(db, work->charged);  /* 이 카탈로그는 이제 문장 몫이 아니라 상주 몫이다 */
@@ -928,13 +911,16 @@ static database_exec_status_t publish_inner(database_t *db, work_t *work, catalo
         return DATABASE_EXEC_NOMEM;
     }
 
+    /*
+     * 새 상태가 가리키지 않는 옛 페이지는 commit 전에 놓아 그 commit의 빈 목록에 함께 적는다. 반영되지 않으면
+     * catalog_store_save가 되돌린다. 놓지 못한 페이지는 새는 공간일 뿐이다
+     */
+    if (batch != NULL) heap_batch_release_old(batch);
+    for (size_t i = 0; i < drop_count; i++) page_file_release(db->file, drop_pages[i]);
     catalog_store_status_t saved = catalog_store_save(db->file, work->cat);
     int saved_errno = errno;
     q_release(db, save_peak);
     if (saved == CATALOG_STORE_OK || saved == CATALOG_STORE_UNRECLAIMED) {
-        /* 게시됐다. 옛 페이지는 이제 놓아도 된다. 놓지 못한 페이지는 새는 공간일 뿐이다 */
-        if (batch != NULL) heap_batch_release_old(batch);
-        for (size_t i = 0; i < drop_count; i++) page_file_release(db->file, drop_pages[i]);
         catalog_close(db->catalog);
         db->catalog = work->cat;
         q_release(db, work->charged);  /* 이 카탈로그는 이제 문장 몫이 아니라 상주 몫이다 */
@@ -2462,6 +2448,8 @@ database_work_result_t database_work_commit(database_t *db)
         result.saved_errno = ENOMEM;
         return result;
     }
+    /* 게시된 상태가 가리키던 페이지는 commit 전에 놓아 그 commit의 빈 목록에 함께 적는다(실패하면 되돌려진다) */
+    for (size_t i = 0; i < db->work.old_committed.len; i++) page_file_release(db->file, db->work.old_committed.items[i]);
     catalog_store_status_t saved = catalog_store_save(db->file, db->work.cat);
     result.saved_errno = errno;
     mem_release(&db->resident, MEM_SCOPE_RESIDENT, save_peak);
@@ -2479,16 +2467,9 @@ database_work_result_t database_work_commit(database_t *db)
     return result;
 }
 
-static void release_pages(database_t *db, const page_list_t *list)
-{
-    for (size_t i = 0; i < list->len; i++) page_file_release(db->file, list->items[i]);
-}
-
 static void work_reset(database_t *db)
 {
     mem_release(&db->resident, MEM_SCOPE_RESIDENT, db->work.res_cat + db->work.res_lists);
-    list_free(&db->work.fresh);
-    list_free(&db->work.superseded);
     list_free(&db->work.old_committed);
     db->work = (work_state_t){0};
 }
@@ -2506,11 +2487,9 @@ void database_work_end(database_t *db, database_work_outcome_t outcome)
             db->res_catalog = db->work.res_cat;
             db->work.res_cat = 0;
         }
-        release_pages(db, &db->work.old_committed);
-        release_pages(db, &db->work.superseded);
     } else if (outcome == DATABASE_WORK_NOT_APPLIED) {
-        release_pages(db, &db->work.fresh);
-        release_pages(db, &db->work.superseded);
+        /* 작업이 만든 페이지는 어느 제어 페이지도 가리킨 적 없어 곧바로 다시 쓸 수 있다 */
+        page_file_release_fresh(db->file);
     } else {
         db->poisoned = true;
     }

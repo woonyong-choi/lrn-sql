@@ -1084,11 +1084,13 @@ static void test_failures_never_change_published_state(void)
                 batch_failures++;
                 CHECK(failure == HEAP_OK || failure == HEAP_IO || failure == HEAP_NOMEM,
                       "%s %d: 실패 상태 %d", names[kind], n, failure);
+                size_t reusable_mid = page_file_reusable_count(fx.file);
                 size_t pending_mid = page_file_pending_release_count(fx.file);
                 size_t tracked = heap_batch_fresh_count(batch);
                 CHECK(heap_batch_abort(batch) == HEAP_OK, "%s %d: abort", names[kind], n);
-                CHECK(page_file_pending_release_count(fx.file) - pending_mid == tracked && heap_batch_fresh_count(batch) == 0,
-                      "%s %d: abort가 추적한 페이지(%zu)를 모두 놓음", names[kind], n, tracked);
+                CHECK(page_file_reusable_count(fx.file) - reusable_mid == tracked &&
+                          page_file_pending_release_count(fx.file) == pending_mid && heap_batch_fresh_count(batch) == 0,
+                      "%s %d: abort가 추적한 새 페이지(%zu)를 곧바로 재사용 목록에 놓음", names[kind], n, tracked);
                 heap_batch_free(batch);
                 CHECK(heap_matches_model(fx.heap), "%s %d: 게시된 상태 불변(같은 핸들)", names[kind], n);
                 fx_reopen(&fx);

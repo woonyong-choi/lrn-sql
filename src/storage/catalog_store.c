@@ -49,6 +49,15 @@ static catalog_store_status_t from_catalog(catalog_status_t status)
     }
 }
 
+/* 반영되지 않은 commit: 이번 commit에서 빠지기로 한 페이지(호출자가 놓은 것 포함)를 되돌린다 */
+static catalog_store_status_t not_applied(page_file_t *file, catalog_store_status_t status)
+{
+    int saved_errno = errno;
+    page_file_restore_pending(file);
+    errno = saved_errno;
+    return status;
+}
+
 catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *catalog)
 {
     if (file == NULL || catalog == NULL) return CATALOG_STORE_INVALID;
@@ -61,24 +70,25 @@ catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *ca
     uint32_t old_size = control->catalog_size;
     uint64_t old_generation = control->catalog_generation;
     uint64_t generation = catalog_generation(catalog);
-    if (old_head != PAGE_FILE_NO_PAGE && generation < old_generation) return CATALOG_STORE_STALE;
+    if (old_head != PAGE_FILE_NO_PAGE && generation < old_generation) return not_applied(file, CATALOG_STORE_STALE);
 
     uint8_t *bytes = NULL;
     size_t size = 0;
     catalog_status_t encoded = catalog_encode(catalog, &bytes, &size);
-    if (encoded != CATALOG_OK) {
-        return from_catalog(encoded);
-    }
+    if (encoded != CATALOG_OK) return not_applied(file, from_catalog(encoded));
 
     page_file_overflow_ctx_t ctx;
     overflow_io_t io = page_file_overflow_io(&ctx, file, CATALOG_TABLE_ID);
     overflow_ref_t created;
     overflow_status_t written = overflow_write(&io, bytes, size, &created);
     free(bytes);
-    if (written != OVERFLOW_OK) {
-        return from_overflow(written, &ctx);
-    }
+    if (written != OVERFLOW_OK) return not_applied(file, from_overflow(written, &ctx));
 
+    /* 옛 체인은 이 commit에서 빠지는 페이지다. commit 전에 놓아 빈 목록에 함께 적는다 */
+    bool unreclaimed = false;
+    if (old_head != PAGE_FILE_NO_PAGE) {
+        unreclaimed = overflow_free(&io, (overflow_ref_t){old_head, old_size}) != OVERFLOW_OK;
+    }
     int saved_errno = 0;
     page_file_status_t staged = page_file_stage_catalog(file, created.head, created.size_bytes, generation);
     page_file_status_t committed = staged == PAGE_FILE_OK ? page_file_commit(file) : staged;
@@ -96,15 +106,10 @@ catalog_store_status_t catalog_store_save(page_file_t *file, const catalog_t *ca
         overflow_free(&io, created);
         page_file_stage_catalog(file, old_head, old_size, old_generation);
         errno = saved_errno;
-        return from_page_file(committed);
+        return not_applied(file, from_page_file(committed));
     }
 
-    /* commit이 끝난 뒤에만 옛 체인을 놓는다. 놓은 페이지는 다음 commit 뒤에야 재사용된다. */
-    if (old_head != PAGE_FILE_NO_PAGE) {
-        overflow_status_t freed = overflow_free(&io, (overflow_ref_t){old_head, old_size});
-        if (freed != OVERFLOW_OK) return CATALOG_STORE_UNRECLAIMED;
-    }
-    return CATALOG_STORE_OK;
+    return unreclaimed ? CATALOG_STORE_UNRECLAIMED : CATALOG_STORE_OK;
 }
 
 catalog_store_status_t catalog_store_load(page_file_t *file, catalog_t **out)

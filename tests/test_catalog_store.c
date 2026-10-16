@@ -341,9 +341,10 @@ static void test_save_orders_commit_before_release_and_failure_keeps_old(void)
     add_table(catalog, "t2", false);
     g_pending_at_control_write = -1;
     CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_OK, "두 번째 저장");
-    CHECK(g_pending_at_control_write == 0, "제어 페이지를 쓰는 시점에는 옛 체인이 아직 놓이지 않음 (%d)",
-          g_pending_at_control_write);
-    CHECK(page_file_pending_release_count(file) == old_count, "commit 뒤에야 옛 체인이 보류 해제됨");
+    CHECK(g_pending_at_control_write == (int)old_count,
+          "옛 체인은 commit 전에 놓여 제어 페이지의 빈 목록에 함께 적힘 (%d)", g_pending_at_control_write);
+    CHECK(page_file_pending_release_count(file) == 0 && page_file_aging_release_count(file) == old_count,
+          "commit 뒤 옛 체인은 fallback 세대를 위해 한 commit 더 대기");
     CHECK(page_file_reusable_count(file) == 0, "옛 체인은 곧바로 재사용되지 않음");
     uint32_t new_pages[8];
     size_t new_count = chain_pages(file, page_file_control(file)->catalog_head, 0, new_pages, 8);
@@ -354,7 +355,7 @@ static void test_save_orders_commit_before_release_and_failure_keeps_old(void)
     catalog_t *before_fail;
     assert(catalog_store_load(file, &before_fail) == CATALOG_STORE_OK);
     uint64_t generation_before = page_file_control(file)->generation;
-    size_t pending_before = page_file_pending_release_count(file);
+    size_t reusable_before = page_file_reusable_count(file);
     g_fail_pwrite_at = 0;
     g_pwrite_calls = 0;
     /* 새 체인 쓰기 1페이지 + 제어 쓰기 1회: 두 번째 pwrite가 제어 페이지다 */
@@ -368,8 +369,8 @@ static void test_save_orders_commit_before_release_and_failure_keeps_old(void)
     catalog_t *after_fail = NULL;
     CHECK(catalog_store_load(file, &after_fail) == CATALOG_STORE_OK && same_catalog(before_fail, after_fail),
           "실패한 저장 뒤에도 이전 카탈로그가 같은 핸들에서 읽힘");
-    CHECK(page_file_pending_release_count(file) == pending_before,
-          "불확정 결과에서는 새 체인도 옛 체인도 놓지 않음");
+    CHECK(page_file_reusable_count(file) == reusable_before,
+          "불확정 결과에서는 새 체인도 옛 체인도 재사용 가능으로 만들지 않음");
     g_pwrite_calls = 0;
     g_fail_pwrite_at = 0;
     CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO, "poison된 핸들은 저장을 거절");
@@ -453,12 +454,12 @@ static void test_save_failure_outcomes_are_distinguished(void)
     g_fsync_calls = 0;
     g_fail_fsync_at = 2;
     errno = 0;
-    size_t pending_before = page_file_pending_release_count(file);
+    size_t reusable_before = page_file_reusable_count(file);
     CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_OUTCOME_UNKNOWN && errno == EIO,
           "제어 쓰기 뒤 fsync 실패는 불확정");
     g_fail_fsync_at = 0;
-    CHECK(page_file_is_poisoned(file) && page_file_pending_release_count(file) == pending_before,
-          "poison이고 어느 체인도 놓지 않음");
+    CHECK(page_file_is_poisoned(file) && page_file_reusable_count(file) == reusable_before,
+          "poison이고 어느 체인도 재사용 가능으로 만들지 않음");
     CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO, "poison된 핸들은 거절");
     page_file_close(file);
     assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
