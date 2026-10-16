@@ -472,22 +472,26 @@ int tote_txn_failed(const tote_txn_t *txn)
 
 /* ── 큐 ── */
 
-int tote_queue_open(tote_db_t *db, const char *name, int install, uint32_t max_attempts, tote_clock_fn clock,
-              void *clock_ctx, tote_queue_t **out)
+int tote_queue_open(tote_db_t *db, const char *name, int install, const tote_queue_options_t *options,
+                    tote_queue_t **out)
 {
     if (db == NULL || out == NULL) return ACKQ_INVALID;
     *out = NULL;
+    static const tote_queue_options_t defaults = {0};
+    const tote_queue_options_t *given = options != NULL ? options : &defaults;
     tote_queue_t *handle = calloc(1, sizeof(*handle));
     if (handle == NULL) return ACKQ_NOMEM;
-    ackq_options_t options = {0};
-    options.name = name;
-    options.max_attempts = max_attempts;
-    options.begin_timeout_ms = 0;
-    options.now_ms = clock;
-    options.clock_ctx = clock_ctx;
+    ackq_options_t queue_options = {0};
+    queue_options.name = name;
+    queue_options.max_attempts = given->max_attempts;
+    queue_options.max_payload_bytes = given->max_payload_bytes;
+    queue_options.idem_retention_ms = given->idem_retention_ms;
+    queue_options.begin_timeout_ms = 0;
+    queue_options.now_ms = given->clock;
+    queue_options.clock_ctx = given->clock_ctx;
     pthread_mutex_lock(&db->mutex);
-    int status = install ? ackq_install(db->autocommit, &options, &handle->queue)
-                         : ackq_open(db->autocommit, &options, &handle->queue);
+    int status = install ? ackq_install(db->autocommit, &queue_options, &handle->queue)
+                         : ackq_open(db->autocommit, &queue_options, &handle->queue);
     if (status == ACKQ_OK) db->live_queues++;
     pthread_mutex_unlock(&db->mutex);
     if (status != ACKQ_OK) {
@@ -565,6 +569,14 @@ int tote_queue_ack(tote_queue_t *q, tote_txn_t *txn, uint64_t id, uint64_t fence
 {
     int status;
     QUEUE_CALL(q, txn, ackq_ack(q->queue, session, id, fence));
+    return status;
+}
+
+int tote_queue_extend(tote_queue_t *q, tote_txn_t *txn, uint64_t id, uint64_t fence, uint64_t lease_ms,
+                      uint64_t *lease_until)
+{
+    int status;
+    QUEUE_CALL(q, txn, ackq_extend(q->queue, session, id, fence, lease_ms, lease_until));
     return status;
 }
 

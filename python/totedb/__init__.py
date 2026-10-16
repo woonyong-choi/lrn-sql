@@ -4,7 +4,17 @@ Database와 Transaction은 큐 없이 DB 단독으로 쓴다. Queue는 설치해
 persistqueue_compat은 persist-queue 1.1.0 SQLiteAckQueue의 일부 호출을 감싸며 의미 차이는 그 모듈에 적었다.
 """
 
-from totedb.queue import Queue, Claim, ClaimToken, ItemInfo, ItemState, PutResult, QueueStats
+from totedb.queue import (
+    DEFAULT_IDEM_RETENTION_MS,
+    DEFAULT_MAX_PAYLOAD_BYTES,
+    Claim,
+    ClaimToken,
+    ItemInfo,
+    ItemState,
+    PutResult,
+    Queue,
+    QueueStats,
+)
 from totedb.database import Column, Database, Result, SqlValue, Transaction
 from totedb.errors import (
     BusyError,
@@ -28,6 +38,8 @@ from totedb.errors import (
 )
 
 __all__ = [
+    "DEFAULT_IDEM_RETENTION_MS",
+    "DEFAULT_MAX_PAYLOAD_BYTES",
     "Queue",
     "BusyError",
     "CancelledError",

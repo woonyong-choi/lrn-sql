@@ -7,15 +7,29 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import IntEnum
 
-from totedb._native import CLOCK_FN, LIST_NOTE_BYTES, Item, ListItem, load_library
+from totedb._native import CLOCK_FN, LIST_NOTE_BYTES, Item, ListItem, QueueOptions, load_library
 from totedb.database import Database, Transaction, check, retry_busy
-from totedb.errors import STATUS_BUSY, STATUS_EMPTY, BusyError
+from totedb.errors import STATUS_BUSY, STATUS_EMPTY, BusyError, InvalidArgumentError
 
-__all__ = ["Queue", "Claim", "ClaimToken", "ItemInfo", "ItemState", "PutResult", "QueueStats"]
+__all__ = [
+    "DEFAULT_IDEM_RETENTION_MS",
+    "DEFAULT_MAX_PAYLOAD_BYTES",
+    "Claim",
+    "ClaimToken",
+    "ItemInfo",
+    "ItemState",
+    "PutResult",
+    "Queue",
+    "QueueStats",
+]
 
 _lib = load_library()
 
 _MAX_LIST_PAGE = 1024
+# ack_queue.h와 같은 값
+DEFAULT_MAX_PAYLOAD_BYTES = 1 << 20
+DEFAULT_IDEM_RETENTION_MS = 7 * 24 * 3600 * 1000
+_RETENTION_NONE = (1 << 64) - 1
 
 
 class ItemState(IntEnum):
@@ -91,21 +105,37 @@ class Queue:
         *,
         install: bool = True,
         max_attempts: int = 0,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        idem_retention_ms: int = DEFAULT_IDEM_RETENTION_MS,
         clock: Callable[[], int] | None = None,
     ) -> None:
+        """큐를 연다(install이면 없을 때 만든다).
+
+        Args:
+            max_attempts: 시도 횟수 상한. 0이면 제한 없음.
+            max_payload_bytes: payload 한 건의 상한. 약 3.9 KB 이하가 가장 빠르다.
+            idem_retention_ms: purge 뒤 idempotency key를 남기는 기간. 0이면 남기지 않는다.
+            clock: 밀리초 시계. 없으면 실시간.
+
+        Raises:
+            InvalidArgumentError: 이름이나 옵션이 범위를 벗어날 때.
+        """
+        if max_payload_bytes <= 0 or idem_retention_ms < 0:
+            raise InvalidArgumentError("max_payload_bytes must be positive and idem_retention_ms non-negative")
         self.db = db
         self.name = name
         self._clock = clock
         self._clock_callback = CLOCK_FN(lambda _ctx: int(clock())) if clock is not None else CLOCK_FN()
+        options = QueueOptions(
+            max_attempts=max_attempts,
+            max_payload_bytes=max_payload_bytes,
+            idem_retention_ms=idem_retention_ms if idem_retention_ms > 0 else _RETENTION_NONE,
+            clock=self._clock_callback,
+            clock_ctx=None,
+        )
         handle = ctypes.c_void_p()
         status = _lib.tote_queue_open(
-            db.handle,
-            name.encode("utf-8"),
-            1 if install else 0,
-            max_attempts,
-            self._clock_callback,
-            None,
-            ctypes.byref(handle),
+            db.handle, name.encode("utf-8"), 1 if install else 0, ctypes.byref(options), ctypes.byref(handle)
         )
         check(status)
         self._handle: ctypes.c_void_p | None = handle
@@ -161,6 +191,23 @@ class Queue:
     def ack(self, claim: ClaimToken, *, txn: Transaction | None = None) -> None:
         """처리를 끝낸다. 옛 claim이면 StaleError이며 아무것도 바꾸지 않는다."""
         check(self._call(lambda: _lib.tote_queue_ack(self.handle, _txn_handle(txn), claim.id, claim.fence), txn))
+
+    def extend(self, claim: ClaimToken, lease_ms: int, *, txn: Transaction | None = None) -> int:
+        """같은 claim의 lease를 지금 + lease_ms로 늘리고 새 만료 시각(밀리초)을 돌려준다. fence는 그대로다.
+
+        Raises:
+            StaleError: 다른 worker가 다시 가져갔거나 이미 끝난 작업일 때. 아무것도 바꾸지 않는다.
+        """
+        until = ctypes.c_uint64()
+        check(
+            self._call(
+                lambda: _lib.tote_queue_extend(
+                    self.handle, _txn_handle(txn), claim.id, claim.fence, lease_ms, ctypes.byref(until)
+                ),
+                txn,
+            )
+        )
+        return until.value
 
     def fail(self, claim: ClaimToken, reason: str = "", *, txn: Transaction | None = None) -> None:
         """다시 시도하지 않는 terminal failure로 끝낸다."""

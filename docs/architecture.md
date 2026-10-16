@@ -56,7 +56,8 @@ ToteDB은 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데이
 
 1. `ack_queue`가 `put`을 호출자가 준 세션의 INSERT로 실행한다. 세션에 트랜잭션이 열려 있으면 그 안에서 실행하고 commit은 호출자가 한다. 없으면 그 세션에 자기 트랜잭션을 열고 commit한다.
 2. `get`이 READY 작업이나 lease가 끝난 LEASED 작업을 골라 LEASED로 바꾸고 fence 값을 1 올려 돌려준다.
-3. `ack`·`nack`·`fail`은 작업 id와 fence가 지금 값과 같을 때만 적용한다.
+3. `ack`·`nack`·`fail`·`extend`(lease 연장)는 작업 id와 fence가 지금 값과 같을 때만 적용한다.
+4. `purge`는 끝난 작업을 지우고, idempotency 키가 있으면 키·id·payload 요약을 보존 기간 동안 `tote_queue_<name>_keys`에 남긴다. 그 기간의 같은 키 재시도는 지운 작업을 돌려준다.
 
 ## 지켜야 할 규칙
 

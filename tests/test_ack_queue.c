@@ -43,12 +43,12 @@ static void test_optional_install(void)
     db = open_db();
     CHECK(database_table_count(raw_db(db)) == tables, "재시작 뒤에도 큐 테이블이 없다");
     CHECK(ackq_install(db, &o, &q) == ACKQ_OK && q != NULL, "install");
-    CHECK(database_table_count(raw_db(db)) == tables + 1, "설치가 테이블 하나를 만든다");
+    CHECK(database_table_count(raw_db(db)) == tables + 2, "설치가 큐 테이블과 key 보존 테이블을 만든다");
     ackq_close(&q);
     ackq_t *again = NULL;
     ackq_t *reopened = NULL;
     CHECK(ackq_install(db, &o, &again) == ACKQ_OK && ackq_open(db, &o, &reopened) == ACKQ_OK, "install·open은 멱등이다");
-    CHECK(database_table_count(raw_db(db)) == tables + 1, "다시 설치해도 테이블은 하나");
+    CHECK(database_table_count(raw_db(db)) == tables + 2, "다시 설치해도 테이블은 그대로");
     ackq_close(&again);
     ackq_close(&reopened);
     ackq_close(&q);
@@ -123,14 +123,15 @@ static void test_payload_and_idempotency(void)
     CHECK(claim_n(q, db, 1, 100) == 1 && g_items[0].payload_size == 0 && g_items[0].payload == NULL, "빈 payload 왕복");
     ackq_claims_release(g_items, 1);
 
-    uint8_t *max = malloc(ACKQ_MAX_PAYLOAD_BYTES + 1);
-    for (size_t i = 0; i <= ACKQ_MAX_PAYLOAD_BYTES; i++) max[i] = (uint8_t)(i * 31u);
-    CHECK(ackq_enqueue(q, db, max, ACKQ_MAX_PAYLOAD_BYTES, NULL, &id, NULL) == ACKQ_OK, "상한 크기 payload (WAL 포함)");
-    CHECK(ackq_enqueue(q, db, max, ACKQ_MAX_PAYLOAD_BYTES + 1, NULL, &other, NULL) == ACKQ_LIMIT, "상한+1은 자르지 않고 거절");
+    uint8_t *max = malloc(ACKQ_DEFAULT_MAX_PAYLOAD_BYTES + 1);
+    for (size_t i = 0; i <= ACKQ_DEFAULT_MAX_PAYLOAD_BYTES; i++) max[i] = (uint8_t)(i * 31u);
+    CHECK(ackq_enqueue(q, db, max, ACKQ_DEFAULT_MAX_PAYLOAD_BYTES, NULL, &id, NULL) == ACKQ_OK, "기본 상한 크기 payload");
+    CHECK(ackq_enqueue(q, db, max, ACKQ_DEFAULT_MAX_PAYLOAD_BYTES + 1, NULL, &other, NULL) == ACKQ_LIMIT,
+          "기본 상한+1은 자르지 않고 거절");
     ackq_stats_t stats;
     CHECK(ackq_stats(q, db, &stats) == ACKQ_OK && stats.ready + stats.leased == 2, "거절은 작업을 만들지 않는다");
-    CHECK(claim_n(q, db, 1, 100) == 1 && g_items[0].payload_size == ACKQ_MAX_PAYLOAD_BYTES &&
-              memcmp(g_items[0].payload, max, ACKQ_MAX_PAYLOAD_BYTES) == 0, "상한 payload 바이트 일치");
+    CHECK(claim_n(q, db, 1, 100) == 1 && g_items[0].payload_size == ACKQ_DEFAULT_MAX_PAYLOAD_BYTES &&
+              memcmp(g_items[0].payload, max, ACKQ_DEFAULT_MAX_PAYLOAD_BYTES) == 0, "상한 payload 바이트 일치");
     ackq_claims_release(g_items, 1);
     free(max);
     static const uint8_t binary[] = {0x00, 0xff, 0x00, 'a'};
@@ -320,6 +321,157 @@ static void test_lease_and_fencing(void)
     CHECK(claim_n(q, db, 1, 50) == 1 && g_items[0].id == gone && g_items[0].fence == gone_fence + 1, "회복 뒤 새 fence로 전달");
     ackq_claims_release(g_items, 1);
     ackq_close(&q);
+    close_db(db);
+}
+
+/* #195: 같은 claim의 lease를 늘린다. fence는 그대로이고, 다른 worker가 다시 가져간 뒤의 연장은 STALE이다. */
+static void test_lease_extension(void)
+{
+    printf("\n[lease 연장]\n");
+    make_db();
+    session_t *db = open_db();
+    ackq_options_t o = qopts("jobs", 0);
+    ackq_t *q;
+    assert(ackq_install(db, &o, &q) == ACKQ_OK);
+    g_now = 1000;
+    uint64_t id, until = 0;
+    assert(enq(q, db, "long", NULL, &id, NULL) == ACKQ_OK);
+    assert(claim_n(q, db, 1, 100) == 1);
+    uint64_t fence = g_items[0].fence;
+    ackq_claims_release(g_items, 1);
+
+    g_now = 1090;
+    CHECK(ackq_extend(q, db, id, fence, 100, &until) == ACKQ_OK && until == 1190, "연장한 lease는 지금 + lease_ms");
+    g_now = 1150;
+    CHECK(claim_n(q, db, 1, 100) == 0, "원래 lease(1100)가 지나도 연장한 동안은 다른 worker가 못 가진다");
+    g_now = 1189;
+    CHECK(claim_n(q, db, 1, 100) == 0, "연장한 lease 직전");
+
+    /* 만료됐지만 아직 아무도 가져가지 않았으면 같은 claim으로 연장할 수 있다 */
+    g_now = 1300;
+    CHECK(ackq_extend(q, db, id, fence, 100, &until) == ACKQ_OK && until == 1400, "만료 뒤 재claim 전 연장");
+    CHECK(claim_n(q, db, 1, 100) == 0, "다시 연장한 동안 못 가진다");
+    g_now = 1400;
+    CHECK(claim_n(q, db, 1, 100) == 1 && g_items[0].fence == fence + 1, "연장한 lease가 끝나면 다른 worker가 가져간다");
+    uint64_t newer = g_items[0].fence;
+    ackq_claims_release(g_items, 1);
+
+    until = 77;
+    CHECK(ackq_extend(q, db, id, fence, 100, &until) == ACKQ_STALE && until == 77, "옛 claim의 연장은 STALE");
+    char sql[96];
+    snprintf(sql, sizeof(sql), "SELECT fence FROM tote_queue_jobs WHERE id = %llu", (unsigned long long)id);
+    int64_t now_fence = scalar_int(db, sql);
+    snprintf(sql, sizeof(sql), "SELECT lease_until FROM tote_queue_jobs WHERE id = %llu", (unsigned long long)id);
+    CHECK(now_fence == (int64_t)newer && scalar_int(db, sql) == 1500, "STALE 연장은 lease와 fence를 바꾸지 않는다");
+    CHECK(ackq_extend(q, db, 999, 1, 100, &until) == ACKQ_NOT_FOUND, "없는 id");
+    CHECK(ackq_extend(q, db, id, newer, ACKQ_MAX_LEASE_MS + 1, &until) == ACKQ_INVALID, "lease 상한 초과");
+    CHECK(ackq_extend(q, db, id, 0, 100, &until) == ACKQ_INVALID, "fence 0");
+    CHECK(ackq_ack(q, db, id, newer) == ACKQ_OK, "현재 claim ack");
+    CHECK(ackq_extend(q, db, id, newer, 100, &until) == ACKQ_STALE, "끝난 작업은 연장하지 않는다");
+    ackq_close(&q);
+    close_db(db);
+}
+
+/* #196: purge 뒤에도 보존 기간 동안 같은 key의 재시도는 새 작업을 만들지 않는다. */
+static void test_idem_retention_after_purge(void)
+{
+    printf("\n[purge 뒤 idempotency key 보존]\n");
+    make_db();
+    session_t *db = open_db();
+    ackq_options_t o = qopts("jobs", 0);
+    o.idem_retention_ms = 1000;
+    ackq_t *q;
+    assert(ackq_install(db, &o, &q) == ACKQ_OK);
+    g_now = 10;
+    uint64_t id, other;
+    bool dup = false;
+    assert(enq(q, db, "mail-1", "order-1", &id, NULL) == ACKQ_OK);
+    assert(enq(q, db, "plain", NULL, &other, NULL) == ACKQ_OK);
+    assert(claim_n(q, db, 2, 100) == 2);
+    for (size_t i = 0; i < 2; i++) assert(ackq_ack(q, db, g_items[i].id, g_items[i].fence) == ACKQ_OK);
+    ackq_claims_release(g_items, 2);
+    size_t purged = 0;
+    g_now = 100;
+    CHECK(ackq_purge(q, db, false, 10, &purged) == ACKQ_OK && purged == 2, "끝난 작업 둘을 지운다");
+
+    g_now = 1099;
+    CHECK(enq(q, db, "mail-1", "order-1", &other, &dup) == ACKQ_OK && dup && other == id,
+          "보존 기간 안의 같은 key·payload는 지운 작업의 id와 duplicate");
+    CHECK(enq(q, db, "mail-2", "order-1", &other, &dup) == ACKQ_CONFLICT, "보존 기간 안의 다른 payload는 CONFLICT");
+    ackq_stats_t stats;
+    CHECK(ackq_stats(q, db, &stats) == ACKQ_OK && stats.ready + stats.leased + stats.acked + stats.failed == 0,
+          "중복 재시도는 작업을 만들지 않는다");
+
+    /* 보존 기간(purge 시각 100 + 1000)이 지나면 같은 key로 새 작업을 만든다 */
+    g_now = 1100;
+    CHECK(enq(q, db, "mail-1", "order-1", &other, &dup) == ACKQ_OK && !dup && other != id, "기간이 지나면 새 작업");
+    CHECK(scalar_int(db, "SELECT COUNT(*) FROM tote_queue_jobs_keys") == 0, "만료된 key는 지워졌다");
+
+    /* 0이면 key를 남기지 않는다 */
+    ackq_close(&q);
+    ackq_options_t none = qopts("plain", 0);
+    none.idem_retention_ms = ACKQ_RETENTION_NONE;
+    assert(ackq_install(db, &none, &q) == ACKQ_OK);
+    assert(enq(q, db, "a", "k", &id, NULL) == ACKQ_OK);
+    assert(claim_n(q, db, 1, 100) == 1);
+    assert(ackq_ack(q, db, g_items[0].id, g_items[0].fence) == ACKQ_OK);
+    ackq_claims_release(g_items, 1);
+    assert(ackq_purge(q, db, false, 10, &purged) == ACKQ_OK && purged == 1);
+    CHECK(enq(q, db, "a", "k", &other, &dup) == ACKQ_OK && !dup && other != id, "보존하지 않는 큐는 purge 뒤 새 작업");
+    CHECK(scalar_int(db, "SELECT COUNT(*) FROM tote_queue_plain_keys") == 0, "key를 남기지 않는다");
+    ackq_close(&q);
+
+    /* 기본 보존 기간은 7일 */
+    ackq_options_t dflt = qopts("dflt", 0);
+    assert(ackq_install(db, &dflt, &q) == ACKQ_OK);
+    g_now = 0;
+    assert(enq(q, db, "a", "k", &id, NULL) == ACKQ_OK);
+    assert(claim_n(q, db, 1, 100) == 1);
+    assert(ackq_ack(q, db, g_items[0].id, g_items[0].fence) == ACKQ_OK);
+    ackq_claims_release(g_items, 1);
+    assert(ackq_purge(q, db, false, 10, &purged) == ACKQ_OK && purged == 1);
+    g_now = ACKQ_DEFAULT_IDEM_RETENTION_MS - 1;
+    CHECK(enq(q, db, "a", "k", &other, &dup) == ACKQ_OK && dup && other == id, "기본 보존 기간 마지막 순간");
+    g_now = ACKQ_DEFAULT_IDEM_RETENTION_MS;
+    CHECK(enq(q, db, "a", "k", &other, &dup) == ACKQ_OK && !dup, "기본 보존 기간이 지나면 새 작업");
+    ackq_close(&q);
+    close_db(db);
+}
+
+/* #197: payload 상한은 큐 옵션이다. 0이면 기본 1 MiB이고, 범위를 벗어난 값은 설치를 거절한다. */
+static void test_payload_limit_option(void)
+{
+    printf("\n[payload 상한 옵션]\n");
+    make_db();
+    session_t *db = open_db();
+    ackq_options_t o = qopts("small", 0);
+    o.max_payload_bytes = 16;
+    ackq_t *q;
+    assert(ackq_install(db, &o, &q) == ACKQ_OK);
+    static const uint8_t bytes[17] = "0123456789abcdef";
+    uint64_t id, rejected;
+    CHECK(ackq_enqueue(q, db, bytes, 16, NULL, &id, NULL) == ACKQ_OK, "옵션 상한과 같은 크기");
+    CHECK(ackq_enqueue(q, db, bytes, 17, NULL, &rejected, NULL) == ACKQ_LIMIT, "옵션 상한+1");
+    CHECK(ackq_update(q, db, id, 0, bytes, 17) == ACKQ_LIMIT, "update도 같은 상한");
+    ackq_close(&q);
+
+    size_t big = ACKQ_DEFAULT_MAX_PAYLOAD_BYTES * 2;
+    o = qopts("big", 0);
+    o.max_payload_bytes = big;
+    assert(ackq_install(db, &o, &q) == ACKQ_OK);
+    uint8_t *payload = malloc(big + 1);
+    for (size_t i = 0; i <= big; i++) payload[i] = (uint8_t)(i * 7u);
+    CHECK(ackq_enqueue(q, db, payload, big, NULL, &id, NULL) == ACKQ_OK, "늘린 상한 크기");
+    CHECK(ackq_enqueue(q, db, payload, big + 1, NULL, &id, NULL) == ACKQ_LIMIT, "늘린 상한+1");
+    CHECK(claim_n(q, db, 1, 100) == 1 && g_items[0].payload_size == big && memcmp(g_items[0].payload, payload, big) == 0,
+          "늘린 상한 payload 왕복");
+    ackq_claims_release(g_items, 1);
+    free(payload);
+    ackq_close(&q);
+
+    o = qopts("toolarge", 0);
+    o.max_payload_bytes = (size_t)ACKQ_MAX_PAYLOAD_LIMIT + 1;
+    CHECK(ackq_install(db, &o, &q) == ACKQ_INVALID, "허용 범위를 넘는 상한은 거절");
     close_db(db);
 }
 
@@ -768,6 +920,9 @@ int main(void)
     test_payload_and_idempotency();
     test_concurrent_claim();
     test_lease_and_fencing();
+    test_lease_extension();
+    test_idem_retention_after_purge();
+    test_payload_limit_option();
     test_nack_retry_terminal();
     test_update_release_cursor();
     test_same_transaction();

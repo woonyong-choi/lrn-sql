@@ -8,7 +8,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-__all__ = ["CLOCK_FN", "LIST_NOTE_BYTES", "Item", "ListItem", "Param", "load_library"]
+__all__ = ["CLOCK_FN", "LIST_NOTE_BYTES", "Item", "ListItem", "Param", "QueueOptions", "load_library"]
 
 CLOCK_FN = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_void_p)
 
@@ -24,6 +24,18 @@ class Param(ctypes.Structure):
         ("real", ctypes.c_double),
         ("bytes", ctypes.c_void_p),
         ("size", ctypes.c_size_t),
+    ]
+
+
+class QueueOptions(ctypes.Structure):
+    """큐 옵션(tote_queue_options_t). 0이면 기본값이다."""
+
+    _fields_ = [
+        ("max_attempts", ctypes.c_uint32),
+        ("max_payload_bytes", ctypes.c_size_t),
+        ("idem_retention_ms", ctypes.c_uint64),
+        ("clock", CLOCK_FN),
+        ("clock_ctx", ctypes.c_void_p),
     ]
 
 
@@ -92,6 +104,7 @@ _INT_FUNCTIONS = (
     "tote_queue_put",
     "tote_queue_get",
     "tote_queue_ack",
+    "tote_queue_extend",
     "tote_queue_fail",
     "tote_queue_nack",
     "tote_queue_update",
@@ -121,12 +134,13 @@ def _declare(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.tote_commit.argtypes = [pptr]
     lib.tote_rollback.argtypes = [pptr]
     lib.tote_txn_failed.argtypes = [ptr]
-    lib.tote_queue_open.argtypes = [ptr, c.c_char_p, c.c_int, c.c_uint32, CLOCK_FN, ptr, pptr]
+    lib.tote_queue_open.argtypes = [ptr, c.c_char_p, c.c_int, c.POINTER(QueueOptions), pptr]
     lib.tote_queue_close.argtypes = [pptr]
     lib.tote_queue_put.argtypes = [ptr, ptr, c.c_char_p, size, c.c_char_p, c.POINTER(u64), c.POINTER(c.c_int)]
     lib.tote_queue_get.argtypes = [ptr, ptr, u64, u64, c.POINTER(Item)]
     lib.tote_queue_item_free.argtypes = [c.POINTER(Item)]
     lib.tote_queue_ack.argtypes = [ptr, ptr, u64, u64]
+    lib.tote_queue_extend.argtypes = [ptr, ptr, u64, u64, u64, c.POINTER(u64)]
     lib.tote_queue_fail.argtypes = [ptr, ptr, u64, u64, c.c_char_p]
     lib.tote_queue_nack.argtypes = [ptr, ptr, u64, u64, u64, c.c_char_p, c.POINTER(c.c_int)]
     lib.tote_queue_update.argtypes = [ptr, ptr, u64, u64, c.c_char_p, size]

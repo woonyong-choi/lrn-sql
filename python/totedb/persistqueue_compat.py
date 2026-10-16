@@ -14,7 +14,7 @@ Markchain이 쓰는 put, get(id, block, raw), ack, nack, update, queue, clear_ac
    2 처리 중, 5 ack됨, 9 실패).
 6. clear_acked_data는 오래된 ack부터 지운다(persist-queue는 최신 쪽부터 limit만큼). keep_latest=0이면 같은 결과다.
 7. shrink_disk_usage는 아무것도 하지 않는다(VACUUM에 해당하는 파일 축소가 없다). size·active_size·qsize는 전체 스캔이다.
-8. 큰 payload(512KiB 초과)와 직렬화 결과가 UTF-8이 아닌 값은 LimitError·InvalidArgumentError다.
+8. 큰 payload(큐의 max_payload_bytes, 기본 1 MiB 초과)와 직렬화 결과가 UTF-8이 아닌 값은 LimitError·InvalidArgumentError다.
 """
 # ruff: noqa: A002, ANN401, FBT001, FBT002 - persist-queue의 시그니처(id, block, 임의의 직렬화 값)를 그대로 따른다
 
