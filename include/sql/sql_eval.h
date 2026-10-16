@@ -22,7 +22,7 @@
  *   - LIKE는 대소문자를 구분한다(%·_, ESCAPE 한 글자). SQLite 기본(ASCII 대소문자 무시)과 다르다.
  *   - CAST는 value_cast의 정확한 변환만 받는다(잃는 변환은 형식 오류).
  *   - 집계 COUNT·SUM·AVG·MIN·MAX는 이 모듈이 계산하지 않는다. 실행기가 그룹마다 접어 match로 넘긴다.
- *   - 서브쿼리는 바깥 열을 보지 않는다(상관 서브쿼리 미지원). 결과는 subquery 훅이 미리 계산해 준다.
+ *   - 서브쿼리 결과는 subquery 훅이 준다. 바깥 열을 보는 서브쿼리는 평가할 때마다 refresh로 다시 계산한다.
  *   - 함수: ABS, LENGTH(글자 수, BLOB은 바이트 수), LOWER, UPPER(ASCII), SUBSTR(x, 시작[, 길이])(글자 단위,
  *     시작이 1보다 작으면 그만큼 길이를 줄인다), TRIM·LTRIM·RTRIM(x[, 문자들]), REPLACE, COALESCE, NULLIF.
  */
@@ -78,18 +78,34 @@ typedef struct {
     const value_view_t *set;      /* IN일 때만 */
     size_t set_count;
     bool set_has_null;
+    /*
+     * 바깥 열을 보는 서브쿼리면 refresh가 NULL이 아니다. 평가기는 값을 읽기 전에 refresh(refresh_ctx, 바깥 행)를
+     * 불러 위 필드를 그 행에 맞게 다시 채우게 한다. outer_columns는 바깥 행에서 읽는 칸이다(열 표시용).
+     */
+    sqleval_status_t (*refresh)(void *ctx, const value_t *row);
+    void *refresh_ctx;
+    const size_t *outer_columns;
+    size_t outer_count;
 } sqleval_subquery_t;
 
 /* expr(SUBQUERY·EXISTS·IN ( query ))의 결과를 준다. 실패하면 SQLEVAL_SUBQUERY나 SQLEVAL_NOMEM */
 typedef sqleval_status_t (*sqleval_subquery_fn)(void *ctx, const sqlexpr_t *expr, const sqleval_subquery_t **out);
 
-/* 컴파일 환경. resolve·match는 ctx를, subquery는 subquery_ctx를 받는다. 없는 훅은 NULL */
+/*
+ * 바깥 질의의 열. resolve가 찾지 못한 이름을 바깥 범위에서 찾아 그 값이 놓일 칸을 준다(칸은 프로그램보다 오래
+ * 산다). 찾으면 true다.
+ */
+typedef bool (*sqleval_outer_fn)(void *ctx, const sqlstmt_name_t *qualifier, const sqlstmt_name_t *name,
+                                 value_type_t *type, const value_t **cell);
+
+/* 컴파일 환경. resolve·match는 ctx를, subquery·outer는 subquery_ctx를 받는다. 없는 훅은 NULL */
 typedef struct {
     sqleval_resolve_fn resolve;   /* NULL이면 열을 쓸 수 없다(상수식) */
     sqleval_match_fn match;
     void *ctx;
     sqleval_subquery_fn subquery; /* NULL이면 서브쿼리를 쓸 수 없다 */
     void *subquery_ctx;
+    sqleval_outer_fn outer;       /* NULL이면 바깥 열을 볼 수 없다 */
 } sqleval_env_t;
 
 typedef struct sqleval_prog sqleval_prog_t;

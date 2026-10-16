@@ -41,6 +41,7 @@ typedef struct node {
     size_t column;
     fn_t fn;
     const sqleval_subquery_t *sub;  /* SUBQUERY·EXISTS·IN ( query )의 결과 */
+    const value_t *outer_cell;      /* 바깥 질의의 열이면 그 값이 놓이는 칸 */
     struct node **args;
 } node_t;
 
@@ -204,6 +205,11 @@ static sqleval_status_t type_node(compiler_t *c, node_t *node)
             if (c->env->resolve == NULL) return failed(c->error, SQLEVAL_NOT_CONSTANT, expr, &expr->name);
             value_type_t type = VALUE_NULL;
             size_t column = c->env->resolve(c->env->ctx, &expr->qualifier, &expr->name, &type);
+            if (column == SQLEVAL_NO_COLUMN && c->env->outer != NULL &&
+                c->env->outer(c->env->subquery_ctx, &expr->qualifier, &expr->name, &type, &node->outer_cell)) {
+                node->type = type;
+                return SQLEVAL_OK;
+            }
             if (column == SQLEVAL_NO_COLUMN) return failed(c->error, SQLEVAL_UNKNOWN_COLUMN, expr, &expr->name);
             if (column == SQLEVAL_AMBIGUOUS) return failed(c->error, SQLEVAL_AMBIGUOUS_COLUMN, expr, &expr->name);
             if (column == SQLEVAL_UNGROUPED) return failed(c->error, SQLEVAL_NOT_GROUPED, expr, &expr->name);
@@ -259,7 +265,7 @@ static sqleval_status_t type_node(compiler_t *c, node_t *node)
         case SQLEXPR_EXISTS: {
             sqleval_status_t status = subquery_of(c, node);
             if (status != SQLEVAL_OK) return status;
-            if (expr->kind == SQLEXPR_SUBQUERY && node->sub->row_count > 1) {
+            if (expr->kind == SQLEXPR_SUBQUERY && node->sub->refresh == NULL && node->sub->row_count > 1) {
                 return failed(c->error, SQLEVAL_SUBQUERY_SHAPE, expr, NULL);
             }
             node->type = expr->kind == SQLEXPR_EXISTS ? VALUE_INTEGER : node->sub->type;
@@ -381,7 +387,12 @@ void sqleval_mark_columns(const sqleval_prog_t *prog, bool *needed, size_t colum
     if (prog == NULL) return;
     for (size_t i = 0; i < prog->node_count; i++) {
         const node_t *node = &prog->nodes[i];
-        if ((node->matched || node->src->kind == SQLEXPR_COLUMN) && node->column < column_count) needed[node->column] = true;
+        if (node->outer_cell == NULL && (node->matched || node->src->kind == SQLEXPR_COLUMN) && node->column < column_count) {
+            needed[node->column] = true;
+        }
+        for (size_t k = 0; node->sub != NULL && k < node->sub->outer_count; k++) {
+            if (node->sub->outer_columns[k] < column_count) needed[node->sub->outer_columns[k]] = true;
+        }
     }
 }
 
@@ -624,6 +635,14 @@ static int equals(const value_view_t *a, const value_view_t *b)
     return compare_values(a, b) == 0;
 }
 
+/* 바깥 열을 보는 서브쿼리는 이 행에 맞게 다시 계산한다 */
+static sqleval_status_t refresh(const runner_t *r, const node_t *node)
+{
+    if (node->sub->refresh == NULL) return SQLEVAL_OK;
+    sqleval_status_t status = node->sub->refresh(node->sub->refresh_ctx, r->row);
+    return status == SQLEVAL_OK ? SQLEVAL_OK : failed(r->error, status, node->src, NULL);
+}
+
 /* x IN ( query ): 정렬된 집합에서 이분 탐색한다 */
 static int in_subquery(const sqleval_subquery_t *sub, const value_view_t *x)
 {
@@ -646,6 +665,7 @@ static sqleval_status_t eval_in(const runner_t *r, const node_t *node, value_t *
     value_view_t left;
     sqleval_status_t status = eval(r, node->args[0], &left_tmp, &left);
     int result = 0;
+    if (status == SQLEVAL_OK && node->sub != NULL) status = refresh(r, node);
     if (status == SQLEVAL_OK && node->sub != NULL) result = in_subquery(node->sub, &left);
     for (size_t i = 1; i < node->src->arg_count && status == SQLEVAL_OK && result != 1; i++) {
         value_t item_tmp = {0};
@@ -913,7 +933,7 @@ static sqleval_status_t eval(const runner_t *r, const node_t *node, value_t *tmp
             *view = expr->value.view;
             return SQLEVAL_OK;
         case SQLEXPR_COLUMN:
-            *view = r->row[node->column].view;
+            *view = node->outer_cell != NULL ? node->outer_cell->view : r->row[node->column].view;
             return SQLEVAL_OK;
         case SQLEXPR_UNARY: {
             if (expr->op == SQLEXPR_OP_NOT) {
@@ -1010,11 +1030,19 @@ static sqleval_status_t eval(const runner_t *r, const node_t *node, value_t *tmp
             return status;
         }
         case SQLEXPR_FUNCTION: return eval_function(r, node, tmp, view);
-        case SQLEXPR_SUBQUERY:
+        case SQLEXPR_SUBQUERY: {
+            sqleval_status_t status = refresh(r, node);
+            if (status != SQLEVAL_OK) return status;
+            if (node->sub->row_count > 1) return failed(r->error, SQLEVAL_SUBQUERY_SHAPE, expr, NULL);
             if (node->sub->row_count == 0) return set_null(tmp, view);
             *view = *node->sub->first;
             return SQLEVAL_OK;
-        case SQLEXPR_EXISTS: return set_int(r, node, tmp, view, node->sub->row_count > 0);
+        }
+        case SQLEXPR_EXISTS: {
+            sqleval_status_t status = refresh(r, node);
+            if (status != SQLEVAL_OK) return status;
+            return set_int(r, node, tmp, view, node->sub->row_count > 0);
+        }
     }
     return failed(r->error, SQLEVAL_TYPE, expr, NULL);
 }
