@@ -127,18 +127,19 @@ static void put(buffer_t *b, const char *format, ...) __attribute__((format(prin
 
 static void put(buffer_t *b, const char *format, ...)
 {
-    char piece[512];
     va_list args;
     va_start(args, format);
-    int n = vsnprintf(piece, sizeof(piece), format, args);
+    int n = vsnprintf(NULL, 0, format, args);
     va_end(args);
-    assert(n >= 0 && (size_t)n < sizeof(piece));
+    assert(n >= 0);
     if (b->len + (size_t)n + 1 > b->cap) {
         b->cap = (b->cap + (size_t)n + 1) * 2;
         b->text = realloc(b->text, b->cap);
         assert(b->text != NULL);
     }
-    memcpy(b->text + b->len, piece, (size_t)n + 1);
+    va_start(args, format);
+    vsnprintf(b->text + b->len, (size_t)n + 1, format, args);
+    va_end(args);
     b->len += (size_t)n;
 }
 
@@ -529,6 +530,33 @@ static void test_rollback_space(void)
 
 /* ── 5. commit과 재시작 ── */
 
+/*
+ * #81·#91: 켜면 기준 상태에 큰 값 행(overflow 체인)을 두고 트랜잭션이 그 값을 키우고, 큰 값을 넣었다가 줄인다.
+ * 종료·실패 지점마다 체인 교체와 회수가 끼어든다.
+ */
+static bool g_large_values;
+#define LARGE_BASE_BYTES 15000u
+#define LARGE_GROWN_BYTES 30000u
+
+static uint8_t *large_text(size_t size, char seed)
+{
+    uint8_t *bytes = malloc(size);
+    assert(bytes != NULL);
+    for (size_t i = 0; i < size; i++) bytes[i] = (uint8_t)('a' + (seed + i * 7) % 26);
+    return bytes;
+}
+
+static bool run_bound_ok(database_t *db, database_txn_t *txn, const char *sql, int64_t key, size_t size, char seed)
+{
+    uint8_t *bytes = large_text(size, seed);
+    value_view_t params[2] = {{VALUE_TEXT, 0, 0, bytes, size}, {VALUE_INTEGER, key, 0, NULL, 0}};
+    char *line = run(db, txn, sql, params, 2);
+    bool ok = is_ok(line);
+    free(line);
+    free(bytes);
+    return ok;
+}
+
 static const char *WRITE_STATEMENTS[] = {
     "INSERT INTO t (v) VALUES ('durable-1')",
     "UPDATE t SET v = 'durable-0' WHERE id = 1",
@@ -561,6 +589,11 @@ static bool run_write_txn(database_t *db, txn_guarantee_t g, bool *commit_ok_out
     char *line = run(db, txn, "INSERT INTO u VALUES (?, ?)", two, 2);
     ok = ok && is_ok(line);
     free(line);
+    if (g_large_values) {
+        ok = ok && run_bound_ok(db, txn, "UPDATE u SET tag = ? WHERE k = ?", 3, LARGE_GROWN_BYTES, 'g');
+        ok = ok && run_bound_ok(db, txn, "INSERT INTO u (tag, k) VALUES (?, ?)", 4, LARGE_BASE_BYTES, 'n');
+        ok = ok && run_bound_ok(db, txn, "UPDATE u SET tag = SUBSTR(?, 1, 5) WHERE k = ?", 4, 10, 's');
+    }
     txn_status_t cs = ok ? database_txn_commit(txn, NULL) : TXN_INVALID;
     if (commit_status != NULL) *commit_status = cs;
     if (commit_ok_out != NULL) *commit_ok_out = cs == TXN_OK;
@@ -579,6 +612,7 @@ static void prepare_base(void)
     seed_schema(db);
     exec_ok(db, NULL, "INSERT INTO t (v) VALUES ('base')");
     exec_ok(db, NULL, "INSERT INTO u VALUES (1, 'one')");
+    if (g_large_values) assert(run_bound_ok(db, NULL, "INSERT INTO u (tag, k) VALUES (?, ?)", 3, LARGE_BASE_BYTES, 'b'));
     assert(database_close(db) == DATABASE_OK);
 }
 
@@ -688,6 +722,13 @@ static state_kind_t classify(const char *old_state, const char *new_state, char 
     if (db == NULL) return STATE_OPEN_FAILED;
     char *s = state_of(db);
     state_kind_t kind = strcmp(s, old_state) == 0 ? STATE_OLD : strcmp(s, new_state) == 0 ? STATE_NEW : STATE_OTHER;
+    /* #81·#91: 다시 연 파일에 고아 페이지와 이중 소유(조기 회수)가 없다 */
+    database_page_check_t pages;
+    if (database_check_pages(db, &pages) != DATABASE_OK || pages.orphaned != 0 || pages.conflicts != 0) {
+        printf("  페이지 회계: 고아 %llu, 충돌 %llu\n", (unsigned long long)pages.orphaned,
+               (unsigned long long)pages.conflicts);
+        kind = STATE_OTHER;
+    }
     /* 복구 뒤 이어서 쓰고 다시 읽을 수 있다 */
     char *line = run(db, NULL, "INSERT INTO u VALUES (500, 'after')", NULL, 0);
     bool wrote = is_ok(line);
@@ -710,11 +751,14 @@ static state_kind_t classify(const char *old_state, const char *new_state, char 
 
 static void test_crash_points(void)
 {
-    printf("\n[commit 전후의 종료 지점과 I/O 실패]\n");
+    printf("\n[commit 전후의 종료 지점과 I/O 실패%s]\n", g_large_values ? ": 큰 값" : "");
     prepare_base();
     snap_t base;
     snap_take(&base);
-    char *old_state = strdup("[1] 1|'base' ## [1] 1|'one'");
+    database_t *before = open_tx();
+    assert(before != NULL);
+    char *old_state = state_of(before);
+    database_close(before);
 
     /* 기대하는 새 상태와 지점 수: 처음부터 끝까지 실행 */
     hooks_on();
@@ -872,6 +916,9 @@ int main(void)
     test_rollback_space();
     test_commit_restart();
     test_crash_points();
+    g_large_values = true;
+    test_crash_points();
+    g_large_values = false;
     test_unfinished_and_autocommit();
     test_open_rejections();
     fresh_dir();

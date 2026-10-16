@@ -527,6 +527,12 @@ static void test_statement(const statement_case_t *c)
                 char *now = snapshot(reopened);
                 bool is_before = strcmp(now, before) == 0, is_after = strcmp(now, after) == 0;
                 CHECK(is_before || is_after, "%s: 다시 열면 문장 전 또는 후 상태", label);
+                /* #81: 실패한 문장이 쓰다 만 overflow·색인 페이지가 고아로 남거나 살아 있는 페이지가 빈 목록에 들지 않는다 */
+                database_page_check_t pages;
+                CHECK(database_check_pages(reopened, &pages) == DATABASE_OK && pages.orphaned == 0 &&
+                          pages.conflicts == 0,
+                      "%s: 다시 연 파일의 페이지 회계 (고아 %llu, 충돌 %llu)", label,
+                      (unsigned long long)pages.orphaned, (unsigned long long)pages.conflicts);
                 if (answered_error && poisoned && is_after) {
                     unknown++;  /* 오류로 응답했지만 새 상태가 보임: 불확정 결과를 성공이라 하지 않았다 */
                 }

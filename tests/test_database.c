@@ -1192,6 +1192,56 @@ static void test_ordered_secondary_index(void)
     clean_dir();
 }
 
+/* #81·#91: 데이터 페이지는 닿거나(카탈로그·heap·overflow·색인) 빈 목록에 정확히 한 번 있다. 고아와 이중 소유가 없다 */
+static void expect_pages_accounted(database_t *db, const char *when)
+{
+    database_page_check_t check;
+    database_status_t status = database_check_pages(db, &check);
+    CHECK(status == DATABASE_OK && check.orphaned == 0 && check.conflicts == 0 &&
+              check.reachable + check.free == check.data_pages,
+          "%s: 상태 %d, 페이지 %llu = 닿음 %llu + 빈 %llu, 고아 %llu, 충돌 %llu", when, (int)status,
+          (unsigned long long)check.data_pages, (unsigned long long)check.reachable,
+          (unsigned long long)check.free, (unsigned long long)check.orphaned, (unsigned long long)check.conflicts);
+}
+
+static void test_page_accounting_with_large_values(void)
+{
+    printf("\n[test_page_accounting_with_large_values]\n");
+    database_t *db = fresh_db();
+    expect_pages_accounted(db, "빈 DB");
+    exec_ok(db, "CREATE TABLE big (id INTEGER PRIMARY KEY, k TEXT, body BLOB)");
+    exec_ok(db, "CREATE INDEX big_k ON big (k)");
+    size_t size = 30000;
+    uint8_t *blob = malloc(size);
+    assert(blob != NULL);
+    for (size_t i = 0; i < size; i++) blob[i] = (uint8_t)(i * 31 + 7);
+    for (int i = 1; i <= 12; i++) {
+        value_view_t params[3] = {{VALUE_INTEGER, i, 0.0, NULL, 0}, {VALUE_TEXT, 0, 0.0, (const uint8_t *)"key", 3},
+                                  {VALUE_BLOB, 0, 0.0, blob, size / (size_t)(i % 3 + 1)}};
+        result_t *r = run_bound(db, "INSERT INTO big VALUES (?, ?, ?)", params, 3);
+        result_release(&r);
+    }
+    expect_pages_accounted(db, "큰 값 넣은 뒤");
+    exec_ok(db, "UPDATE big SET body = X'00' WHERE id % 2 = 0");
+    expect_pages_accounted(db, "큰 값 줄인 뒤");
+    value_view_t grow[1] = {{VALUE_BLOB, 0, 0.0, blob, size}};
+    result_t *r = run_bound(db, "UPDATE big SET body = ? WHERE id % 3 = 0", grow, 1);
+    result_release(&r);
+    exec_ok(db, "DELETE FROM big WHERE id > 9");
+    expect_pages_accounted(db, "키우고 지운 뒤");
+    exec_ok(db, "CREATE TABLE gone (id INTEGER PRIMARY KEY, body TEXT)");
+    exec_ok(db, "INSERT INTO gone VALUES (1, 'x')");
+    exec_ok(db, "DROP TABLE gone");
+    db = reopen(db, true);
+    expect_pages_accounted(db, "재열기 뒤");
+    for (int round = 0; round < 3; round++) exec_ok(db, "UPDATE big SET k = k || 'x'");
+    db = reopen(db, true);
+    expect_pages_accounted(db, "세대를 여러 번 바꾸고 재열기한 뒤");
+    free(blob);
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+
 static void test_defaults_survive_reopen(void)
 {
     printf("\n[test_defaults_survive_reopen]\n");
@@ -1229,6 +1279,7 @@ int main(void)
     test_order_and_distinct_respect_budget();
     test_aggregate_memory_scales_with_groups();
     test_ordered_secondary_index();
+    test_page_accounting_with_large_values();
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
     return g_fail == 0 ? 0 : 1;
