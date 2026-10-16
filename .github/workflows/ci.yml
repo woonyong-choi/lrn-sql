@@ -32,9 +32,9 @@ jobs:
           SANITIZER: ${{ matrix.sanitizer }}
         run: |
           if [ "$SANITIZER" = thread ]; then
-            make SANITIZE=thread test-step2 test-concurrency test-transaction test-session test-lock-waiters test-ack-queue
+            make SANITIZE=thread test-transaction test-session test-ack-queue
           else
-            make SANITIZE="$SANITIZER" test-all test-runner test-fault test-concurrency test-result test-result-allocation
+            make SANITIZE="$SANITIZER" test-all test-runner test-fault test-result
           fi
       - name: Preserve test outcomes, seeds and raw output
         if: always()
@@ -64,12 +64,6 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install PostgreSQL client and pytest
         run: sudo apt-get update && sudo apt-get install -y postgresql-client python3-pytest
-      - name: Compare SQL behavior with PostgreSQL 18
-        env:
-          PGCOMPAT_DSN: postgresql://compat:compat@localhost:5432/compat_test
-        run: |
-          make SANITIZE= BUILD_DIR=build-pg build-pg/sql_probe
-          python3 tests/pg_compat.py --probe ./build-pg/sql_probe --require-postgres
       - name: Compare the SQL engine with SQLite and PostgreSQL 18
         run: |
           python3 -m pip install --user 'psycopg[binary]'

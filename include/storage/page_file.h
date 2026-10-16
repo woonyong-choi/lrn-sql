@@ -10,7 +10,7 @@
 
 /*
  * 새 저장 형식의 파일 I/O 드라이버. OS 페이지 크기와 독립적으로 물리 페이지 8192바이트를 쓴다.
- * 기존 pager·MINIDB v1/v2 파일과 무관한 독립 API이며, 옛 파일을 열거나 해석하거나 바꾸지 않는다.
+ * 옛 MINIDB v1/v2 파일은 열거나 해석하거나 바꾸지 않는다.
  *
  * 페이지 배치(모든 정수는 little-endian):
  *   0..31   envelope: "LRPG", 버전 u16, 종류 u16, page ID u32, table ID u32,
@@ -95,7 +95,7 @@ typedef struct {
     uint64_t evictions;  /* 용량 때문에 내보낸 프레임 */
 } page_file_cache_stats_t;
 
-/* 현재 기본 I/O 진입점. 옛 파일 읽기(legacy_migrate)가 같은 실패 주입 자리를 쓴다. */
+/* 현재 기본 I/O 진입점 */
 page_file_io_t page_file_default_io(void);
 
 typedef struct page_file page_file_t;

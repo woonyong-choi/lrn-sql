@@ -3,7 +3,7 @@
  * 통과·실패를 판정하지 않고 CI에 넣지 않는다. 합성 데이터만 쓰며 파일은 인자로 받은 디렉터리 아래에 만든다.
  * 문장 하나는 database.c와 같은 순서(heap_open → batch → finish → catalog 게시 → 옛 페이지 release)로 흉내 낸다.
  * 빌드: gcc -O2 -std=c11 -Iinclude tests/measure_heap_directory.c <heap_store.c 변형> src/storage/{record,record_page,
- *       overflow,value,catalog,page_file,catalog_store,legacy_migrate}.c -lm -o build/measure_heap_directory
+ *       overflow,checksum,value,catalog,page_file,page_cache,catalog_store,pk_tree,text_tree}.c -lm -o build/measure_heap_directory
  * 실행: build/measure_heap_directory <작업 디렉터리> <디렉터리 페이지 수> [문장 수=30] [반복=3]
  */
 #define _POSIX_C_SOURCE 200809L
