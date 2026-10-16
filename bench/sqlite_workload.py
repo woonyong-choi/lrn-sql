@@ -26,6 +26,7 @@ SOURCES = [
     "bench/sqlite_driver.c",
     "src/sql/database.c",
     "src/sql/sql_statement.c",
+    "src/sql/sql_eval.c",
     "src/sql/lexer.c",
     "src/sql/result.c",
     "src/storage/value.c",
@@ -33,6 +34,9 @@ SOURCES = [
     "src/storage/catalog_store.c",
     "src/storage/heap_store.c",
     "src/storage/pk_tree.c",
+    "src/storage/text_tree.c",
+    "src/storage/page_cache.c",
+    "src/storage/checksum.c",
     "src/storage/page_file.c",
     "src/storage/record.c",
     "src/storage/record_page.c",
@@ -258,7 +262,7 @@ def _complex_queries(
             raise RuntimeError(f"invalid SQLite reference query: {sql}")
         if results["mini"]["error"] not in (0, 1, 2):
             raise RuntimeError(
-                f"unexpected MiniDB failure: {sql}: {results['mini']['message']}"
+                f"unexpected lrn-sql failure: {sql}: {results['mini']['message']}"
             )
         status = "unsupported" if results["mini"]["error"] else "supported"
         if status == "supported":
