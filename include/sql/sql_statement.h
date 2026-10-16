@@ -21,14 +21,15 @@
  *     column     = column_name type {constraint}
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
  *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT]
- *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )}
+ *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )} [returning]
  *   SELECT [DISTINCT] item {, item} [FROM source {join}] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
  *     [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
  *     item       = * | name.* | expr [[AS] alias]
  *     source     = name [[AS] alias]
  *     join       = , source | CROSS JOIN source | [INNER] JOIN source ON expr | LEFT [OUTER] JOIN source ON expr
- *   UPDATE name SET column_name = expr {, column_name = expr} [WHERE expr]
- *   DELETE FROM name [WHERE expr]
+ *   UPDATE name SET column_name = expr {, column_name = expr} [WHERE expr] [returning]
+ *   DELETE FROM name [WHERE expr] [returning]
+ *     returning  = RETURNING item {, item}   (item은 SELECT 목록과 같다)
  *   DROP TABLE name
  *   BEGIN [TRANSACTION] | START TRANSACTION
  *   COMMIT [TRANSACTION] | ROLLBACK [TRANSACTION]
@@ -55,7 +56,7 @@
  *   - FROM 원본은 SQLSTMT_MAX_SOURCES개까지다. 넘으면 SQLSTMT_LIMIT다.
  *
  * 명시적으로 거절하는 것(SQLSTMT_UNSUPPORTED): RIGHT·FULL·NATURAL JOIN, JOIN ... USING, 괄호로 묶은 JOIN,
- * UNION·EXCEPT·INTERSECT·RETURNING·WITH·창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS·FROM 안), INSERT ... SELECT,
+ * UNION·EXCEPT·INTERSECT·WITH·창 함수, 서브쿼리(SELECT 식·IN (SELECT ...)·EXISTS·FROM 안), INSERT ... SELECT,
  * CREATE TABLE ... AS,
  * IF [NOT] EXISTS, 컬럼 제약 UNIQUE·DEFAULT·CHECK·REFERENCES 등, 테이블 제약 중 PRIMARY KEY 외의 것,
  * 복합 기본 키·복합 인덱스, 위에 없는 타입 이름, 위에 없는 CREATE, 테이블 이름의 한정(schema.table).
@@ -201,6 +202,19 @@ typedef struct sqlexpr {
 } sqlexpr_t;
 
 typedef struct {
+    sqlexpr_t *expr;             /* star면 NULL */
+    bool star;                   /* * 또는 table.* */
+    sqlstmt_name_t qualifier;    /* table.*의 table */
+    sqlstmt_name_t alias;        /* [AS] alias. 없으면 size 0 */
+} sqlstmt_select_item_t;
+
+/* INSERT·UPDATE·DELETE의 RETURNING 목록. 없으면 count 0 */
+typedef struct {
+    sqlstmt_select_item_t *items;
+    size_t count;
+} sqlstmt_returning_t;
+
+typedef struct {
     sqlstmt_name_t table;
     bool has_columns;
     sqlstmt_name_t *columns;     /* has_columns일 때 column_count개 */
@@ -208,14 +222,8 @@ typedef struct {
     sqlexpr_t **values;          /* row_count × value_count, 행 순서 */
     size_t value_count;          /* 한 행의 값 수. has_columns이면 column_count와 같다 */
     size_t row_count;
+    sqlstmt_returning_t returning;
 } sqlstmt_insert_t;
-
-typedef struct {
-    sqlexpr_t *expr;             /* star면 NULL */
-    bool star;                   /* * 또는 table.* */
-    sqlstmt_name_t qualifier;    /* table.*의 table */
-    sqlstmt_name_t alias;        /* [AS] alias. 없으면 size 0 */
-} sqlstmt_select_item_t;
 
 typedef enum { SQLSTMT_NULLS_DEFAULT, SQLSTMT_NULLS_FIRST, SQLSTMT_NULLS_LAST } sqlstmt_nulls_t;
 
@@ -263,11 +271,13 @@ typedef struct {
     sqlstmt_assignment_t *assignments;
     size_t assignment_count;
     sqlexpr_t *where;
+    sqlstmt_returning_t returning;
 } sqlstmt_update_t;
 
 typedef struct {
     sqlstmt_name_t table;
     sqlexpr_t *where;
+    sqlstmt_returning_t returning;
 } sqlstmt_delete_t;
 
 typedef struct {

@@ -259,6 +259,30 @@ CASES = [
         ],
     },
     {
+        "name": "returning",
+        "setup": [
+            "CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, state TEXT NOT NULL, tries INTEGER NOT NULL)",
+            "CREATE INDEX jobs_state ON jobs (state)",
+        ],
+        "queries": [
+            "INSERT INTO jobs (name, state, tries) VALUES ('a', 'ready', 0) RETURNING id",
+            "INSERT INTO jobs (name, state, tries) VALUES ('b', 'ready', 0), ('c', 'ready', 0), ('d', 'held', 2) RETURNING id, name, tries + 1 AS next",
+            "INSERT INTO jobs (name, state, tries) VALUES ('f', 'ready', 0) RETURNING id, UPPER(name)",
+            "INSERT INTO jobs (id, name, state, tries) VALUES (10, 'e', 'ready', 0) RETURNING *",
+            "UPDATE jobs SET state = 'running', tries = tries + 1 WHERE id = 2 RETURNING id, state, tries",
+            "UPDATE jobs SET tries = tries + 10 WHERE state = 'ready' RETURNING id, tries",
+            "UPDATE jobs SET tries = 0 WHERE id = 999 RETURNING id",
+            "DELETE FROM jobs WHERE state = 'held' RETURNING id, name",
+            "DELETE FROM jobs WHERE id = 999 RETURNING *",
+            "DELETE FROM jobs WHERE id >= 10 RETURNING jobs.id, jobs.name",
+            "SELECT * FROM jobs",
+            {"sql": "INSERT INTO jobs (name, state, tries) VALUES ('x', 'ready', 0) RETURNING nope", "error": True},
+            {"sql": "UPDATE jobs SET tries = 1 RETURNING COUNT(*)", "error": True},
+            {"sql": "INSERT INTO jobs (id, name, state, tries) VALUES (1, 'dup', 'ready', 0) RETURNING id", "error": True},
+            "SELECT * FROM jobs",
+        ],
+    },
+    {
         "name": "dml",
         "setup": [
             "CREATE TABLE stock (id INTEGER PRIMARY KEY, item TEXT NOT NULL, qty INTEGER NOT NULL, price REAL)",

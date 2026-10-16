@@ -889,8 +889,9 @@ static void test_order_and_distinct_respect_budget(void)
     const char *queries[] = {"SELECT body, id FROM sorted ORDER BY grp DESC, id", "SELECT DISTINCT body FROM sorted",
                              "SELECT body, COUNT(*), MIN(id) FROM sorted GROUP BY body ORDER BY body",
                              "SELECT COUNT(DISTINCT body), MAX(body) FROM sorted",
-                             "SELECT s.id, t.body FROM sorted s LEFT JOIN sorted t ON t.id = s.id + 1 ORDER BY t.body, s.id"};
-    const size_t expected_rows[] = {300, 40, 40, 1, 300};
+                             "SELECT s.id, t.body FROM sorted s LEFT JOIN sorted t ON t.id = s.id + 1 ORDER BY t.body, s.id",
+                             "UPDATE sorted SET grp = grp RETURNING id, body"};
+    const size_t expected_rows[] = {300, 40, 40, 1, 300, 300};
     for (size_t q = 0; q < sizeof(queries) / sizeof(queries[0]); q++) {
         projection_memory_t memory = {0};
         result_t *result = NULL;
