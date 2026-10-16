@@ -28,7 +28,7 @@ static void *capi_test_realloc(void *pointer, size_t size)
 
 #include "ack_queue_test_util.h"
 
-#define DIR "__test__ack_queue_capi"
+#define DIR "__test__totedb"
 
 static tote_db_t *open_capi_db(const char *name)
 {
@@ -264,7 +264,7 @@ static void test_wrong_database_transaction(void)
     tote_db_t *a = open_capi_db("a");
     tote_db_t *b = open_capi_db("b");
     tote_queue_t *qa = NULL;
-    assert(tote_queue_open(a, "jobs", 1, 0, fake_clock, NULL, &qa) == TOTE_OK);
+    assert(tote_queue_open(a, "jobs", 1, &(tote_queue_options_t){.clock = fake_clock}, &qa) == TOTE_OK);
     g_now = 5;
     uint64_t id = 0;
     int dup = 0;
@@ -312,7 +312,7 @@ static void test_handle_lifetime(void)
     make_db();
     tote_db_t *db = open_capi_db("main");
     tote_queue_t *q = NULL;
-    assert(tote_queue_open(db, "jobs", 1, 0, fake_clock, NULL, &q) == TOTE_OK);
+    assert(tote_queue_open(db, "jobs", 1, &(tote_queue_options_t){.clock = fake_clock}, &q) == TOTE_OK);
     tote_db_t *keep = db;
     CHECK(tote_close(&db) == ACKQ_BUSY && db == keep, "큐가 있으면 BUSY이고 핸들은 그대로다");
     uint64_t id;
@@ -401,8 +401,8 @@ static void test_queue_round_trip(void)
     make_db();
     tote_db_t *db = open_capi_db("main");
     tote_queue_t *q = NULL;
-    CHECK(tote_queue_open(db, "jobs", 0, 0, fake_clock, NULL, &q) == ACKQ_NOT_INSTALLED && q == NULL, "설치 전 open");
-    assert(tote_queue_open(db, "jobs", 1, 2, fake_clock, NULL, &q) == TOTE_OK);
+    CHECK(tote_queue_open(db, "jobs", 0, &(tote_queue_options_t){.clock = fake_clock}, &q) == ACKQ_NOT_INSTALLED && q == NULL, "설치 전 open");
+    assert(tote_queue_open(db, "jobs", 1, &(tote_queue_options_t){.max_attempts = 2, .clock = fake_clock}, &q) == TOTE_OK);
     g_now = 100;
     tote_queue_item_t item;
     CHECK(tote_queue_get(q, NULL, 0, 500, &item) == TOTE_EMPTY, "비면 EMPTY");
@@ -431,6 +431,32 @@ static void test_queue_round_trip(void)
     tote_queue_list_free(list, n);
     size_t purged = 0;
     CHECK(tote_queue_purge(q, NULL, 0, 10, &purged) == TOTE_OK && purged == 1, "purge");
+    CHECK(tote_queue_put(q, NULL, (const uint8_t *)"HELLO", 5, "k", &again, &dup) == TOTE_OK && dup == 1 && again == id,
+          "purge 뒤에도 기본 보존 기간 안의 같은 key는 중복(#196). 비교 대상은 마지막 payload");
+    CHECK(tote_queue_put(q, NULL, (const uint8_t *)"hello", 5, "k", &again, &dup) == ACKQ_CONFLICT,
+          "update 전 payload는 마지막 payload와 달라 CONFLICT");
+
+    /* #195: 연장은 fence를 유지하고 다른 worker가 다시 가져간 뒤에는 STALE */
+    CHECK(tote_queue_put(q, NULL, (const uint8_t *)"slow", 4, NULL, &id, NULL) == TOTE_OK, "연장할 작업");
+    CHECK(tote_queue_get(q, NULL, 0, 100, &item) == TOTE_OK && item.id == id, "짧은 lease로 get");
+    fence = item.fence;
+    tote_queue_item_free(&item);
+    uint64_t until = 0;
+    g_now = 150;
+    CHECK(tote_queue_extend(q, NULL, id, fence, 300, &until) == TOTE_OK && until == 450, "연장");
+    g_now = 300;
+    CHECK(tote_queue_get(q, NULL, 0, 100, &item) == TOTE_EMPTY, "연장한 동안 다른 get은 비어 있다");
+    g_now = 450;
+    CHECK(tote_queue_get(q, NULL, 0, 100, &item) == TOTE_OK && item.fence == fence + 1, "연장이 끝나면 다시 전달");
+    CHECK(tote_queue_extend(q, NULL, id, fence, 300, &until) == ACKQ_STALE, "옛 claim의 연장은 STALE");
+    tote_queue_item_free(&item);
+    tote_queue_close(&q);
+
+    /* #197: payload 상한 옵션 */
+    assert(tote_queue_open(db, "small", 1, &(tote_queue_options_t){.max_payload_bytes = 4, .clock = fake_clock}, &q) ==
+           TOTE_OK);
+    CHECK(tote_queue_put(q, NULL, (const uint8_t *)"four", 4, NULL, &id, NULL) == TOTE_OK, "상한과 같은 크기");
+    CHECK(tote_queue_put(q, NULL, (const uint8_t *)"five!", 5, NULL, &again, NULL) == ACKQ_LIMIT, "상한+1");
     tote_queue_close(&q);
     CHECK(tote_close(&db) == TOTE_OK, "close");
 }
@@ -445,7 +471,7 @@ int main(void)
     test_handle_lifetime();
     test_threads();
     test_queue_round_trip();
-    printf("\ntest_ack_queue_capi: %d checks, %d failed\n", g_run, g_fail);
+    printf("\ntest_totedb: %d checks, %d failed\n", g_run, g_fail);
     if (g_fail == 0) remove_dir();
     return g_fail == 0 ? 0 : 1;
 }

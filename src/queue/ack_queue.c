@@ -4,6 +4,9 @@
  * 테이블 tote_queue_<name>: id(identity), state(0 READY 1 LEASED 2 ACKED 3 FAILED), ready_at, lease_until(밀리초),
  * fence(claim마다 +1), attempts(claim 횟수), idem(idempotency key, 없으면 ''), payload(BLOB), note(마지막 이유).
  * 상태별 조회는 state 보조 색인(같은 상태 안에서 id 순서)과 ORDER BY id LIMIT으로 맞는 행 k개만 읽는다.
+ *
+ * key 보존 테이블 tote_queue_<name>_keys: seq(identity), idem(유일 색인), job(지운 작업 id), digest(payload 요약),
+ * expires_at. purge가 key 있는 작업을 지울 때 넣고, 넣는 순서(seq)가 곧 만료 순서라 앞에서부터 만료된 것만 지운다.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -12,10 +15,12 @@
 #include <string.h>
 
 #include "ack_queue_internal.h"
+#include "storage/checksum.h"
 
 #define META_COLS "id, state, ready_at, lease_until, fence, attempts"
 #define META_CELLS 6u
 #define NOTE_MAX_ATTEMPTS "max attempts exceeded"
+#define DIGEST_BYTES 20u
 
 /* 상태별 조회(claim·recover·purge)와 idempotency key 조회가 쓰는 보조 색인의 열 */
 static const char *const INDEXED[] = {"state", "idem"};
@@ -85,9 +90,9 @@ static ackq_status_t check_text(const char *text, size_t max_bytes, bool allow_e
     return value_text_chars(&view, &chars) == VALUE_OK ? ACKQ_OK : ACKQ_INVALID;
 }
 
-static ackq_status_t check_payload(const uint8_t *payload, size_t size)
+static ackq_status_t check_payload(const ackq_t *queue, const uint8_t *payload, size_t size)
 {
-    if (size > ACKQ_MAX_PAYLOAD_BYTES) return ACKQ_LIMIT;
+    if (size > queue->max_payload) return ACKQ_LIMIT;
     if (size > 0 && payload == NULL) return ACKQ_INVALID;
     return ACKQ_OK;
 }
@@ -279,11 +284,18 @@ static ackq_status_t make_queue(session_t *session, const ackq_options_t *option
 {
     *out = NULL;
     if (session == NULL || options == NULL || !valid_name(options->name)) return ACKQ_INVALID;
+    if (options->max_payload_bytes > ACKQ_MAX_PAYLOAD_LIMIT) return ACKQ_INVALID;
+    uint64_t retention = options->idem_retention_ms;
+    if (retention != ACKQ_RETENTION_NONE && retention > ACKQ_MAX_RETENTION_MS) return ACKQ_INVALID;
     ackq_t *queue = calloc(1, sizeof(*queue));
     if (queue == NULL) return ACKQ_NOMEM;
     queue->db = session_database(session);
     snprintf(queue->name, sizeof(queue->name), "%s", options->name);
     snprintf(queue->table, sizeof(queue->table), "tote_queue_%s", options->name);
+    snprintf(queue->keys, sizeof(queue->keys), "%s_keys", queue->table);
+    queue->max_payload = options->max_payload_bytes != 0 ? options->max_payload_bytes : ACKQ_DEFAULT_MAX_PAYLOAD_BYTES;
+    queue->retention_ms = retention == 0 ? ACKQ_DEFAULT_IDEM_RETENTION_MS
+                          : retention == ACKQ_RETENTION_NONE ? 0 : retention;
     queue->max_attempts = options->max_attempts;
     queue->begin_timeout_ms = options->begin_timeout_ms;
     queue->now_ms = options->now_ms;
@@ -310,9 +322,19 @@ static ackq_status_t probe_table(ackq_t *queue, session_t *session)
         while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {}
         status = ackq_finish_rows(next, result);
         result_release(&result);
-        return status;
     }
-    return error_class == RESULT_E_SEMANTIC ? ACKQ_NOT_INSTALLED : status;
+    if (status == ACKQ_OK) {
+        snprintf(sql, sizeof(sql), "SELECT seq, idem, job, digest, expires_at FROM %s WHERE seq = 0", queue->keys);
+        status = ackq_run(queue, &scope, false, sql, NULL, 0, &result, &error_class);
+        if (status == ACKQ_OK) {
+            result_row_t row;
+            result_next_t next;
+            while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {}
+            status = ackq_finish_rows(next, result);
+            result_release(&result);
+        }
+    }
+    return status != ACKQ_OK && error_class == RESULT_E_SEMANTIC ? ACKQ_NOT_INSTALLED : status;
 }
 
 ackq_status_t ackq_open(session_t *session, const ackq_options_t *options, ackq_t **out)
@@ -347,6 +369,19 @@ static ackq_status_t create_table(ackq_t *queue, session_t *session)
     if (status == ACKQ_OK) result_release(&result);
     for (size_t i = 0; status == ACKQ_OK && i < sizeof(INDEXED) / sizeof(INDEXED[0]); i++) {
         snprintf(sql, sizeof(sql), "CREATE INDEX %s_%s ON %s (%s)", queue->table, INDEXED[i], queue->table, INDEXED[i]);
+        status = ackq_run(queue, &scope, true, sql, NULL, 0, &result, NULL);
+        if (status == ACKQ_OK) result_release(&result);
+    }
+    if (status == ACKQ_OK) {
+        snprintf(sql, sizeof(sql),
+                 "CREATE TABLE %s (seq INTEGER PRIMARY KEY AUTOINCREMENT, idem TEXT NOT NULL, job INTEGER NOT NULL, "
+                 "digest BLOB NOT NULL, expires_at INTEGER NOT NULL)",
+                 queue->keys);
+        status = ackq_run(queue, &scope, true, sql, NULL, 0, &result, NULL);
+        if (status == ACKQ_OK) result_release(&result);
+    }
+    if (status == ACKQ_OK) {
+        snprintf(sql, sizeof(sql), "CREATE UNIQUE INDEX %s_idem ON %s (idem)", queue->keys, queue->keys);
         status = ackq_run(queue, &scope, true, sql, NULL, 0, &result, NULL);
         if (status == ACKQ_OK) result_release(&result);
     }
@@ -437,6 +472,64 @@ static ackq_status_t find_idem(ackq_t *queue, ackq_scope_t *scope, const char *k
     return *found && !same ? ACKQ_CONFLICT : ACKQ_OK;
 }
 
+/* payload 요약: 길이(8) + CRC32C(4) + FNV-1a 64(8), little-endian */
+static void payload_digest(const uint8_t *payload, size_t size, uint8_t out[DIGEST_BYTES])
+{
+    uint64_t length = size;
+    uint32_t crc = crc32c(0, payload, size);
+    uint64_t fnv = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < size; i++) fnv = (fnv ^ payload[i]) * 0x100000001b3ull;
+    for (size_t i = 0; i < 8; i++) out[i] = (uint8_t)(length >> (8 * i));
+    for (size_t i = 0; i < 4; i++) out[8 + i] = (uint8_t)(crc >> (8 * i));
+    for (size_t i = 0; i < 8; i++) out[12 + i] = (uint8_t)(fnv >> (8 * i));
+}
+
+/*
+ * purge로 지운 작업의 key를 찾는다. 만료 전이면 *found이고 요약이 다르면 ACKQ_CONFLICT다. 만료된 key는 지워
+ * 같은 key로 새 작업을 만들 수 있게 한다.
+ */
+static ackq_status_t find_retained(ackq_t *queue, ackq_scope_t *scope, const char *key, const uint8_t *payload,
+                                   size_t size, uint64_t *id, bool *found)
+{
+    char sql[ACKQ_SQL_MAX];
+    result_t *result = NULL;
+    snprintf(sql, sizeof(sql), "SELECT job, digest, expires_at FROM %s WHERE idem = ?", queue->keys);
+    value_view_t param = ackq_text(key);
+    ackq_status_t status = ackq_run(queue, scope, false, sql, &param, 1, &result, NULL);
+    if (status != ACKQ_OK) return status;
+    uint8_t digest[DIGEST_BYTES];
+    payload_digest(payload, size, digest);
+    bool present = false, live = false, same = false;
+    result_row_t row;
+    result_next_t next;
+    while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {
+        if (row.cell_count < 3 || row.cells[0].type != VALUE_INTEGER || row.cells[1].type != VALUE_BLOB ||
+            row.cells[2].type != VALUE_INTEGER) {
+            status = ACKQ_INTERNAL;
+            continue;
+        }
+        present = true;
+        live = row.cells[2].integer > (int64_t)ackq_now(queue);
+        *id = (uint64_t)row.cells[0].integer;
+        same = row.cells[1].size_bytes == DIGEST_BYTES && memcmp(row.cells[1].bytes, digest, DIGEST_BYTES) == 0;
+    }
+    ackq_status_t finished = ackq_finish_rows(next, result);
+    result_release(&result);
+    if (status != ACKQ_OK) return status;
+    if (finished != ACKQ_OK) return finished;
+    *found = live;
+    if (present && !live) {
+        snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE idem = ?", queue->keys);
+        status = ackq_run(queue, scope, true, sql, &param, 1, &result, NULL);
+        if (status == ACKQ_OK) {
+            status = ackq_expect_affected(result, 1);
+            result_release(&result);
+        }
+        return status;
+    }
+    return live && !same ? ACKQ_CONFLICT : ACKQ_OK;
+}
+
 static ackq_status_t enqueue_in(ackq_t *queue, ackq_scope_t *scope, const uint8_t *payload, size_t size,
                                 const char *key, uint64_t *id, bool *duplicate)
 {
@@ -447,6 +540,7 @@ static ackq_status_t enqueue_in(ackq_t *queue, ackq_scope_t *scope, const uint8_
     ackq_status_t status = ACKQ_OK;
     if (key != NULL) {
         status = find_idem(queue, scope, key, payload, size, &existing, &found);
+        if (status == ACKQ_OK && !found) status = find_retained(queue, scope, key, payload, size, &existing, &found);
         if (status != ACKQ_OK) return status;
         if (found) {
             *id = existing;
@@ -475,7 +569,7 @@ ackq_status_t ackq_enqueue(ackq_t *queue, session_t *session, const uint8_t *pay
     if (queue == NULL || id == NULL) return ACKQ_INVALID;
     *id = 0;   /* 성공이 아니면 id를 주지 않는다 */
     if (duplicate != NULL) *duplicate = false;
-    ackq_status_t status = check_payload(payload, size);
+    ackq_status_t status = check_payload(queue, payload, size);
     if (status != ACKQ_OK) return status;
     if (idem_key != NULL) {
         status = check_text(idem_key, ACKQ_IDEM_KEY_MAX, false, &key_length);
@@ -651,6 +745,33 @@ ackq_status_t ackq_ack(ackq_t *queue, session_t *session, uint64_t id, uint64_t 
     return finish_claim(queue, session, id, fence, ACKQ_STATE_ACKED, "");
 }
 
+ackq_status_t ackq_extend(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence, uint64_t lease_ms,
+                          uint64_t *lease_until)
+{
+    char sql[ACKQ_SQL_MAX];
+    if (queue == NULL || id == 0 || fence == 0 || !fits_i64(fence) || lease_ms == 0) return ACKQ_INVALID;
+    int64_t until;
+    ackq_status_t status = add_ms(ackq_now(queue), lease_ms, &until);
+    if (status != ACKQ_OK) return status;
+    ackq_scope_t scope;
+    status = ackq_scope_open(queue, session, true, &scope);
+    if (status != ACKQ_OK) return status;
+    meta_t meta;
+    status = fetch_meta(queue, &scope, id, &meta);
+    if (status == ACKQ_OK) {
+        if (meta.state != ACKQ_STATE_LEASED || meta.fence != (int64_t)fence) {
+            status = ACKQ_STALE;
+        } else {
+            snprintf(sql, sizeof(sql), "UPDATE %s SET lease_until = ? WHERE id = ?", queue->table);
+            value_view_t params[2] = {ackq_int(until), ackq_int((int64_t)id)};
+            status = run_one_row(queue, &scope, sql, params, 2);
+        }
+    }
+    status = ackq_scope_close(&scope, status);
+    if (status == ACKQ_OK && lease_until != NULL) *lease_until = (uint64_t)until;
+    return status;
+}
+
 ackq_status_t ackq_fail(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence, const char *reason)
 {
     size_t length;
@@ -707,7 +828,7 @@ ackq_status_t ackq_update(ackq_t *queue, session_t *session, uint64_t id, uint64
 {
     char sql[ACKQ_SQL_MAX];
     if (queue == NULL || id == 0 || !fits_i64(fence)) return ACKQ_INVALID;
-    ackq_status_t status = check_payload(payload, size);
+    ackq_status_t status = check_payload(queue, payload, size);
     if (status != ACKQ_OK) return status;
     ackq_scope_t scope;
     status = ackq_scope_open(queue, session, true, &scope);
@@ -779,6 +900,86 @@ ackq_status_t ackq_release_leases(ackq_t *queue, session_t *session, size_t limi
     return return_leases(queue, session, limit, false, released);
 }
 
+/* 지울 작업에 key가 있으면 보존 테이블에 key·id·payload 요약과 만료 시각을 넣는다. */
+static ackq_status_t retain_key(ackq_t *queue, ackq_scope_t *scope, uint64_t id)
+{
+    char sql[ACKQ_SQL_MAX];
+    result_t *result = NULL;
+    snprintf(sql, sizeof(sql), "SELECT idem, payload FROM %s WHERE id = ?", queue->table);
+    value_view_t param = ackq_int((int64_t)id);
+    ackq_status_t status = ackq_run(queue, scope, false, sql, &param, 1, &result, NULL);
+    if (status != ACKQ_OK) return status;
+    char key[ACKQ_IDEM_KEY_MAX + 1] = "";
+    uint8_t digest[DIGEST_BYTES];
+    result_row_t row;
+    result_next_t next;
+    while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {
+        if (row.cell_count < 2 || row.cells[0].type != VALUE_TEXT || row.cells[1].type != VALUE_BLOB ||
+            row.cells[0].size_bytes > ACKQ_IDEM_KEY_MAX) {
+            status = ACKQ_INTERNAL;
+            continue;
+        }
+        if (row.cells[0].size_bytes > 0) memcpy(key, row.cells[0].bytes, row.cells[0].size_bytes);
+        key[row.cells[0].size_bytes] = '\0';
+        payload_digest(row.cells[1].bytes, row.cells[1].size_bytes, digest);
+    }
+    ackq_status_t finished = ackq_finish_rows(next, result);
+    result_release(&result);
+    if (status != ACKQ_OK) return status;
+    if (finished != ACKQ_OK) return finished;
+    if (key[0] == '\0') return ACKQ_OK;
+    int64_t expires;
+    status = add_ms(ackq_now(queue), 0, &expires);
+    if (status != ACKQ_OK) return status;
+    if ((uint64_t)expires > (uint64_t)INT64_MAX - queue->retention_ms) return ACKQ_LIMIT;
+    expires += (int64_t)queue->retention_ms;
+    snprintf(sql, sizeof(sql), "INSERT INTO %s (idem, job, digest, expires_at) VALUES (?, ?, ?, ?)", queue->keys);
+    value_view_t params[4] = {ackq_text(key), ackq_int((int64_t)id), ackq_blob(digest, DIGEST_BYTES), ackq_int(expires)};
+    status = ackq_run(queue, scope, true, sql, params, 4, &result, NULL);
+    if (status == ACKQ_OK) {
+        status = ackq_expect_affected(result, 1);
+        result_release(&result);
+    }
+    return status;
+}
+
+/* 넣은 순서(seq)대로 앞에서부터 만료된 key를 최대 limit개 지우고, 만료 전 key를 만나면 멈춘다. */
+static ackq_status_t expire_keys(ackq_t *queue, ackq_scope_t *scope, size_t limit)
+{
+    char sql[ACKQ_SQL_MAX];
+    result_t *result = NULL;
+    snprintf(sql, sizeof(sql), "SELECT seq, expires_at FROM %s ORDER BY seq LIMIT ?", queue->keys);
+    value_view_t param = ackq_int((int64_t)limit);
+    ackq_status_t status = ackq_run(queue, scope, false, sql, &param, 1, &result, NULL);
+    if (status != ACKQ_OK) return status;
+    int64_t now = (int64_t)ackq_now(queue);
+    int64_t *expired = calloc(limit, sizeof(*expired));
+    size_t count = 0;
+    bool stopped = false;
+    if (expired == NULL) status = ACKQ_NOMEM;
+    result_row_t row;
+    result_next_t next;
+    while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {
+        if (status != ACKQ_OK || stopped) continue;
+        if (row.cell_count < 2 || row.cells[0].type != VALUE_INTEGER || row.cells[1].type != VALUE_INTEGER) {
+            status = ACKQ_INTERNAL;
+            continue;
+        }
+        if (row.cells[1].integer > now) stopped = true;
+        else expired[count++] = row.cells[0].integer;
+    }
+    ackq_status_t finished = ackq_finish_rows(next, result);
+    result_release(&result);
+    if (status == ACKQ_OK) status = finished;
+    snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE seq = ?", queue->keys);
+    for (size_t i = 0; status == ACKQ_OK && i < count; i++) {
+        value_view_t seq = ackq_int(expired[i]);
+        status = run_one_row(queue, scope, sql, &seq, 1);
+    }
+    free(expired);
+    return status;
+}
+
 ackq_status_t ackq_purge(ackq_t *queue, session_t *session, bool include_failed, size_t limit, size_t *purged)
 {
     char sql[ACKQ_SQL_MAX];
@@ -799,10 +1000,12 @@ ackq_status_t ackq_purge(ackq_t *queue, session_t *session, bool include_failed,
     size_t done = 0;
     snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE id = ?", queue->table);
     for (size_t i = 0; status == ACKQ_OK && i < top.count; i++) {
+        if (queue->retention_ms > 0) status = retain_key(queue, &scope, top.items[i].id);
         value_view_t param = ackq_int((int64_t)top.items[i].id);
-        status = run_one_row(queue, &scope, sql, &param, 1);
+        if (status == ACKQ_OK) status = run_one_row(queue, &scope, sql, &param, 1);
         if (status == ACKQ_OK) done++;
     }
+    if (status == ACKQ_OK) status = expire_keys(queue, &scope, limit);
     free(top.items);
     if (status == ACKQ_OK && purged != NULL) *purged = done;
     return ackq_scope_close(&scope, status);

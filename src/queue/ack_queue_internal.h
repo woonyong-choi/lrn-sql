@@ -13,7 +13,10 @@ struct ackq {
     session_db_t *db;               /* 설치한 데이터베이스. 연산의 세션은 이 데이터베이스의 것이어야 한다 */
     char name[ACKQ_NAME_MAX + 1];
     char table[ACKQ_NAME_MAX + 12];  /* "tote_queue_" + 이름 + NUL */
+    char keys[ACKQ_NAME_MAX + 17];   /* table + "_keys" */
     uint32_t max_attempts;
+    size_t max_payload;
+    uint64_t retention_ms;           /* 0이면 key를 남기지 않는다 */
     uint32_t begin_timeout_ms;
     uint64_t (*now_ms)(void *ctx);
     void *clock_ctx;

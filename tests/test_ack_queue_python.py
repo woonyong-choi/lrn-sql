@@ -11,14 +11,17 @@ from pathlib import Path
 
 import pytest
 from totedb import (
-    Queue,
+    DEFAULT_MAX_PAYLOAD_BYTES,
     BusyError,
     ClaimToken,
     ConflictError,
     Database,
     InvalidArgumentError,
     ItemState,
+    LimitError,
     NotInstalledError,
+    PutResult,
+    Queue,
     SqlError,
     StaleError,
     UncertainError,
@@ -82,6 +85,61 @@ def test_queue_put_get_ack_roundtrips_payload_and_fence(db: Database, clock: Fak
     queue.ack(claim)
     assert queue.stats().acked == 1
     assert queue.get(500) is None
+
+
+def test_queue_extend_keeps_fence_and_blocks_other_workers(db: Database, clock: FakeClock) -> None:
+    """#195: 연장은 fence를 유지하고, 다른 worker가 다시 가져간 뒤의 연장은 StaleError다."""
+    queue = Queue(db, "jobs", clock=clock)
+    queue.put(b"long")
+    claim = queue.get(100)
+    assert claim is not None
+
+    clock.now_ms += 90
+    assert queue.extend(claim, 100) == clock.now_ms + 100
+    clock.now_ms += 50
+    assert queue.get(100) is None
+    clock.now_ms += 50
+    again = queue.get(100)
+    assert again is not None and again.fence == claim.fence + 1
+    with pytest.raises(StaleError):
+        queue.extend(claim, 100)
+    queue.ack(again)
+
+
+def test_queue_retains_idempotency_key_after_purge(db: Database, clock: FakeClock) -> None:
+    """#196: purge 뒤에도 보존 기간 안의 같은 key는 지운 작업을 돌려주고, 0이면 남기지 않는다."""
+    queue = Queue(db, "jobs", idem_retention_ms=1000, clock=clock)
+    first = queue.put(b"mail", "order-1")
+    claim = queue.get(100)
+    assert claim is not None
+    queue.ack(claim)
+    assert queue.purge() == 1
+
+    assert queue.put(b"mail", "order-1") == PutResult(first.id, True)
+    with pytest.raises(ConflictError):
+        queue.put(b"other", "order-1")
+    clock.now_ms += 1000
+    renewed = queue.put(b"mail", "order-1")
+    assert not renewed.duplicate and renewed.id != first.id
+
+    plain = Queue(db, "plain", idem_retention_ms=0, clock=clock)
+    kept = plain.put(b"x", "k")
+    claim = plain.get(100)
+    assert claim is not None
+    plain.ack(claim)
+    assert plain.purge() == 1
+    assert plain.put(b"x", "k").id != kept.id
+
+
+def test_queue_payload_limit_option(db: Database, clock: FakeClock) -> None:
+    """#197: payload 상한은 큐 옵션이며 넘는 payload는 자르지 않고 LimitError다."""
+    queue = Queue(db, "small", max_payload_bytes=4, clock=clock)
+    queue.put(b"four")
+    with pytest.raises(LimitError):
+        queue.put(b"five!")
+    with pytest.raises(InvalidArgumentError):
+        Queue(db, "bad", max_payload_bytes=0)
+    assert DEFAULT_MAX_PAYLOAD_BYTES == 1 << 20
 
 
 def test_queue_nack_retry_delay_and_terminal_failure(db: Database, clock: FakeClock) -> None:

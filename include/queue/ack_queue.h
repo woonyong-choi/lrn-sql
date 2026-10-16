@@ -21,7 +21,9 @@
  *
  * 전달 보장: at-least-once다. worker가 죽거나 lease가 만료되면 같은 작업이 다시 전달된다. 외부 부작용(파일·HTTP)의
  * exactly-once나 원자적 commit은 제공하지 않는다. idempotency key가 같고 payload가 같은 enqueue는 기존 작업을
- * 돌려주고(duplicate), payload가 다르면 ACKQ_CONFLICT다.
+ * 돌려주고(duplicate), payload가 다르면 ACKQ_CONFLICT다. 끝난 작업을 purge한 뒤에도 보존 기간(idem_retention_ms) 동안은
+ * key·id·payload 요약을 tote_queue_<name>_keys에 남겨 같은 판정을 한다. 요약은 길이와 두 체크섬(CRC32C, FNV-1a 64)이라
+ * 다른 payload가 같은 요약을 가질 확률은 무시할 만큼 작지만 0은 아니다.
  *
  * 내구성: 모든 변경은 database의 commit을 따른다(database_txn.h). 성공은 COW 게시의 fsync가 끝난 뒤에만 돌아오므로
  * 승인한 작업은 프로세스·OS 종료 뒤에도 남는다. commit 결과를 알 수 없으면(ACKQ_UNCERTAIN) 성공으로 돌려주지 않는다. 다시 열어 상태를 확인해야 한다.
@@ -51,8 +53,17 @@
 #define ACKQ_NAME_MAX 40u
 #define ACKQ_IDEM_KEY_MAX 128u
 #define ACKQ_NOTE_MAX 200u
-/* 문장 한 건의 WAL 레코드 한도(1MiB)와 SQL·바인딩 몫을 고려한 payload 상한(바이트) */
-#define ACKQ_MAX_PAYLOAD_BYTES (512u * 1024u)
+/*
+ * payload 상한(바이트). 큐마다 max_payload_bytes로 정하고 0이면 기본값이다. 쓰기 트랜잭션은 하나라 큰 payload를 넣는
+ * 동안 다른 연산이 기다리고, claim은 최대 ACKQ_MAX_CLAIM_BATCH건의 payload를 메모리에 올리므로 기본값을 작게 둔다.
+ * 약 3.9 KB 이하는 행 페이지 안에 들어가 가장 빠르고, 그보다 크면 overflow 체인에 저장된다.
+ */
+#define ACKQ_DEFAULT_MAX_PAYLOAD_BYTES ((size_t)1 << 20)
+#define ACKQ_MAX_PAYLOAD_LIMIT ((size_t)1 << 30)
+/* purge 뒤 idempotency key 보존 기간. 0이면 기본값(7일), ACKQ_RETENTION_NONE이면 남기지 않는다 */
+#define ACKQ_DEFAULT_IDEM_RETENTION_MS (7ull * 24ull * 3600ull * 1000ull)
+#define ACKQ_RETENTION_NONE UINT64_MAX
+#define ACKQ_MAX_RETENTION_MS (100ull * 366ull * 24ull * 3600ull * 1000ull)
 #define ACKQ_MAX_LEASE_MS (366ull * 24ull * 3600ull * 1000ull)
 #define ACKQ_MAX_CLAIM_BATCH 1024u
 
@@ -90,11 +101,13 @@ typedef struct {
     /* 0이면 제한 없음. 시도(claim) 횟수가 이 값에 닿은 작업의 nack·만료는 FAILED로 끝난다 */
     uint32_t max_attempts;
     uint32_t begin_timeout_ms;       /* 자기 트랜잭션이 다른 writer를 기다리는 시간. 0이면 기다리지 않고 BUSY */
+    size_t max_payload_bytes;        /* 0이면 ACKQ_DEFAULT_MAX_PAYLOAD_BYTES. ACKQ_MAX_PAYLOAD_LIMIT를 넘으면 INVALID */
+    uint64_t idem_retention_ms;      /* 0이면 기본 7일, ACKQ_RETENTION_NONE이면 남기지 않음. ACKQ_MAX_RETENTION_MS까지 */
     uint64_t (*now_ms)(void *ctx);   /* NULL이면 CLOCK_REALTIME 밀리초 */
     void *clock_ctx;
 } ackq_options_t;
 
-/* 큐 테이블이 없으면 만든다(자기 트랜잭션). 있으면 열기와 같다. */
+/* 큐 테이블(과 key 보존 테이블)이 없으면 만든다(자기 트랜잭션). 있으면 열기와 같다. */
 ackq_status_t ackq_install(session_t *session, const ackq_options_t *options, ackq_t **out);
 /* 테이블이 있어야 한다. 없으면 ACKQ_NOT_INSTALLED이고 아무것도 만들지 않는다. */
 ackq_status_t ackq_open(session_t *session, const ackq_options_t *options, ackq_t **out);
@@ -112,7 +125,7 @@ typedef struct {
 /*
  * enqueue. idem_key는 NULL이거나 1~ACKQ_IDEM_KEY_MAX바이트의 UTF-8이다. 같은 key와 같은 payload는 새 작업을 만들지
  * 않고 기존 id와 *duplicate=true를 돌려준다(작업이 이미 끝났어도 그대로). payload가 다르면 ACKQ_CONFLICT다.
- * payload는 ACKQ_MAX_PAYLOAD_BYTES 이하여야 하며 넘으면 자르지 않고 ACKQ_LIMIT이다. duplicate는 NULL 가능.
+ * payload는 큐의 max_payload_bytes 이하여야 하며 넘으면 자르지 않고 ACKQ_LIMIT이다. duplicate는 NULL 가능.
  */
 ackq_status_t ackq_enqueue(ackq_t *queue, session_t *session, const uint8_t *payload, size_t size,
                            const char *idem_key, uint64_t *id, bool *duplicate);
@@ -137,6 +150,13 @@ ackq_status_t ackq_claim_id(ackq_t *queue, session_t *session, uint64_t id, uint
  * ACKQ_OK다(응답 소실 뒤 재시도). 다른 fence나 상태면 ACKQ_STALE, id가 없으면 ACKQ_NOT_FOUND다.
  */
 ackq_status_t ackq_ack(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence);
+/*
+ * 같은 claim의 lease를 now + lease_ms로 바꾼다(#195). fence는 그대로다. 오래 걸리는 작업을 짧은 lease로 처리하며 주기적으로
+ * 부른다. lease가 만료됐어도 아직 아무도 다시 claim하지 않았다면 그 claim은 현재이므로 연장된다. 상태가 LEASED가 아니거나
+ * fence가 다르면 ACKQ_STALE이고 아무것도 바꾸지 않는다. 성공하면 새 만료 시각을 *lease_until(NULL 가능)에 준다.
+ */
+ackq_status_t ackq_extend(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence, uint64_t lease_ms,
+                          uint64_t *lease_until);
 /* reason은 NULL 가능, ACKQ_NOTE_MAX바이트 이하의 UTF-8이며 넘으면 ACKQ_LIMIT이다. */
 ackq_status_t ackq_fail(ackq_t *queue, session_t *session, uint64_t id, uint64_t fence, const char *reason);
 /*
@@ -159,7 +179,10 @@ ackq_status_t ackq_update(ackq_t *queue, session_t *session, uint64_t id, uint64
 ackq_status_t ackq_recover(ackq_t *queue, session_t *session, size_t limit, size_t *recovered);
 /* 모든 LEASED를 만료와 무관하게 READY로 돌린다(worker가 모두 죽은 것을 호출자가 안다는 약속). 최대 limit개. */
 ackq_status_t ackq_release_leases(ackq_t *queue, session_t *session, size_t limit, size_t *released);
-/* ACKED 작업을 삭제한다(include_failed면 FAILED도). 최대 limit개를 지우고 지운 수를 준다. */
+/*
+ * ACKED 작업을 삭제한다(include_failed면 FAILED도). 최대 limit개를 지우고 지운 수를 준다. idempotency key가 있는 작업은
+ * 보존 기간 동안 key 보존 테이블에 남기고, 보존 기간이 지난 key는 최대 limit개를 함께 지운다.
+ */
 ackq_status_t ackq_purge(ackq_t *queue, session_t *session, bool include_failed, size_t limit, size_t *purged);
 
 typedef struct {

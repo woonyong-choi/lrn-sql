@@ -89,9 +89,18 @@ int tote_rollback(tote_txn_t **txn);
 /* 문장 오류로 실패 상태인지(commit하면 안 되고 rollback만 된다) */
 int tote_txn_failed(const tote_txn_t *txn);
 
-/* 큐 이름 name을 연다. install이 0이 아니면 없을 때 만든다. clock이 NULL이면 실시간이다. */
-int tote_queue_open(tote_db_t *db, const char *name, int install, uint32_t max_attempts, tote_clock_fn clock,
-              void *clock_ctx, tote_queue_t **out);
+/* 큐 옵션. 모두 0이면 기본값이다(ack_queue.h의 ackq_options_t와 같은 뜻). */
+typedef struct {
+    uint32_t max_attempts;        /* 0이면 제한 없음 */
+    size_t max_payload_bytes;     /* 0이면 1 MiB */
+    uint64_t idem_retention_ms;   /* 0이면 7일, UINT64_MAX면 purge 뒤 key를 남기지 않음 */
+    tote_clock_fn clock;          /* NULL이면 실시간(밀리초) */
+    void *clock_ctx;
+} tote_queue_options_t;
+
+/* 큐 이름 name을 연다. install이 0이 아니면 없을 때 만든다. options가 NULL이면 모두 기본값이다. */
+int tote_queue_open(tote_db_t *db, const char *name, int install, const tote_queue_options_t *options,
+                    tote_queue_t **out);
 void tote_queue_close(tote_queue_t **queue);
 
 typedef struct {
@@ -109,6 +118,9 @@ int tote_queue_put(tote_queue_t *queue, tote_txn_t *txn, const uint8_t *payload,
 int tote_queue_get(tote_queue_t *queue, tote_txn_t *txn, uint64_t id, uint64_t lease_ms, tote_queue_item_t *item);
 void tote_queue_item_free(tote_queue_item_t *item);
 int tote_queue_ack(tote_queue_t *queue, tote_txn_t *txn, uint64_t id, uint64_t fence);
+/* 같은 claim의 lease를 지금 + lease_ms로 늘린다. fence는 그대로다. 성공하면 새 만료 시각을 *lease_until에 준다(NULL 가능). */
+int tote_queue_extend(tote_queue_t *queue, tote_txn_t *txn, uint64_t id, uint64_t fence, uint64_t lease_ms,
+                      uint64_t *lease_until);
 int tote_queue_fail(tote_queue_t *queue, tote_txn_t *txn, uint64_t id, uint64_t fence, const char *reason);
 int tote_queue_nack(tote_queue_t *queue, tote_txn_t *txn, uint64_t id, uint64_t fence, uint64_t retry_delay_ms, const char *reason,
               int *terminal);
