@@ -20,8 +20,9 @@
  *     item       = column | PRIMARY KEY ( column_name )
  *     column     = column_name type {constraint}
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
- *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT]
+ *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT] | DEFAULT 상수 | DEFAULT -숫자 | DEFAULT ( expr )
  *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )} [returning]
+ *   INSERT INTO name DEFAULT VALUES [returning]
  *   [WITH cte {, cte}] SELECT core {set_op core} [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
  *     cte        = name [( column {, column} )] AS ( query )
  *     core       = [DISTINCT] item {, item} [FROM source {join}] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
@@ -149,6 +150,7 @@ typedef struct {
     bool not_null;
     bool has_varchar_length;
     uint32_t varchar_length;     /* has_varchar_length일 때만 의미가 있고 강제하지 않는다 */
+    struct sqlexpr *default_value;  /* DEFAULT 식. 없으면 NULL */
 } sqlstmt_column_def_t;
 
 typedef struct {
@@ -229,7 +231,7 @@ typedef struct {
     size_t column_count;
     sqlexpr_t **values;          /* row_count × value_count, 행 순서 */
     size_t value_count;          /* 한 행의 값 수. has_columns이면 column_count와 같다 */
-    size_t row_count;
+    size_t row_count;            /* DEFAULT VALUES면 1행, 값 0개, has_columns이고 컬럼 0개 */
     sqlstmt_returning_t returning;
 } sqlstmt_insert_t;
 

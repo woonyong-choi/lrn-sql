@@ -249,6 +249,7 @@ void sqlstmt_free(sqlstmt_t *statement)
         case SQLSTMT_CREATE_TABLE:
             for (size_t i = 0; i < statement->create.column_count; i++) {
                 name_clear(&statement->create.columns[i].name);
+                expr_free(statement->create.columns[i].default_value);
             }
             free(statement->create.columns);
             name_clear(&statement->create.table);
@@ -1370,6 +1371,12 @@ static bool parse_insert(parser_t *p, sqlstmt_t *statement)
     if (word_is(current(p), "SELECT")) {
         return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
     }
+    if (!insert->has_columns && take_word(p, "DEFAULT")) {
+        if (!expect_word(p, "VALUES")) return false;
+        insert->has_columns = true;
+        insert->row_count = 1;
+        return parse_returning(p, &insert->returning) && parse_end(p);
+    }
     if (!expect_word(p, "VALUES")) return false;
     capacity = 0;
     size_t total = 0;
@@ -1489,7 +1496,12 @@ static bool parse_constraints(parser_t *p, sqlstmt_create_t *create, size_t inde
         } else if (word_is(token, "AUTOINCREMENT")) {
             return fail(p, SQLSTMT_SYNTAX, SQLSTMT_REASON_AUTOINCREMENT_NOT_INTEGER_KEY,
                         token->offset);
-        } else if (word_is(token, "UNIQUE") || word_is(token, "DEFAULT") ||
+        } else if (word_is(token, "DEFAULT")) {
+            p->pos++;
+            if (column->default_value != NULL) return fail(p, SQLSTMT_SYNTAX, SQLSTMT_REASON_EXPECTED_KEYWORD, token->offset);
+            /* 상수·부호 붙은 숫자·괄호 식(SQLite와 PostgreSQL이 함께 받는 꼴) */
+            if (!parse_unary(p, &column->default_value)) return false;
+        } else if (word_is(token, "UNIQUE") ||
                    word_is(token, "CHECK") || word_is(token, "REFERENCES") ||
                    word_is(token, "COLLATE") || word_is(token, "GENERATED") ||
                    word_is(token, "CONSTRAINT") || word_is(token, "NULL")) {

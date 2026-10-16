@@ -6,6 +6,8 @@
 
 #define FORMAT_VERSION 1u
 #define INDEX_FORMAT_VERSION 2u
+/* 컬럼 기본값이 있는 카탈로그. 색인 영역은 테이블 뒤에 바이트가 남아 있을 때만 있다 */
+#define DEFAULT_FORMAT_VERSION 3u
 #define HEADER_BYTES 28u
 #define CHECKSUM_BYTES 4u
 #define TABLE_FIXED_BYTES 35u
@@ -15,10 +17,12 @@
 #define IDENTITY_END ((uint64_t)INT64_MAX + 1u)
 #define FLAG_IDENTITY 1u
 #define FLAG_NOT_NULL 1u
+#define FLAG_DEFAULT 2u
 
 typedef struct {
     catalog_table_id_t id;
-    char *names;                 /* 소유: 테이블 이름 뒤에 컬럼 이름이 이어진다 */
+    char *names;                 /* 소유: 테이블 이름 뒤에 컬럼 이름, 그 뒤에 기본값 바이트가 이어진다 */
+    size_t names_capacity;       /* names 할당 바이트 */
     catalog_column_t *columns;   /* 소유: 이름 포인터는 names 안을 가리킨다 */
     size_t name_bytes;
     size_t column_count;
@@ -92,11 +96,25 @@ static bool column_type_valid(value_type_t type)
     return type >= VALUE_INTEGER && type <= VALUE_BLOB;
 }
 
+/* 기본값 인코딩: 형식 u8, INTEGER·REAL은 8바이트, TEXT·BLOB은 u32 길이와 바이트 */
+static size_t default_encoded_bytes(const value_view_t *value)
+{
+    return 1u + (value->type == VALUE_INTEGER || value->type == VALUE_REAL ? 8u : 4u + value->size_bytes);
+}
+
+static size_t default_payload_bytes(const value_view_t *value)
+{
+    return value->type == VALUE_TEXT || value->type == VALUE_BLOB ? value->size_bytes : 0;
+}
+
 static size_t table_encoded_bytes(size_t name_bytes, const catalog_column_t *columns,
                                   size_t column_count)
 {
     size_t total = TABLE_FIXED_BYTES + name_bytes;
-    for (size_t i = 0; i < column_count; i++) total += COLUMN_FIXED_BYTES + columns[i].name_bytes;
+    for (size_t i = 0; i < column_count; i++) {
+        total += COLUMN_FIXED_BYTES + columns[i].name_bytes;
+        if (columns[i].has_default) total += default_encoded_bytes(&columns[i].default_value);
+    }
     return total;
 }
 
@@ -109,6 +127,13 @@ static catalog_status_t check_spec(const catalog_table_spec_t *spec)
     for (size_t i = 0; i < spec->column_count; i++) {
         const catalog_column_spec_t *column = &spec->columns[i];
         if (!name_valid(column->name, column->name_bytes) || !column_type_valid(column->type)) {
+            return CATALOG_INVALID;
+        }
+        const value_view_t *value = column->default_value;
+        if (value != NULL && (value->type != column->type ||
+                              ((value->type == VALUE_TEXT || value->type == VALUE_BLOB) &&
+                               (value->size_bytes > CATALOG_DEFAULT_MAX_BYTES ||
+                                (value->size_bytes > 0 && value->bytes == NULL))))) {
             return CATALOG_INVALID;
         }
     }
@@ -145,9 +170,13 @@ static catalog_status_t build_table(table_t *out, catalog_table_id_t id,
                                     const catalog_table_spec_t *spec)
 {
     size_t names_bytes = spec->name_bytes;
-    for (size_t i = 0; i < spec->column_count; i++) names_bytes += spec->columns[i].name_bytes;
+    for (size_t i = 0; i < spec->column_count; i++) {
+        names_bytes += spec->columns[i].name_bytes;
+        if (spec->columns[i].default_value != NULL) names_bytes += default_payload_bytes(spec->columns[i].default_value);
+    }
     table_t table = {0};
     table.names = malloc(names_bytes);
+    table.names_capacity = names_bytes;
     table.columns = malloc(spec->column_count * sizeof(*table.columns));
     if (table.names == NULL || table.columns == NULL) {
         release_table(&table);
@@ -159,8 +188,22 @@ static catalog_status_t build_table(table_t *out, catalog_table_id_t id,
         const catalog_column_spec_t *column = &spec->columns[i];
         memcpy(table.names + offset, column->name, column->name_bytes);
         table.columns[i] = (catalog_column_t){table.names + offset, column->name_bytes,
-                                              column->type, column->not_null};
+                                              column->type, column->not_null, false, {0}};
         offset += column->name_bytes;
+    }
+    for (size_t i = 0; i < spec->column_count; i++) {
+        const value_view_t *value = spec->columns[i].default_value;
+        if (value == NULL) continue;
+        table.columns[i].has_default = true;
+        table.columns[i].default_value = *value;
+        size_t payload = default_payload_bytes(value);
+        if (payload > 0) {
+            memcpy(table.names + offset, value->bytes, payload);
+            table.columns[i].default_value.bytes = (const uint8_t *)table.names + offset;
+            offset += payload;
+        } else if (value->type == VALUE_TEXT || value->type == VALUE_BLOB) {
+            table.columns[i].default_value.bytes = NULL;
+        }
     }
     table.id = id;
     table.name_bytes = spec->name_bytes;
@@ -522,12 +565,38 @@ static uint8_t *encode_table(uint8_t *at, const table_t *table)
     for (size_t i = 0; i < table->column_count; i++) {
         const catalog_column_t *column = &table->columns[i];
         at[0] = (uint8_t)column->type;
-        at[1] = column->not_null ? FLAG_NOT_NULL : 0;
+        at[1] = (uint8_t)((column->not_null ? FLAG_NOT_NULL : 0) | (column->has_default ? FLAG_DEFAULT : 0));
         put_u16(at + 2, (uint16_t)column->name_bytes);
         memcpy(at + COLUMN_FIXED_BYTES, column->name, column->name_bytes);
         at += COLUMN_FIXED_BYTES + column->name_bytes;
+        if (!column->has_default) continue;
+        const value_view_t *value = &column->default_value;
+        *at++ = (uint8_t)value->type;
+        if (value->type == VALUE_INTEGER) {
+            le_put_u64(at, (uint64_t)value->integer);
+            at += 8;
+        } else if (value->type == VALUE_REAL) {
+            uint64_t bits;
+            memcpy(&bits, &value->real, sizeof(bits));
+            le_put_u64(at, bits);
+            at += 8;
+        } else {
+            le_put_u32(at, (uint32_t)value->size_bytes);
+            if (value->size_bytes > 0) memcpy(at + 4, value->bytes, value->size_bytes);
+            at += 4 + value->size_bytes;
+        }
     }
     return at;
+}
+
+static bool has_defaults(const catalog_t *catalog)
+{
+    for (size_t t = 0; t < catalog->count; t++) {
+        for (size_t i = 0; i < catalog->tables[t].column_count; i++) {
+            if (catalog->tables[t].columns[i].has_default) return true;
+        }
+    }
+    return false;
 }
 
 catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_t *size)
@@ -537,7 +606,9 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
     uint8_t *buffer = malloc(total);
     if (buffer == NULL) return CATALOG_NOMEM;
     memcpy(buffer, "LRCT", 4);
-    put_u16(buffer + 4, catalog->index_count > 0 ? INDEX_FORMAT_VERSION : FORMAT_VERSION);
+    put_u16(buffer + 4, has_defaults(catalog)          ? DEFAULT_FORMAT_VERSION
+                        : catalog->index_count > 0 ? INDEX_FORMAT_VERSION
+                                                   : FORMAT_VERSION);
     put_u16(buffer + 6, 0);
     le_put_u32(buffer + 8, (uint32_t)total);
     le_put_u64(buffer + 12, catalog->generation);
@@ -568,6 +639,7 @@ catalog_status_t catalog_encode(const catalog_t *catalog, uint8_t **bytes, size_
 typedef struct {
     const uint8_t *at;
     size_t left;
+    bool allow_default;          /* 형식 버전 3 */
 } reader_t;
 
 static bool take(reader_t *reader, size_t count, const uint8_t **out)
@@ -586,20 +658,41 @@ static uint64_t get_le(const uint8_t *bytes, unsigned width)
     return value;
 }
 
-/* 컬럼 하나를 읽어 spec에 옮긴다. 이름 포인터는 입력 buffer를 빌린다. */
-static catalog_status_t read_column(reader_t *reader, catalog_column_spec_t *column)
+/* 컬럼 하나를 읽어 spec에 옮긴다. 이름·기본값 바이트는 입력 buffer를 빌리고 기본값은 *value에 둔다. */
+static catalog_status_t read_column(reader_t *reader, catalog_column_spec_t *column, value_view_t *value)
 {
     const uint8_t *fixed, *name;
     if (!take(reader, COLUMN_FIXED_BYTES, &fixed)) return CATALOG_CORRUPT;
     size_t name_bytes = (size_t)get_le(fixed + 2, 2);
-    if (fixed[1] > FLAG_NOT_NULL || !column_type_valid((value_type_t)fixed[0])) {
+    uint8_t allowed = reader->allow_default ? (FLAG_NOT_NULL | FLAG_DEFAULT) : FLAG_NOT_NULL;
+    if ((fixed[1] & ~allowed) != 0 || !column_type_valid((value_type_t)fixed[0])) {
         return CATALOG_CORRUPT;
     }
     if (!take(reader, name_bytes, &name) || !name_valid((const char *)name, name_bytes)) {
         return CATALOG_CORRUPT;
     }
     *column = (catalog_column_spec_t){(const char *)name, name_bytes, (value_type_t)fixed[0],
-                                      fixed[1] == FLAG_NOT_NULL};
+                                      (fixed[1] & FLAG_NOT_NULL) != 0, NULL};
+    if ((fixed[1] & FLAG_DEFAULT) == 0) return CATALOG_OK;
+    const uint8_t *type, *payload;
+    if (!take(reader, 1, &type) || *type != fixed[0]) return CATALOG_CORRUPT;
+    *value = (value_view_t){0};
+    value->type = (value_type_t)*type;
+    if (value->type == VALUE_INTEGER || value->type == VALUE_REAL) {
+        if (!take(reader, 8, &payload)) return CATALOG_CORRUPT;
+        uint64_t bits = get_le(payload, 8);
+        if (value->type == VALUE_INTEGER) value->integer = (int64_t)bits;
+        else memcpy(&value->real, &bits, sizeof(bits));
+    } else {
+        const uint8_t *length;
+        if (!take(reader, 4, &length)) return CATALOG_CORRUPT;
+        value->size_bytes = (size_t)get_le(length, 4);
+        if (value->size_bytes > CATALOG_DEFAULT_MAX_BYTES || !take(reader, value->size_bytes, &payload)) {
+            return CATALOG_CORRUPT;
+        }
+        value->bytes = value->size_bytes > 0 ? payload : NULL;
+    }
+    column->default_value = value;
     return CATALOG_OK;
 }
 
@@ -622,10 +715,15 @@ static catalog_status_t read_table(reader_t *reader, catalog_t *catalog)
         return CATALOG_CORRUPT;
     }
     catalog_column_spec_t *columns = malloc(column_count * sizeof(*columns));
-    if (columns == NULL) return CATALOG_NOMEM;
+    value_view_t *defaults = malloc(column_count * sizeof(*defaults));
+    if (columns == NULL || defaults == NULL) {
+        free(columns);
+        free(defaults);
+        return CATALOG_NOMEM;
+    }
     catalog_status_t status = CATALOG_OK;
     for (size_t i = 0; i < column_count && status == CATALOG_OK; i++) {
-        status = read_column(reader, &columns[i]);
+        status = read_column(reader, &columns[i], &defaults[i]);
     }
     catalog_table_spec_t spec = {(const char *)name, name_bytes, columns, column_count,
                                  (uint16_t)get_le(fixed + 6, 2), has_identity};
@@ -643,6 +741,7 @@ static catalog_status_t read_table(reader_t *reader, catalog_t *catalog)
     table_t table = {0};
     if (status == CATALOG_OK) status = build_table(&table, id, &spec);
     free(columns);
+    free(defaults);
     if (status != CATALOG_OK) return status;
     table.row_count = get_le(fixed + 11, 8);
     table.next_identity = next_identity;
@@ -672,7 +771,9 @@ static catalog_status_t check_envelope(const uint8_t *bytes, size_t size)
     if (size > CATALOG_MAX_ENCODED_BYTES) return CATALOG_LIMIT;
     if (memcmp(bytes, "LRCT", 4) != 0) return CATALOG_CORRUPT;
     uint64_t version = get_le(bytes + 4, 2);
-    if (version != FORMAT_VERSION && version != INDEX_FORMAT_VERSION) return CATALOG_UNSUPPORTED;
+    if (version != FORMAT_VERSION && version != INDEX_FORMAT_VERSION && version != DEFAULT_FORMAT_VERSION) {
+        return CATALOG_UNSUPPORTED;
+    }
     if (get_le(bytes + 6, 2) != 0) return CATALOG_CORRUPT;
     if (get_le(bytes + 8, 4) != size) return CATALOG_CORRUPT;
     if (get_le(bytes + size - CHECKSUM_BYTES, 4) != checksum(bytes, size - CHECKSUM_BYTES)) {
@@ -700,11 +801,13 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
         if (catalog->tables == NULL) status = CATALOG_NOMEM;
         else catalog->capacity = table_count;
     }
-    reader_t reader = {bytes + HEADER_BYTES, payload};
+    uint64_t version = get_le(bytes + 4, 2);
+    reader_t reader = {bytes + HEADER_BYTES, payload, version == DEFAULT_FORMAT_VERSION};
     for (size_t i = 0; i < table_count && status == CATALOG_OK; i++) {
         status = read_table(&reader, catalog);
     }
-    if (status == CATALOG_OK && get_le(bytes + 4, 2) == INDEX_FORMAT_VERSION) {
+    if (status == CATALOG_OK &&
+        (version == INDEX_FORMAT_VERSION || (version == DEFAULT_FORMAT_VERSION && reader.left > 0))) {
         const uint8_t *count_bytes;
         if (!take(&reader, 4u, &count_bytes)) status = CATALOG_CORRUPT;
         else {
@@ -744,11 +847,10 @@ catalog_status_t catalog_decode(const uint8_t *bytes, size_t size, catalog_t **o
     return CATALOG_OK;
 }
 
-/* 테이블 하나가 쥔 이름 배열과 컬럼 배열. 이름 바이트 합은 encoded_bytes에서 거꾸로 구한다. */
+/* 테이블 하나가 쥔 이름(과 기본값) 배열과 컬럼 배열 */
 static size_t table_memory_bytes(const table_t *table)
 {
-    size_t names = table->encoded_bytes - TABLE_FIXED_BYTES - table->column_count * COLUMN_FIXED_BYTES;
-    return names + table->column_count * sizeof(catalog_column_t);
+    return table->names_capacity + table->column_count * sizeof(catalog_column_t);
 }
 
 size_t catalog_memory_bytes(const catalog_t *catalog)
@@ -775,7 +877,7 @@ size_t catalog_clone_peak_bytes(const catalog_t *catalog)
     if (catalog->index_capacity > 4) decoded += (catalog->index_capacity / 2u) * sizeof(index_t);
     for (size_t i = 0; i < catalog->index_count; i++) decoded += catalog->indexes[i].name_bytes;
     /* read_table의 임시 spec 배열과 이름 검사 refs, 마지막의 테이블 이름 refs */
-    size_t per_table = widest * (sizeof(catalog_column_spec_t) + sizeof(name_ref_t));
+    size_t per_table = widest * (sizeof(catalog_column_spec_t) + sizeof(value_view_t) + sizeof(name_ref_t));
     size_t names = catalog->count * sizeof(name_ref_t);
     size_t scratch = per_table > names ? per_table : names;
     return catalog->encoded_bytes + decoded + scratch;
@@ -819,7 +921,7 @@ size_t catalog_decode_peak_bytes(size_t encoded_bytes)
     size_t indexes = encoded_bytes / (INDEX_FIXED_BYTES + 1u);
     if (indexes > CATALOG_MAX_INDEXES) indexes = CATALOG_MAX_INDEXES;
     memory += indexes * sizeof(index_t) * 3u + encoded_bytes;
-    size_t scratch = columns * (sizeof(catalog_column_spec_t) + sizeof(name_ref_t)) +
+    size_t scratch = columns * (sizeof(catalog_column_spec_t) + sizeof(value_view_t) + sizeof(name_ref_t)) +
                      tables * sizeof(name_ref_t);
     return memory + scratch;
 }

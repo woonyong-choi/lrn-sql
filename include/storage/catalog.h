@@ -47,11 +47,19 @@ typedef struct catalog catalog_t;
  * VALUE_NULL은 거절한다(NULL은 값의 상태이지 컬럼 타입이 아니다). VARCHAR(n)의 n은 여기서
  * 제한이나 절단 기준으로 해석하지 않는다. 길이 제한이 필요하면 별도 명시적 제약으로 추가한다.
  */
+/* 컬럼 기본값(TEXT·BLOB) 크기 한계 */
+#define CATALOG_DEFAULT_MAX_BYTES 65536u
+
+/*
+ * default_value가 NULL이 아니면 컬럼 기본값이다. 형식은 컬럼 형식과 같아야 하고 NULL 값은 쓰지 않는다
+ * (기본값이 없으면 NULL이 기본이다). 기본값이 있는 카탈로그는 형식 버전 3으로 쓴다.
+ */
 typedef struct {
     const char *name;
     size_t name_bytes;
     value_type_t type;
     bool not_null;
+    const value_view_t *default_value;
 } catalog_column_spec_t;
 
 typedef struct {
@@ -71,6 +79,8 @@ typedef struct {
     size_t name_bytes;
     value_type_t type;
     bool not_null;
+    bool has_default;
+    value_view_t default_value;   /* has_default일 때. 바이트는 카탈로그가 소유한다 */
 } catalog_column_t;
 
 /* 이름은 catalog가 소유하며 다음 변경 전까지만 유효하다. */

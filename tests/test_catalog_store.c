@@ -125,7 +125,7 @@ static void spit(const char *path, const uint8_t *bytes, size_t size)
 
 static catalog_column_spec_t column(const char *name, value_type_t type, bool not_null)
 {
-    return (catalog_column_spec_t){name, strlen(name), type, not_null};
+    return (catalog_column_spec_t){name, strlen(name), type, not_null, NULL};
 }
 
 static catalog_table_id_t add_table(catalog_t *catalog, const char *name, bool identity)

@@ -588,9 +588,10 @@ static void test_identity_and_primary_key_rules(void)
     expect_class(db, "INSERT INTO u VALUES ('a', 3)", RESULT_E_CONSTRAINT);
     exec_ok(db, "UPDATE u SET k = 'c' WHERE k = 'a'");
     exec_ok(db, "INSERT INTO u VALUES ('a', 4)");
-    exec_ok(db, "INSERT INTO u VALUES (NULL, 5)");
-    exec_ok(db, "INSERT INTO u VALUES (NULL, 6)");
-    expect_text(db, "SELECT v FROM u WHERE k IS NULL", "[2] 5/ 6");
+    /* 기본 키는 NOT NULL이다 */
+    expect_class(db, "INSERT INTO u VALUES (NULL, 5)", RESULT_E_CONSTRAINT);
+    expect_class(db, "UPDATE u SET k = NULL WHERE k = 'b'", RESULT_E_CONSTRAINT);
+    expect_text(db, "SELECT v FROM u WHERE k IS NULL", "[0]");
     db = reopen(db, true);
     expect_class(db, "INSERT INTO u VALUES ('c', 1)", RESULT_E_CONSTRAINT);
     assert(database_close(db) == DATABASE_OK);
@@ -943,8 +944,26 @@ static void test_order_and_distinct_respect_budget(void)
     database_close(db);
 }
 
+static void test_defaults_survive_reopen(void)
+{
+    printf("\n[test_defaults_survive_reopen]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, state TEXT NOT NULL DEFAULT 'ready', w REAL DEFAULT 2, "
+                "b BLOB DEFAULT X'0102', n INTEGER)");
+    exec_ok(db, "INSERT INTO jobs (id) VALUES (1)");
+    db = reopen(db, true);
+    exec_ok(db, "INSERT INTO jobs (id, n) VALUES (2, 9)");
+    exec_ok(db, "INSERT INTO jobs DEFAULT VALUES");
+    expect_text(db, "SELECT id, state, w, LENGTH(b), n FROM jobs ORDER BY id",
+                "[3] 1|'ready'|2.0|2|NULL/ 2|'ready'|2.0|2|9/ 3|'ready'|2.0|2|NULL");
+    expect_class(db, "CREATE TABLE bad (a INTEGER DEFAULT 'x')", RESULT_E_SEMANTIC);
+    expect_class(db, "CREATE TABLE bad (a INTEGER DEFAULT (SELECT 1))", RESULT_E_SEMANTIC);
+    database_close(db);
+}
+
 int main(void)
 {
+    test_defaults_survive_reopen();
     test_two_schemas_crud_and_reopen();
     test_values_round_trip_across_page_sizes();
     test_failed_statements_keep_existing_data();

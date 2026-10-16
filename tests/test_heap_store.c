@@ -269,8 +269,8 @@ static void fx_create(fx_t *fx)
     assert(page_file_create(DB_PATH, &fx->file) == PAGE_FILE_OK);
     assert(catalog_open_empty(&fx->catalog) == CATALOG_OK);
     catalog_column_spec_t cols[COLUMNS] = {
-        {"id", 2, VALUE_INTEGER, false}, {"r", 1, VALUE_REAL, false},  {"t", 1, VALUE_TEXT, false},
-        {"b", 1, VALUE_BLOB, false},     {"t2", 2, VALUE_TEXT, false},
+        {"id", 2, VALUE_INTEGER, false, NULL}, {"r", 1, VALUE_REAL, false, NULL}, {"t", 1, VALUE_TEXT, false, NULL},
+        {"b", 1, VALUE_BLOB, false, NULL},     {"t2", 2, VALUE_TEXT, false, NULL},
     };
     catalog_table_spec_t spec = {"items", 5, cols, COLUMNS, CATALOG_NO_COLUMN, false};
     assert(catalog_create_table(fx->catalog, &spec, &fx->tid) == CATALOG_OK);
