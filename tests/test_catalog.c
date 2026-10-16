@@ -285,6 +285,42 @@ static void identity_counters_are_monotonic_and_bounded(void)
     catalog_close(catalog);
 }
 
+/* #203: 카운터는 한 번에 앞으로만 옮기고, 최대 정수 뒤로 옮기면 더 줄 값이 없다. 실패는 카탈로그를 바꾸지 않는다. */
+static void identity_raise_moves_forward_only(void)
+{
+    catalog_t *catalog;
+    assert(catalog_open_empty(&catalog) == CATALOG_OK);
+    catalog_column_spec_t columns[] = {column("id", VALUE_INTEGER, true)};
+    catalog_table_spec_t spec = {"ids", 3, columns, 1, 0, true};
+    catalog_table_id_t id, plain;
+    assert(catalog_create_table(catalog, &spec, &id) == CATALOG_OK);
+    spec.name = "plain";
+    spec.name_bytes = 5;
+    spec.has_identity = false;
+    assert(catalog_create_table(catalog, &spec, &plain) == CATALOG_OK);
+
+    uint64_t value = 0;
+    assert(catalog_raise_identity(catalog, id, 1000000001) == CATALOG_OK);
+    assert(catalog_reserve_identity(catalog, id, &value) == CATALOG_OK && value == 1000000001);
+    uint64_t generation = catalog_generation(catalog);
+    assert(catalog_raise_identity(catalog, id, 5) == CATALOG_OK && catalog_generation(catalog) == generation);
+    assert(catalog_reserve_identity(catalog, id, &value) == CATALOG_OK && value == 1000000002);
+
+    snapshot_t before = snapshot(catalog);
+    assert(catalog_raise_identity(catalog, plain, 10) == CATALOG_INVALID);
+    assert(catalog_raise_identity(catalog, 99, 10) == CATALOG_NOT_FOUND);
+    assert(catalog_raise_identity(catalog, id, (uint64_t)INT64_MAX + 2) == CATALOG_INVALID);
+    assert_same(catalog, &before);
+    free(before.bytes);
+
+    assert(catalog_raise_identity(catalog, id, (uint64_t)INT64_MAX) == CATALOG_OK);
+    assert(catalog_reserve_identity(catalog, id, &value) == CATALOG_OK && value == (uint64_t)INT64_MAX);
+    value = 7;
+    assert(catalog_reserve_identity(catalog, id, &value) == CATALOG_LIMIT && value == 7);
+    assert(catalog_raise_identity(catalog, id, (uint64_t)INT64_MAX + 1) == CATALOG_OK);
+    catalog_close(catalog);
+}
+
 static void generation_counts_successful_changes_only(void)
 {
     catalog_t *catalog;
@@ -660,6 +696,7 @@ int main(void)
     invalid_specs_keep_catalog();
     ids_are_stable_and_never_reused();
     identity_counters_are_monotonic_and_bounded();
+    identity_raise_moves_forward_only();
     generation_counts_successful_changes_only();
     encode_decode_roundtrips_and_fixes_layout();
     truncation_and_bit_flips_are_rejected();

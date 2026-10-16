@@ -497,19 +497,14 @@ database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t *inser
                 }
             }
             if (auto_id) {
+                /* 자동 값은 기존 최대 키보다 커야 한다(SQLite와 같다). 카운터를 그 뒤로 한 번에 옮긴다 */
                 uint64_t next_value = 0;
-                unsigned long skipped = 0;
-                for (;;) {
-                    catalog_status_t reserved = catalog_reserve_identity(work.cat, id, &next_value);
-                    if (reserved != CATALOG_OK) {
-                        status = fail_result(db, RESULT_E_LIMIT, 12, "identity 값을 더 줄 수 없습니다");
-                        goto done;
-                    }
-                    if (!any || (int64_t)next_value > max_key) break;
-                    if (++skipped > DATABASE_IDENTITY_SKIP_LIMIT) {
-                        status = fail_result(db, RESULT_E_LIMIT, 13, "identity 카운터를 기존 최대 키 뒤로 옮기지 못했습니다");
-                        goto done;
-                    }
+                catalog_status_t reserved = CATALOG_OK;
+                if (any && max_key >= 0) reserved = catalog_raise_identity(work.cat, id, (uint64_t)max_key + 1u);
+                if (reserved == CATALOG_OK) reserved = catalog_reserve_identity(work.cat, id, &next_value);
+                if (reserved != CATALOG_OK) {
+                    status = fail_result(db, RESULT_E_LIMIT, 12, "identity 값을 더 줄 수 없습니다");
+                    goto done;
                 }
                 if (value_set_integer(&cells[pk], (int64_t)next_value) != VALUE_OK) {
                     status = DATABASE_EXEC_NOMEM;
