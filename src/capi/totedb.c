@@ -67,6 +67,8 @@ size_t tote_max_result_bytes(void)
     return atomic_load(&g_max_result_bytes);
 }
 
+const char *tote_version(void) { return TOTE_VERSION; }
+
 const char *tote_status_name(int status)
 {
     switch (status) {

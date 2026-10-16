@@ -261,3 +261,15 @@ def test_result_buffer_is_freed_when_decoding_fails(tmp_path: Path, monkeypatch:
     assert freed == [1]
     monkeypatch.undo()
     db.close()
+
+
+def test_package_header_and_library_versions_match() -> None:
+    import re
+
+    import totedb
+    from totedb.database import _lib
+
+    header = (Path(__file__).resolve().parent.parent / "include" / "totedb.h").read_text(encoding="utf-8")
+    declared = re.search(r'#define TOTE_VERSION "([^"]+)"', header)
+    assert declared is not None
+    assert totedb.__version__ == declared.group(1) == _lib.tote_version().decode("ascii")

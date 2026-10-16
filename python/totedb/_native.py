@@ -122,6 +122,8 @@ def _declare(lib: ctypes.CDLL) -> ctypes.CDLL:
     pptr = c.POINTER(c.c_void_p)
     lib.tote_status_name.restype = c.c_char_p
     lib.tote_status_name.argtypes = [c.c_int]
+    lib.tote_version.restype = c.c_char_p
+    lib.tote_version.argtypes = []
     lib.tote_free.argtypes = [ptr]
     lib.tote_set_max_result_bytes.argtypes = [size]
     lib.tote_max_result_bytes.restype = size

@@ -38,7 +38,10 @@ from totedb.errors import (
     UnsupportedError,
 )
 
+__version__ = "0.1.0"
+
 __all__ = [
+    "__version__",
     "DEFAULT_IDEM_RETENTION_MS",
     "DEFAULT_MAX_PAYLOAD_BYTES",
     "Queue",
