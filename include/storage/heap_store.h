@@ -17,7 +17,7 @@
  * 위치 locator 구별: heap_root가 가리키는 페이지의 종류를 page_file_page_info로 검증한다.
  *   PAGE_KIND_DIRECTORY + table ID 일치 + magic "LHD1"/"LHD2"/"LHD3"와 대응 version
  *                                                                    -> 이 모듈의 디렉터리
- *   PAGE_KIND_RECORD (#77 legacy_migrate가 만든 단일 record root 포함) 그 밖의 종류
+ *   PAGE_KIND_RECORD를 포함한 그 밖의 종류
  *                                                                    -> HEAP_UNSUPPORTED_LOCATOR
  * 어떤 경우에도 옛 record root를 디렉터리로 재해석하거나 변환하지 않으며, 변환 함수도 없다.
  *

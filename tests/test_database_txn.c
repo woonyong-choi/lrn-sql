@@ -5,9 +5,9 @@
  * 합성 데이터만 쓴다. 호출은 공개 API(database, database_txn, transaction)로 한다. 다루지 않는 것: 전원 장애,
  * lost write, 여러 스레드가 같은 database를 직접 호출하는 직렬화(session 계층의 몫), 큐 ACK(#140).
  *
- * 빌드(저장소 루트): tests/test_database_txn.c src/sql/{database,database_txn,sql_statement,lexer,result}.c
- *   src/storage/{heap_store,record,record_page,overflow,value,catalog,page_file,page_cache,catalog_store,
- *   legacy_migrate,transaction}.c -lpthread -lm
+ * 빌드(저장소 루트): tests/test_database_txn.c src/sql/{database,database_txn,sql_statement,sql_eval,lexer,result}.c
+ *   src/storage/{heap_store,record,record_page,overflow,checksum,value,catalog,page_file,page_cache,catalog_store,
+ *   pk_tree,text_tree,transaction}.c -lpthread -lm
  */
 
 #define _GNU_SOURCE
