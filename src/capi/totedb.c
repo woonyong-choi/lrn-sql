@@ -34,6 +34,13 @@ struct tote_db {
     pid_t owner;                  /* 연 프로세스. fork한 자식은 mutex를 잡기 전에 거절한다 */
 };
 
+_Static_assert(TOTE_INVALID == ACKQ_INVALID && TOTE_NOMEM == ACKQ_NOMEM && TOTE_LIMIT == ACKQ_LIMIT && TOTE_BUSY == ACKQ_BUSY &&
+                   TOTE_NOT_INSTALLED == ACKQ_NOT_INSTALLED && TOTE_NOT_FOUND == ACKQ_NOT_FOUND && TOTE_STALE == ACKQ_STALE &&
+                   TOTE_CONFLICT == ACKQ_CONFLICT && TOTE_UNSUPPORTED == ACKQ_UNSUPPORTED && TOTE_IO == ACKQ_IO &&
+                   TOTE_NOT_APPLIED == ACKQ_NOT_APPLIED && TOTE_UNCERTAIN == ACKQ_UNCERTAIN && TOTE_POISONED == ACKQ_POISONED &&
+                   TOTE_TXN_FAILED == ACKQ_TXN_FAILED && TOTE_INTERNAL == ACKQ_INTERNAL && TOTE_CANCELLED == ACKQ_CANCELLED,
+               "공개 상태 번호는 큐 모듈의 상태와 같다");
+
 /* 자식은 fork 순간 다른 스레드가 쥔 mutex를 영원히 기다릴 수 있으므로 잠그기 전에 확인한다 */
 static bool forked(const tote_db_t *db) { return db->owner != getpid(); }
 
