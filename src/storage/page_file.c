@@ -16,8 +16,10 @@ _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
                "record page body must equal the page_file body");
 
 #define EINTR_RETRY_MAX 100
-#define CONTROL_HEADER_BYTES 68u
-#define CONTROL_INLINE_IDS ((PAGE_BODY_BYTES - CONTROL_HEADER_BYTES) / 4u)
+#define CONTROL_HEADER_BYTES 72u
+#define MANIFEST_MAX 256u
+#define MANIFEST_BYTES (MANIFEST_MAX * 8u)
+#define CONTROL_INLINE_IDS ((PAGE_BODY_BYTES - CONTROL_HEADER_BYTES - MANIFEST_BYTES) / 4u)
 #define CHAIN_HEADER_BYTES 8u
 #define CHAIN_IDS ((PAGE_BODY_BYTES - CHAIN_HEADER_BYTES) / 4u)
 #define BYTE_ORDER_MARK 0x01020304u
@@ -26,8 +28,14 @@ _Static_assert(RECORD_PAGE_BYTES == PAGE_BODY_BYTES,
 /*
  * 제어 본문 배치: magic 8, 형식 u32, 페이지 크기 u32, byte order u32, 세대 u64, page_count u32, 예약 u32(0),
  * 카탈로그 head u32, size u32, 카탈로그 세대 u64, 재사용 수 u32, 대기 수 u32, 사슬 head u32, 사슬 길이 u32,
- * 그 뒤에 빈 페이지 번호(재사용 다음 대기 순서)를 CONTROL_INLINE_IDS개까지. 나머지는 사슬 페이지에
- * 이어 쓴다. 사슬 본문: 다음 사슬 u32, 이 페이지의 번호 수 u32, 번호들.
+ * manifest 수 u32, 그 뒤에 manifest(페이지 번호 u32, 페이지 체크섬 u32)를 MANIFEST_MAX개까지, 그 뒤에 빈 페이지
+ * 번호(재사용 다음 대기 순서)를 CONTROL_INLINE_IDS개까지. 나머지 번호는 사슬 페이지에 이어 쓴다.
+ * 사슬 본문: 다음 사슬 u32, 이 페이지의 번호 수 u32, 번호들.
+ *
+ * commit 순서. manifest가 있으면(이 commit이 쓴 새 페이지가 MANIFEST_MAX장 이하이고 게시된 페이지를 덮어쓰지
+ * 않았으면) 데이터 쓰기 → 제어 쓰기 → fsync 한 번이다. 끝나지 않은 commit은 열 때 최신 제어 페이지의 manifest와
+ * 실제 페이지, 파일 길이를 대조해 알아보고 이전 세대로 연다. manifest가 없으면 데이터 fsync → 제어 쓰기 → fsync다.
+ * 어느 쪽이든 새 페이지는 두 제어 슬롯이 가리키지 않는 자리에만 쓰므로 이전 세대는 그대로다.
  */
 static const uint8_t FILE_MAGIC[8] = {'L', 'R', 'S', 'Q', 'L', 'D', 'B', 0};
 
@@ -46,6 +54,7 @@ typedef struct {
     uint32_t aging;
     uint32_t chain_head;
     uint32_t chain_count;
+    uint32_t manifest;
 } free_header_t;
 
 typedef struct {
@@ -75,6 +84,10 @@ struct page_file {
     id_list_t reusable;
     id_list_t fresh;        /* 마지막 commit 뒤에 받은 페이지(PS_FRESH·PS_DISCARDED) */
     id_list_t chain;        /* 현재 제어 페이지가 가리키는 빈 목록 사슬 페이지 */
+    uint32_t manifest_ids[MANIFEST_MAX];   /* 마지막 commit 뒤에 쓴 새 페이지와 그 체크섬 */
+    uint32_t manifest_sums[MANIFEST_MAX];
+    uint32_t manifest_len;
+    bool needs_barrier;     /* manifest가 넘쳤거나 새 페이지가 아닌 페이지를 썼다. 다음 commit은 fsync 두 번 */
     size_t cache_pages;     /* 이 핸들의 캐시 상한. 계상은 이 값으로 한다 */
     page_cache_t *cache;    /* 처음 쓰일 때 만든다. 만들지 못하면 NULL로 두고 캐시 없이 동작한다 */
     bool cache_tried;
@@ -252,10 +265,11 @@ static slot_state_t decode_control(const uint8_t *page, uint32_t slot, page_file
          control.catalog_head >= control.page_count)) {
         return SLOT_DAMAGED;
     }
-    free_header_t free_list = {get_u32(body + 52), get_u32(body + 56), get_u32(body + 60), get_u32(body + 64)};
+    free_header_t free_list = {get_u32(body + 52), get_u32(body + 56), get_u32(body + 60), get_u32(body + 64),
+                               get_u32(body + 68)};
     uint64_t total = (uint64_t)free_list.reusable + free_list.aging;
-    if (total > control.page_count - PAGE_FILE_CONTROL_PAGES ||
-        envelope.body_len != CONTROL_HEADER_BYTES + 4u * inline_ids(total) ||
+    if (total > control.page_count - PAGE_FILE_CONTROL_PAGES || free_list.manifest > MANIFEST_MAX ||
+        envelope.body_len != CONTROL_HEADER_BYTES + 8u * free_list.manifest + 4u * inline_ids(total) ||
         free_list.chain_count != chain_pages_for(total)) {
         return SLOT_DAMAGED;
     }
@@ -286,6 +300,7 @@ static void encode_control_header(uint8_t *body, const page_file_control_t *cont
     put_u32(body + 56, free_list->aging);
     put_u32(body + 60, free_list->chain_head);
     put_u32(body + 64, free_list->chain_count);
+    put_u32(body + 68, free_list->manifest);
 }
 
 /* ── 저수준 I/O: EINTR·짧은 I/O·EOF·ENOSPC를 처리한다 ── */
@@ -502,9 +517,32 @@ page_file_status_t page_file_publish(page_file_t *file)
 
 /* ── 열기·닫기 ── */
 
+/*
+ * 고른 제어 페이지의 commit이 끝났는지 본다. 파일이 page_count만큼 길고 manifest의 페이지가 모두 적힌 체크섬과
+ * 같아야 한다. 끝나지 않았으면 CORRUPT, 읽기 실패는 IO다.
+ */
+static page_file_status_t commit_complete(const page_file_t *file, const uint8_t *control_page,
+                                          const page_file_control_t *control, const free_header_t *header,
+                                          uint64_t file_bytes)
+{
+    if (file_bytes < (uint64_t)control->page_count * PAGE_FILE_PAGE_BYTES) return PAGE_FILE_CORRUPT;
+    const uint8_t *entries = control_page + PAGE_ENVELOPE_BYTES + CONTROL_HEADER_BYTES;
+    uint8_t page[PAGE_FILE_PAGE_BYTES];
+    for (uint32_t i = 0; i < header->manifest; i++) {
+        uint32_t id = get_u32(entries + 8u * i), sum = get_u32(entries + 8u * i + 4);
+        if (id < PAGE_FILE_CONTROL_PAGES || id >= control->page_count) return PAGE_FILE_CORRUPT;
+        page_file_status_t status = read_full(file, page, PAGE_FILE_PAGE_BYTES, (uint64_t)id * PAGE_FILE_PAGE_BYTES);
+        if (status != PAGE_FILE_OK) return status;
+        envelope_t envelope;
+        if (get_u32(page + 28) != sum || decode_envelope(page, id, &envelope) != SLOT_VALID) return PAGE_FILE_CORRUPT;
+    }
+    return PAGE_FILE_OK;
+}
+
 static page_file_status_t load_free_list(page_file_t *file, const uint8_t *control_page, const free_header_t *header);
 
-static page_file_status_t pick_control(const uint8_t pages[2][PAGE_FILE_PAGE_BYTES],
+/* exclude가 0 또는 1이면 그 슬롯을 손상으로 본다(끝나지 않은 commit) */
+static page_file_status_t pick_control(const uint8_t pages[2][PAGE_FILE_PAGE_BYTES], int exclude,
                                        page_file_control_t *chosen, free_header_t *chosen_free,
                                        page_file_open_info_t *info)
 {
@@ -514,6 +552,7 @@ static page_file_status_t pick_control(const uint8_t pages[2][PAGE_FILE_PAGE_BYT
     for (uint32_t slot = 0; slot < 2; slot++) {
         states[slot] = decode_control(pages[slot], slot, &controls[slot], &frees[slot]);
     }
+    if (exclude >= 0) states[exclude] = SLOT_DAMAGED;
     memset(info, 0, sizeof(*info));
     if (states[0] == SLOT_UNSUPPORTED || states[1] == SLOT_UNSUPPORTED) return PAGE_FILE_UNSUPPORTED;
     int valid = (states[0] == SLOT_VALID) + (states[1] == SLOT_VALID);
@@ -614,9 +653,19 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
         status = read_full(file, pages[slot], PAGE_FILE_PAGE_BYTES,
                            (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
     }
-    if (status == PAGE_FILE_OK) status = pick_control(pages, &chosen, &chosen_free, &local_info);
-    if (status == PAGE_FILE_OK && (uint64_t)st.st_size < (uint64_t)chosen.page_count * PAGE_FILE_PAGE_BYTES) {
-        status = PAGE_FILE_CORRUPT; /* 파일이 제어 페이지가 약속한 길이보다 짧다 */
+    if (status == PAGE_FILE_OK) status = pick_control(pages, -1, &chosen, &chosen_free, &local_info);
+    if (status == PAGE_FILE_OK) {
+        /* 최신 commit이 끝나지 않았으면(fsync 전에 멈춤) 이전 세대로 연다. 이전 세대도 끝나지 않았으면 손상이다 */
+        int newest = (int)(chosen.generation % 2);
+        status = commit_complete(file, pages[newest], &chosen, &chosen_free, (uint64_t)st.st_size);
+        if (status == PAGE_FILE_CORRUPT) {
+            status = pick_control(pages, newest, &chosen, &chosen_free, &local_info);
+            if (status == PAGE_FILE_NO_CONTROL) status = PAGE_FILE_CORRUPT;
+            if (status == PAGE_FILE_OK) {
+                status = commit_complete(file, pages[chosen.generation % 2], &chosen, &chosen_free,
+                                         (uint64_t)st.st_size);
+            }
+        }
     }
     if (status == PAGE_FILE_OK && writable) {
         /* 빈 목록은 쓰기 핸들만 쓴다. 읽기 핸들은 읽지 않는다 */
@@ -673,6 +722,39 @@ const char *page_file_partial_path(const page_file_t *file)
 }
 
 /* ── 페이지 읽기·쓰기 ── */
+
+/* 쓴 페이지를 manifest에 적는다. 새 페이지가 아니거나 자리가 없으면 다음 commit은 fsync 장벽을 쓴다 */
+static void note_write(page_file_t *file, uint32_t page_id, const uint8_t *page)
+{
+    if (file->state == NULL || file->state[page_id] != PS_FRESH) {
+        file->needs_barrier = true;
+        return;
+    }
+    uint32_t sum = get_u32(page + 28);
+    for (uint32_t i = 0; i < file->manifest_len; i++) {
+        if (file->manifest_ids[i] != page_id) continue;
+        file->manifest_sums[i] = sum;
+        return;
+    }
+    if (file->manifest_len == MANIFEST_MAX) {
+        file->needs_barrier = true;
+        return;
+    }
+    file->manifest_ids[file->manifest_len] = page_id;
+    file->manifest_sums[file->manifest_len++] = sum;
+}
+
+/* 놓은 새 페이지는 manifest에서 뺀다. 다음 commit이 가리키지 않는 페이지라 대조할 까닭이 없다 */
+static void forget_write(page_file_t *file, uint32_t page_id)
+{
+    for (uint32_t i = 0; i < file->manifest_len; i++) {
+        if (file->manifest_ids[i] != page_id) continue;
+        file->manifest_len--;
+        file->manifest_ids[i] = file->manifest_ids[file->manifest_len];
+        file->manifest_sums[i] = file->manifest_sums[file->manifest_len];
+        return;
+    }
+}
 
 static page_cache_t *cache_of(page_file_t *file)
 {
@@ -754,6 +836,7 @@ page_file_status_t page_file_write(page_file_t *file, uint32_t page_id, page_kin
         return status;
     }
     if (offset + PAGE_FILE_PAGE_BYTES > file->file_bytes) file->file_bytes = offset + PAGE_FILE_PAGE_BYTES;
+    note_write(file, page_id, page);
     page_cache_put(cache_of(file), page_id, (uint16_t)kind, table_id, body);
     return PAGE_FILE_OK;
 }
@@ -855,6 +938,7 @@ page_file_status_t page_file_release(page_file_t *file, uint32_t page_id)
             /* 어느 제어 페이지도 가리킨 적 없어 곧바로 다시 쓸 수 있다 */
             file->state[page_id] = PS_DISCARDED;
             list_push(&file->reusable, page_id);
+            forget_write(file, page_id);
             return PAGE_FILE_OK;
         default:
             return PAGE_FILE_INVALID; /* 이중 해제 */
@@ -882,6 +966,7 @@ void page_file_release_fresh(page_file_t *file)
         file->state[id] = PS_DISCARDED;
         list_push(&file->reusable, id);
     }
+    file->manifest_len = 0;
 }
 
 size_t page_file_pending_release_count(const page_file_t *file)
@@ -910,7 +995,7 @@ static page_file_status_t load_free_list(page_file_t *file, const uint8_t *contr
     }
     uint64_t total = (uint64_t)header->reusable + header->aging;
     uint64_t at = 0;
-    const uint8_t *ids = control_page + PAGE_ENVELOPE_BYTES + CONTROL_HEADER_BYTES;
+    const uint8_t *ids = control_page + PAGE_ENVELOPE_BYTES + CONTROL_HEADER_BYTES + 8u * header->manifest;
     uint32_t inline_count = inline_ids(total);
     uint8_t page[PAGE_FILE_PAGE_BYTES];
     uint32_t next = header->chain_head;
@@ -1033,7 +1118,7 @@ page_file_status_t page_file_commit(page_file_t *file)
     }
     free_header_t header = {(uint32_t)(file->reusable.len + file->aging.len),
                             (uint32_t)(file->pending.len + file->chain.len), PAGE_FILE_NO_PAGE,
-                            (uint32_t)next_chain.len};
+                            (uint32_t)next_chain.len, 0};
     if (next_chain.len > 0) header.chain_head = next_chain.items[0];
     free_cursor_t cursor = {{&file->reusable, &file->aging, &file->pending, &file->chain}, 0, 0};
     uint64_t total = (uint64_t)header.reusable + header.aging;
@@ -1048,14 +1133,13 @@ page_file_status_t page_file_commit(page_file_t *file)
     uint8_t body[PAGE_BODY_BYTES];
     uint8_t page[PAGE_FILE_PAGE_BYTES];
     uint32_t inline_count = inline_ids(total);
-    encode_control_header(body, &next, &header);
-    put_ids(body + CONTROL_HEADER_BYTES, &cursor, inline_count);
-    uint32_t control_bytes = CONTROL_HEADER_BYTES + 4u * inline_count;
     uint32_t slot = (uint32_t)(next.generation % 2);
 
     page_file_status_t status = PAGE_FILE_OK;
     uint64_t left = total - inline_count;
     uint8_t chain_body[PAGE_BODY_BYTES];
+    /* 앞 inline_count개는 제어 페이지에 쓴다(사슬을 쓴 뒤 manifest와 함께). 사슬은 그 다음 번호부터다 */
+    for (uint32_t i = 0; i < inline_count; i++) cursor_next(&cursor);
     for (size_t i = 0; i < next_chain.len && status == PAGE_FILE_OK; i++) {
         uint32_t count = left < CHAIN_IDS ? (uint32_t)left : CHAIN_IDS;
         memset(chain_body, 0, sizeof(chain_body));
@@ -1069,6 +1153,7 @@ page_file_status_t page_file_commit(page_file_t *file)
         status = write_full(file, page, sizeof(page), (uint64_t)id * PAGE_FILE_PAGE_BYTES);
         uint64_t end = ((uint64_t)id + 1) * PAGE_FILE_PAGE_BYTES;
         if (status == PAGE_FILE_OK && end > file->file_bytes) file->file_bytes = end;
+        if (status == PAGE_FILE_OK) note_write(file, id, page);
     }
 
     uint64_t needed = (uint64_t)file->page_count * PAGE_FILE_PAGE_BYTES;
@@ -1077,7 +1162,9 @@ page_file_status_t page_file_commit(page_file_t *file)
         if (ftruncate(file->fd, (off_t)needed) != 0) status = PAGE_FILE_IO;
         else file->file_bytes = needed;
     }
-    if (status == PAGE_FILE_OK) status = sync_file(file);
+    /* manifest로 끝남을 확인할 수 있으면 데이터 fsync를 제어 쓰기 뒤의 fsync 하나로 합친다 */
+    bool barrier = file->needs_barrier;
+    if (status == PAGE_FILE_OK && barrier) status = sync_file(file);
     if (status != PAGE_FILE_OK) {
         int err = errno;
         if (!file->poisoned) undo_chain(file, &next_chain);
@@ -1086,6 +1173,16 @@ page_file_status_t page_file_commit(page_file_t *file)
         return status;
     }
 
+    if (!barrier) header.manifest = file->manifest_len;
+    encode_control_header(body, &next, &header);
+    for (uint32_t i = 0; i < header.manifest; i++) {
+        put_u32(body + CONTROL_HEADER_BYTES + 8u * i, file->manifest_ids[i]);
+        put_u32(body + CONTROL_HEADER_BYTES + 8u * i + 4, file->manifest_sums[i]);
+    }
+    uint32_t ids_at = CONTROL_HEADER_BYTES + 8u * header.manifest;
+    cursor = (free_cursor_t){{&file->reusable, &file->aging, &file->pending, &file->chain}, 0, 0};
+    put_ids(body + ids_at, &cursor, inline_count);
+    uint32_t control_bytes = ids_at + 4u * inline_count;
     encode_page(page, PAGE_KIND_CONTROL, slot, 0, control_bytes, body);
     /* 여기서부터는 실패해도 디스크에 새 세대가 남았는지 알 수 없다. */
     file->commit_outcome = PAGE_FILE_COMMIT_UNKNOWN;
@@ -1099,6 +1196,8 @@ page_file_status_t page_file_commit(page_file_t *file)
 
     file->commit_outcome = PAGE_FILE_COMMIT_APPLIED;
     file->committed = next;
+    file->manifest_len = 0;
+    file->needs_barrier = false;
     /*
      * 새 페이지는 이제 게시된 상태의 일부다. 이전 commit이 놓은 페이지는 방금 commit으로 두 제어 슬롯(현재와
      * fallback) 모두 더는 가리키지 않으므로 재사용할 수 있다. 이번에 놓은 페이지와 옛 사슬은 fallback 세대가

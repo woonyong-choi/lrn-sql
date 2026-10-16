@@ -429,30 +429,12 @@ static void test_save_failure_outcomes_are_distinguished(void)
     assert(catalog_store_load(file, &t2_copy) == CATALOG_STORE_OK);
     page_file_close(file);
 
-    /* 2. 데이터 fsync 실패: 제어 쓰기 전이라 미반영, 핸들은 poison */
+    /* 2. fsync 실패: 이 commit의 fsync는 제어 쓰기 뒤 한 번뿐이라(page_file manifest) 결과는 불확정이다.
+     *    실패를 돌려주지만 다시 열면 새 카탈로그가 보인다 */
     assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
     add_table(catalog, "t3", false);
     g_fsync_calls = 0;
     g_fail_fsync_at = 1;
-    errno = 0;
-    CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO && errno == EIO,
-          "데이터 fsync 실패는 미반영 IO");
-    g_fail_fsync_at = 0;
-    CHECK(page_file_is_poisoned(file) &&
-              page_file_last_commit_outcome(file) == PAGE_FILE_COMMIT_NOT_APPLIED,
-          "미반영이지만 fsync 실패 핸들은 poison");
-    page_file_close(file);
-    assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
-    catalog_t *loaded;
-    CHECK(catalog_store_load(file, &loaded) == CATALOG_STORE_OK && same_catalog(loaded, t2_copy),
-          "미반영: 다시 열면 직전 카탈로그");
-    catalog_close(loaded);
-    page_file_close(file);
-
-    /* 3. 제어 쓰기 성공 뒤 fsync 실패: 실패를 돌려주지만 다시 열면 새 카탈로그가 보인다 */
-    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
-    g_fsync_calls = 0;
-    g_fail_fsync_at = 2;
     errno = 0;
     size_t reusable_before = page_file_reusable_count(file);
     CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_OUTCOME_UNKNOWN && errno == EIO,
@@ -462,6 +444,7 @@ static void test_save_failure_outcomes_are_distinguished(void)
           "poison이고 어느 체인도 재사용 가능으로 만들지 않음");
     CHECK(catalog_store_save(file, catalog) == CATALOG_STORE_IO, "poison된 핸들은 거절");
     page_file_close(file);
+    catalog_t *loaded;
     assert(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK);
     CHECK(catalog_store_load(file, &loaded) == CATALOG_STORE_OK && same_catalog(loaded, catalog),
           "실패를 돌려준 저장의 새 카탈로그가 다시 열면 보임");
