@@ -1,7 +1,7 @@
 # 출처와 기여 경계
 
 > [!NOTE]
-> 이 문서는 팀 과제와 옛 엔진 시기의 기록이다. 표의 parser·planner·executor·pager·bptree·table·lock_table 코드는 커밋 `7af03cf`에서 삭제했다.
+> 이 문서는 팀 과제와 옛 엔진 시기의 기록이다. 표의 parser·planner·executor·pager·bptree·table·lock_table 코드는 커밋 `5e6b265`에서 삭제했다.
 
 이 저장소는 크래프톤 정글 팀 과제(원본: [Jungle-12-303/wk08_1](https://github.com/Jungle-12-303/wk08_1))에서
 시작했고, 과제 종료 후 개인 저장소에서 계속 수정·학습·확장하고 있습니다.
@@ -19,7 +19,7 @@
 
 ## 개인 확장 (팀 과제 종료 후)
 
-커밋 범위: [`f70b243`](https://github.com/woonyong-choi/totedb/commit/f70b243) (2026-08-01) ~ `da1624b` (2026-09-23), 23개 커밋.
+커밋 범위: [`f70b243`](https://github.com/woonyong-choi/totedb/commit/f70b243) (2026-08-01) ~ `e5bfabf` (2026-09-23), 23개 커밋.
 `git log --author='woonyong' --since=2026-06-01 --reverse --format='%h %ad %s' --date=short` 기준입니다.
 
 | 무엇이 달라졌나 | 커밋 | 파일 |
@@ -34,7 +34,7 @@
 | **EXPLAIN이 실행기와 다른 계획을 보고하던 버그** 수정 + 회귀 테스트 | `7f6cb84` | `parser.c`, `planner.c`, `tests/` |
 | **규모별 기울기 벤치마크**(`make bench`) — 재현되지 않던 절대 배수를 배가 계수로 교체, 당시 그래프 생성 포함 | `7f6cb84` | `bench/scaling.py` |
 | **설계 노트** — 버린 대안과 이유, 정확성 검증의 한계, 다음 병목 | `7f6cb84` | `docs/design.md` |
-| **Strict 2PL lock 해제·힙 체인 재탐색 회귀 테스트**(`make test-step3`) | `da1624b` | `tests/test_step3_regression.c` |
+| **Strict 2PL lock 해제·힙 체인 재탐색 회귀 테스트**(`make test-step3`) | `e5bfabf` | `tests/test_step3_regression.c` |
 
 팀 과제 종료 시점(`93114c8`) 대비 엔진 코드 변경은 `src/` 기준 7개 파일 **+462/-88행**입니다
 (`git diff --shortstat 93114c8 HEAD -- src/`, 2026-09-23 측정).
