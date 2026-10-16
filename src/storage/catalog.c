@@ -534,6 +534,20 @@ catalog_status_t catalog_reserve_identity(catalog_t *catalog, catalog_table_id_t
     return CATALOG_OK;
 }
 
+catalog_status_t catalog_raise_identity(catalog_t *catalog, catalog_table_id_t id, uint64_t at_least)
+{
+    if (catalog == NULL || at_least > IDENTITY_END) return CATALOG_INVALID;
+    table_t *table = find_mutable(catalog, id);
+    if (table == NULL) return CATALOG_NOT_FOUND;
+    if (!table->has_identity) return CATALOG_INVALID;
+    if (table->next_identity >= at_least) return CATALOG_OK;
+    catalog_status_t status = check_can_mutate(catalog);
+    if (status != CATALOG_OK) return status;
+    table->next_identity = at_least;
+    catalog->generation++;
+    return CATALOG_OK;
+}
+
 uint64_t catalog_generation(const catalog_t *catalog)
 {
     return catalog == NULL ? 0 : catalog->generation;

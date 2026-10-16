@@ -163,6 +163,11 @@ catalog_status_t catalog_index_at(const catalog_t *catalog, catalog_table_id_t t
 /* identity가 있는 테이블의 다음 값을 돌려주고 카운터를 올린다. INT64_MAX를 넘으면 CATALOG_LIMIT. */
 catalog_status_t catalog_reserve_identity(catalog_t *catalog, catalog_table_id_t id,
                                           uint64_t *value);
+/*
+ * 다음 identity를 at_least 이상으로 한 번에 올린다(명시한 키 뒤로 옮길 때). 이미 그 이상이면 바꾸지 않는다.
+ * at_least는 INT64_MAX + 1까지 받으며 그 값은 더 줄 identity가 없다는 뜻이다. identity 없는 표는 CATALOG_INVALID.
+ */
+catalog_status_t catalog_raise_identity(catalog_t *catalog, catalog_table_id_t id, uint64_t at_least);
 /* 성공한 변경마다 1씩 오른다. 게시·충돌 감지에 쓰는 값이다. */
 uint64_t catalog_generation(const catalog_t *catalog);
 
