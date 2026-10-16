@@ -392,9 +392,18 @@ static const statement_case_t CASES[] = {
     {"update text key", "UPDATE text_keys SET k = 'renamed' WHERE k = 'a'", false},
     {"update text value", "UPDATE text_keys SET v = 'changed' WHERE k = 'a'", false},
     {"delete text key", "DELETE FROM text_keys WHERE k = 'b'", false},
+    {"update returning", "UPDATE users SET bio = ? WHERE id <= 3 RETURNING id, bio", true},
+    {"delete returning", "DELETE FROM users WHERE id = 2 RETURNING *", false},
+    {"insert returning", "INSERT INTO users (name, bio) VALUES ('ret', ?) RETURNING id, name", true},
     {"build secondary index", "CREATE INDEX by_log_msg ON logs (msg)", false},
     {"drop indexed", "DROP TABLE users", false},
 };
+
+/* 변경 문장의 성공 결과: 명령 결과나 RETURNING 행 */
+static bool succeeded(result_t *result)
+{
+    return result_kind(result) == RESULT_KIND_COMMAND || result_kind(result) == RESULT_KIND_ROWS;
+}
 
 static database_exec_status_t run_case(database_t *db, const statement_case_t *c, result_t **result)
 {
@@ -414,7 +423,7 @@ static void test_statement(const statement_case_t *c)
         assert(database_open(DB_PATH, true, &db) == DATABASE_OK);
         before = snapshot(db);
         result_t *result = NULL;
-        assert(run_case(db, c, &result) == DATABASE_EXEC_OK && result_kind(result) == RESULT_KIND_COMMAND);
+        assert(run_case(db, c, &result) == DATABASE_EXEC_OK && succeeded(result));
         result_release(&result);
         after = snapshot(db);
         assert(database_close(db) == DATABASE_OK);
@@ -439,7 +448,7 @@ static void test_statement(const statement_case_t *c)
             database_exec_status_t status = run_case(db, c, &result);
             bool hit = triggered((kind_t)kind, n);
             disarm();
-            if (!hit && status == DATABASE_EXEC_OK && result != NULL && result_kind(result) == RESULT_KIND_COMMAND) {
+            if (!hit && status == DATABASE_EXEC_OK && result != NULL && succeeded(result)) {
                 result_release(&result);
                 CHECK(tracked_live() == live_baseline && g_double_frees == doubles_before,
                       "%s %s: 주입 없이 성공한 문장도 할당을 모두 해제함 (남은 %zu, 기준 %zu)", c->name, KIND_NAMES[kind],
@@ -462,7 +471,7 @@ static void test_statement(const statement_case_t *c)
                 free(now);
             } else {
                 CHECK(status == DATABASE_EXEC_OK && result != NULL, "%s: 결과가 있음 (%d)", label, (int)status);
-                if (result != NULL && result_kind(result) == RESULT_KIND_COMMAND) {
+                if (result != NULL && succeeded(result)) {
                     successes++;
                     char *now = snapshot(db);
                     CHECK(strcmp(now, after) == 0, "%s: 성공 응답이면 반영됨", label);
@@ -478,7 +487,7 @@ static void test_statement(const statement_case_t *c)
                         /* 같은 핸들로 다시 실행할 수 있다 */
                         result_t *again = NULL;
                         CHECK(run_case(db, c, &again) == DATABASE_EXEC_OK && again != NULL &&
-                                  result_kind(again) == RESULT_KIND_COMMAND,
+                                  succeeded(again),
                               "%s: 같은 문장을 다시 실행할 수 있음", label);
                         result_release(&again);
                         char *redone = snapshot(db);

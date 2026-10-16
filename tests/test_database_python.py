@@ -1,0 +1,104 @@
+"""새 엔진의 SQL 동작을 파이썬 바인딩으로 시험한다. 합성 데이터만 쓴다.
+
+경쟁 갱신: 조건부 원자 갱신(UPDATE ... WHERE 상태 조건 RETURNING)으로 여러 스레드가 같은 행을 다퉈도
+한 행은 한 번만 바뀌고(이중 claim 없음), 더하기 갱신은 하나도 잃지 않는다(분실 갱신 없음).
+파일 하나는 핸들 하나로만 열 수 있으므로(두 번째 열기는 DB_LOCKED) 스레드는 한 핸들을 같이 쓴다.
+"""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+
+import pytest
+from lrn_ackq import Database
+
+JOBS = 60
+WORKERS = 6
+
+
+def make_jobs(db: Database) -> None:
+    db.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY, state TEXT NOT NULL, owner INTEGER, hits INTEGER NOT NULL)")
+    with db.begin() as tx:
+        for i in range(1, JOBS + 1):
+            tx.execute("INSERT INTO jobs VALUES (?, 'ready', NULL, 0)", (i,))
+        tx.commit()
+
+
+def run_workers(target, count: int = WORKERS) -> None:
+    errors: list[BaseException] = []
+
+    def wrapped(index: int) -> None:
+        try:
+            target(index)
+        except BaseException as err:  # noqa: BLE001 - 스레드 오류를 주 스레드로 넘긴다
+            errors.append(err)
+
+    threads = [threading.Thread(target=wrapped, args=(i,)) for i in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+
+
+def test_conditional_claim_gives_each_row_to_one_worker(tmp_path: Path) -> None:
+    path = tmp_path / "claim.lrdb"
+    main = Database(path, busy_timeout_s=10.0)
+    make_jobs(main)
+    claimed: dict[int, list[int]] = {}
+    lock = threading.Lock()
+
+    def worker(index: int) -> None:
+        for job in range(1, JOBS + 1):
+            rows = main.execute(
+                "UPDATE jobs SET state = 'running', owner = ? WHERE id = ? AND state = 'ready' RETURNING id",
+                (index, job),
+            ).rows
+            if rows:
+                with lock:
+                    claimed.setdefault(job, []).append(index)
+
+    run_workers(worker)
+    assert sorted(claimed) == list(range(1, JOBS + 1))
+    assert all(len(owners) == 1 for owners in claimed.values()), "한 행을 둘 이상이 가져감"
+    owners = {row[0]: row[1] for row in main.execute("SELECT id, owner FROM jobs WHERE state = 'running'").rows}
+    assert owners == {job: who[0] for job, who in claimed.items()}
+    main.close()
+
+
+def test_concurrent_increments_lose_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "count.lrdb"
+    main = Database(path, busy_timeout_s=10.0)
+    make_jobs(main)
+    rounds = 20
+
+    def worker(_index: int) -> None:
+        for _ in range(rounds):
+            main.execute("UPDATE jobs SET hits = hits + 1 WHERE id <= 10")
+            # 읽고 쓰는 트랜잭션도 다른 쓰기와 겹치지 않아야 한다
+            with main.begin() as tx:
+                before = tx.execute("SELECT hits FROM jobs WHERE id = 20").rows[0][0]
+                tx.execute("UPDATE jobs SET hits = ? WHERE id = 20", (before + 1,))
+                tx.commit()
+
+    run_workers(worker)
+    total = WORKERS * rounds
+    rows = main.execute("SELECT id, hits FROM jobs WHERE id <= 10 OR id = 20 ORDER BY id").rows
+    assert list(rows) == [(i, total) for i in range(1, 11)] + [(20, total)]
+    main.close()
+
+
+def test_returning_after_failed_statement_leaves_rows(tmp_path: Path) -> None:
+    db = Database(tmp_path / "fail.lrdb")
+    make_jobs(db)
+    db.execute("CREATE UNIQUE INDEX jobs_owner ON jobs (owner)")
+    db.execute("UPDATE jobs SET owner = 1 WHERE id = 1")
+    with pytest.raises(Exception):
+        db.execute("UPDATE jobs SET owner = 1 WHERE id = 2 RETURNING id")
+    assert db.execute("SELECT id, owner FROM jobs WHERE owner IS NOT NULL").rows == ((1, 1),)
+    with pytest.raises(Exception):
+        db.execute("DELETE FROM jobs WHERE id = 3 RETURNING id / 0")
+    assert db.execute("SELECT COUNT(*) FROM jobs").rows == ((JOBS,),)
+    db.close()

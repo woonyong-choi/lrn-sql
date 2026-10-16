@@ -28,6 +28,7 @@ DEFAULT_BUSY_TIMEOUT_S = 5.0
 _PARAM_NULL, _PARAM_INTEGER, _PARAM_REAL, _PARAM_TEXT, _PARAM_BLOB = 0, 1, 2, 3, 4
 _KIND_ROWS, _KIND_COMMAND, _KIND_ERROR = 0, 1, 2
 _INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
+_RESULT_E_BUSY = 7  # result.h의 오류 분류: 다른 트랜잭션이 쓰는 중이라 실행 전에 거절됨
 
 _lib = load_library()
 
@@ -201,8 +202,21 @@ class Database:
         return self._handle
 
     def execute(self, sql: str, params: Sequence[SqlValue] = ()) -> Result:
-        """문장 하나를 자동 commit으로 실행한다."""
-        return run_sql(self.handle, None, sql, params)
+        """문장 하나를 자동 commit으로 실행한다.
+
+        다른 트랜잭션이 쓰는 중이라 변경 문장이 BUSY로 거절되면(실행 전 거절이라 반영된 것이 없다)
+        busy_timeout_s까지 다시 시도한다. C 호출은 잠금을 쥔 채 기다리지 않으므로 기다림은 여기서 한다.
+        """
+        deadline = time.monotonic() + self.busy_timeout_s
+        delay = 0.0005
+        while True:
+            try:
+                return run_sql(self.handle, None, sql, params)
+            except SqlError as err:
+                if err.error_class != _RESULT_E_BUSY or time.monotonic() >= deadline:
+                    raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.02)
 
     def begin(self) -> Transaction:
         """쓰기 트랜잭션을 시작한다. 다른 writer가 있으면 busy_timeout_s까지 기다린다.
