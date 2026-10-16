@@ -175,6 +175,44 @@ static bool same(heap_locator_t a, heap_locator_t b)
     return a.directory_index == b.directory_index && a.slot == b.slot;
 }
 
+typedef struct {
+    const model_t *model;
+    size_t next;      /* 다음에 와야 할 모델 항목 */
+    size_t limit;     /* 이 수만큼 받으면 멈춘다 */
+    size_t seen;
+    bool ok;
+} range_check_t;
+
+static bool check_range_entry(void *context, int64_t key, heap_locator_t locator)
+{
+    range_check_t *check = context;
+    const model_t *model = check->model;
+    if (check->next >= model->count || model->items[check->next].key != key ||
+        !same(model->items[check->next].locator, locator)) {
+        check->ok = false;
+        return false;
+    }
+    check->next++;
+    return ++check->seen < check->limit;
+}
+
+/* #180: [low, high] 순회가 모델의 같은 구간을 순서대로 빠짐·중복 없이 돌려주고, 멈춤 요청에서 바로 멈춘다. */
+static bool range_matches_model(const pk_tree_io_t *io, uint32_t root, const model_t *model, int64_t low,
+                                int64_t high, size_t limit)
+{
+    bool unused;
+    range_check_t check = {model, model_find(model, low, &unused), limit, 0, true};
+    size_t end = model_find(model, high, &unused);
+    if (unused) end++;
+    size_t expected = low > high || end < check.next ? 0 : end - check.next;
+    bool stopped = false;
+    if (pk_tree_visit_range(io, TABLE_ID, root, low, high, check_range_entry, &check, &stopped) != PK_OK) {
+        return false;
+    }
+    size_t want = expected < limit ? expected : limit;
+    return check.ok && check.seen == want && stopped == (limit <= expected && limit > 0 && want == limit);
+}
+
 static bool tree_matches_model(const pk_tree_io_t *io, uint32_t root, const model_t *model, int64_t lowest,
                                int64_t highest)
 {
@@ -191,6 +229,20 @@ static bool tree_matches_model(const pk_tree_io_t *io, uint32_t root, const mode
         heap_locator_t found;
         pk_status_t status = pk_tree_find(io, TABLE_ID, root, key, &found);
         if (in_model != (status == PK_OK) || (!in_model && status != PK_NOT_FOUND)) return false;
+    }
+    /* 구간 끝이 내부 노드의 경계 키와 같을 때도 그 키를 빠뜨리지 않는다 */
+    for (size_t i = 0; i < model->count; i++) {
+        int64_t key = model->items[i].key;
+        if (key > INT64_MIN && !range_matches_model(io, root, model, key - 1, key, SIZE_MAX)) return false;
+    }
+    int64_t span = highest - lowest;
+    int64_t bounds[][2] = {{lowest, highest}, {lowest - 5, lowest + span / 3}, {lowest + span / 2, highest + 5},
+                           {lowest + span / 4, lowest + span / 4}, {highest, lowest}, {INT64_MIN, INT64_MAX}};
+    for (size_t i = 0; i < sizeof(bounds) / sizeof(bounds[0]); i++) {
+        if (!range_matches_model(io, root, model, bounds[i][0], bounds[i][1], SIZE_MAX) ||
+            !range_matches_model(io, root, model, bounds[i][0], bounds[i][1], 3)) {
+            return false;
+        }
     }
     bool present = false;
     int64_t maximum = 0;

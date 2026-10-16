@@ -916,6 +916,47 @@ heap_status_t heap_find_key(heap_t *heap, int64_t key, heap_locator_t *locator)
     return status;
 }
 
+typedef struct {
+    heap_t *heap;
+    bool (*visit)(void *context, heap_locator_t locator);
+    void *context;
+    heap_status_t status;
+} key_range_t;
+
+static bool visit_key_entry(void *context, int64_t key, heap_locator_t locator)
+{
+    key_range_t *range = context;
+    row_key_t expected = {.present = true, .integer = key};
+    range->status = check_indexed_row(range->heap, locator, &expected);
+    return range->status == HEAP_OK && range->visit(range->context, locator);
+}
+
+// cost: time O(d·log c + k·p), heap O(1), stack O(d), io d + l + k
+// mem: stack ≈ d·size(node_t) + size(record page)
+// vars: d = 색인 깊이, c = 노드당 항목 수, k = 범위 안 행 수, l = 범위에 걸친 잎 수, p = 행 하나의 필드 해석
+// basis: estimate
+// alt: heap_cursor 전체 스캔. time O(n), io O(n). 잃는 것: 좁은 범위의 조회 시간
+heap_status_t heap_visit_key_range(heap_t *heap, int64_t low, int64_t high,
+                                   bool (*visit)(void *context, heap_locator_t locator), void *context,
+                                   bool *stopped)
+{
+    if (heap == NULL || visit == NULL || stopped == NULL || !heap->indexed || heap->key_type != VALUE_INTEGER) {
+        return HEAP_INVALID;
+    }
+    *stopped = false;
+    if (heap->stats != NULL) heap->stats->index_lookups++;
+    if (heap->index_root == PAGE_FILE_NO_PAGE) return HEAP_OK;
+    pk_tree_io_t io = index_read_io(heap);
+    key_range_t range = {heap, visit, context, HEAP_OK};
+    bool halted = false;
+    heap_status_t status = heap_from_pk(heap, pk_tree_visit_range(&io, heap->table_id, heap->index_root, low, high,
+                                                                  visit_key_entry, &range, &halted));
+    if (status != HEAP_OK) return status;
+    if (range.status != HEAP_OK) return range.status;
+    *stopped = halted;
+    return HEAP_OK;
+}
+
 heap_status_t heap_find_text_key(heap_t *heap, const uint8_t *key, size_t key_bytes,
                                  heap_locator_t *locator)
 {

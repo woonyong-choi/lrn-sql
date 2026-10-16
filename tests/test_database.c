@@ -599,6 +599,94 @@ static void test_identity_and_primary_key_rules(void)
 }
 
 /* #65: TEXT 기본키의 점 조회·행 이동·재시작이 스캔 없이 같은 행을 가리킨다. */
+/*
+ * #180: 정수 기본 키의 대소 조건은 색인 구간만 읽고, 결과는 같은 조건의 전체 스캔(id + 0)과 같다.
+ * 여러 잎에 걸친 키·삭제·갱신·재시작 뒤에도 빠짐·중복이 없어야 한다.
+ */
+static void expect_same_as_scan(database_t *db, const char *range, const char *scan)
+{
+    char sql[256], base[256];
+    snprintf(sql, sizeof(sql), "SELECT id, v FROM t WHERE %s ORDER BY id", range);
+    snprintf(base, sizeof(base), "SELECT id, v FROM t WHERE %s ORDER BY id", scan);
+    char *got = query(db, sql), *want = query(db, base);
+    CHECK(strcmp(got, want) == 0, "%s\n      기대: %.200s\n      실제: %.200s", sql, want, got);
+    free(got);
+    free(want);
+    snprintf(sql, sizeof(sql), "SELECT count(*), count(DISTINCT id) FROM t WHERE %s", range);
+    snprintf(base, sizeof(base), "SELECT count(*), count(*) FROM t WHERE %s", scan);
+    got = query(db, sql);
+    want = query(db, base);
+    CHECK(strcmp(got, want) == 0, "%s: 중복 없는 행 수 %s, 실제 %s", sql, want, got);
+    free(got);
+    free(want);
+}
+
+static void check_primary_key_ranges(database_t *db)
+{
+    static const char *const cases[][2] = {
+        {"id >= 5990", "id + 0 >= 5990"},          {"id > 5990", "id + 0 > 5990"},
+        {"id <= 14", "id + 0 <= 14"},              {"id < 14", "id + 0 < 14"},
+        {"id > 1000 AND id <= 2100", "id + 0 > 1000 AND id + 0 <= 2100"},
+        {"3001 < id AND 3010 >= id", "3001 < id + 0 AND 3010 >= id + 0"},
+        {"id >= 7000", "id + 0 >= 7000"},          {"id < 2", "id + 0 < 2"},
+        {"id > 50 AND id < 40", "id + 0 > 50 AND id + 0 < 40"},
+        {"id > 9223372036854775807", "id + 0 > 9223372036854775807"},
+        {"id < -9223372036854775808", "id < -9223372036854775807 - 1"},
+        {"id >= 100 AND id <= 2000 AND v = 'u'", "id + 0 >= 100 AND id + 0 <= 2000 AND v = 'u'"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) expect_same_as_scan(db, cases[i][0], cases[i][1]);
+}
+
+static void test_primary_key_range(void)
+{
+    printf("\n[test_primary_key_range]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    /* 짝수 키 3000개: 잎 하나(508개)를 넘어 여러 잎에 걸친다 */
+    for (unsigned batch = 0; batch < 30; batch++) {
+        char sql[4096];
+        size_t used = (size_t)snprintf(sql, sizeof(sql), "INSERT INTO t VALUES ");
+        for (unsigned i = 0; i < 100; i++) {
+            unsigned id = 2 * (batch * 100 + i + 1);
+            used += (size_t)snprintf(sql + used, sizeof(sql) - used, "%s(%u, 'r%u')", i ? ", " : "", id, id);
+        }
+        exec_ok(db, sql);
+    }
+    database_scan_stats_t before, after;
+    database_scan_stats(db, &before);
+    expect_text(db, "SELECT count(*) FROM t WHERE id >= 5990", "[1] 6");
+    database_scan_stats(db, &after);
+    CHECK(after.rows_scanned == before.rows_scanned && after.index_lookups == before.index_lookups + 1 &&
+              after.index_pages_read - before.index_pages_read <= 3,
+          "범위 조회는 전체 스캔 없이 색인 경로와 잎 몇 장만 읽음 (스캔 %llu, 조회 %llu, 색인 페이지 %llu)",
+          (unsigned long long)(after.rows_scanned - before.rows_scanned),
+          (unsigned long long)(after.index_lookups - before.index_lookups),
+          (unsigned long long)(after.index_pages_read - before.index_pages_read));
+    database_scan_stats(db, &before);
+    expect_text(db, "SELECT count(*) FROM t WHERE id + 0 >= 5990", "[1] 6");
+    database_scan_stats(db, &after);
+    CHECK(after.rows_scanned == before.rows_scanned + 3000, "기본 키가 아닌 식은 전체 스캔");
+    check_primary_key_ranges(db);
+
+    /* UPDATE·DELETE도 같은 구간으로 대상 행을 찾는다 */
+    database_scan_stats(db, &before);
+    exec_ok(db, "UPDATE t SET v = 'w' WHERE id > 5900");
+    exec_ok(db, "DELETE FROM t WHERE id <= 10");
+    database_scan_stats(db, &after);
+    CHECK(after.rows_scanned == before.rows_scanned, "구간 UPDATE·DELETE는 전체 스캔 없음");
+    expect_text(db, "SELECT count(*), min(id), max(id) FROM t WHERE v = 'w'", "[1] 50|5902|6000");
+    expect_text(db, "SELECT count(*), min(id) FROM t", "[1] 2995|12");
+    exec_ok(db, "DELETE FROM t WHERE id % 7 = 0");
+    exec_ok(db, "UPDATE t SET v = 'u' WHERE id % 5 = 0");
+    exec_ok(db, "UPDATE t SET v = 'moved to a longer value so the row relocates' WHERE id % 11 = 0");
+    check_primary_key_ranges(db);
+    db = reopen(db, true);
+    check_primary_key_ranges(db);
+    expect_text(db, "SELECT id FROM t WHERE id > 100 ORDER BY id LIMIT 2", "[2] 102/ 104");
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+
 static void test_text_primary_key_index(void)
 {
     printf("\n[test_text_primary_key_index]\n");
@@ -973,6 +1061,7 @@ int main(void)
     test_many_rows_updates_and_deletes_across_pages();
     test_identity_and_primary_key_rules();
     test_text_primary_key_index();
+    test_primary_key_range();
     test_secondary_index_crud();
     test_secondary_index_many_duplicates();
     test_projected_overflow_reads();

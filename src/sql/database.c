@@ -1226,12 +1226,20 @@ typedef struct {
     value_t literal;
 } probe_t;
 
+/* 정수 컬럼 비교(<, <=, >, >=)를 모은 닫힌 구간 [low, high]. 같은 컬럼의 조건은 교집합으로 좁힌다 */
+typedef struct {
+    size_t column;
+    int64_t low, high;
+} range_t;
+
 typedef struct {
     bool present;
     sqleval_prog_t *prog;
     bool never;                        /* 최상위 AND 안의 등가 조건이 어떤 행과도 맞을 수 없다 */
     probe_t probes[WHERE_MAX_PROBES];
     size_t probe_count;
+    range_t ranges[WHERE_MAX_PROBES];
+    size_t range_count;
 } where_t;
 
 static void where_clear(database_t *db, where_t *where)
@@ -1261,13 +1269,84 @@ static bool values_equal(const value_view_t *a, const value_view_t *b)
     return a->type == b->type && value_compare(a, b, &order) == VALUE_OK && order == 0;
 }
 
-/* 최상위 AND를 따라 내려가며 컬럼 = 상수 조건을 모은다 */
+/* 컬럼이 오른쪽에 있으면 뒤집은 비교. a < 5 와 5 > a는 같다 */
+static sqlexpr_op_t flip_comparison(sqlexpr_op_t op)
+{
+    switch (op) {
+        case SQLEXPR_OP_LT: return SQLEXPR_OP_GT;
+        case SQLEXPR_OP_LE: return SQLEXPR_OP_GE;
+        case SQLEXPR_OP_GT: return SQLEXPR_OP_LT;
+        case SQLEXPR_OP_GE: return SQLEXPR_OP_LE;
+        default: return op;
+    }
+}
+
+static void narrow_range(where_t *where, size_t index, sqlexpr_op_t op, int64_t bound);
+
+/* 정수 컬럼과 정수 상수의 대소 비교를 구간으로 모은다. 다른 꼴은 구간 없이 전체 조건 평가에 맡긴다 */
+static void collect_range(const sqlexpr_t *expr, const resolver_t *resolver, where_t *where)
+{
+    sqlexpr_op_t op = expr->op;
+    const sqlexpr_t *column = expr->args[0], *constant = expr->args[1];
+    if (column->kind != SQLEXPR_COLUMN) {
+        column = expr->args[1];
+        constant = expr->args[0];
+        op = flip_comparison(op);
+    }
+    if (column->kind != SQLEXPR_COLUMN || constant->kind != SQLEXPR_LITERAL) return;
+    value_type_t type;
+    size_t index = resolve_column((void *)resolver, &column->qualifier, &column->name, &type);
+    if (index == SQLEVAL_NO_COLUMN || index == SQLEVAL_AMBIGUOUS) return;
+    if (constant->value.view.type == VALUE_NULL) {
+        where->never = true;
+        return;
+    }
+    if (type != VALUE_INTEGER || constant->value.view.type != VALUE_INTEGER) return;
+    narrow_range(where, index, op, constant->value.view.integer);
+}
+
+/* 컬럼 op bound(op는 컬럼 쪽에서 본 대소 비교)로 그 컬럼의 구간을 좁힌다. 빈 구간이면 where->never */
+static void narrow_range(where_t *where, size_t index, sqlexpr_op_t op, int64_t bound)
+{
+    int64_t low = INT64_MIN, high = INT64_MAX;
+    switch (op) {
+        case SQLEXPR_OP_LT:
+            if (bound == INT64_MIN) where->never = true;
+            else high = bound - 1;
+            break;
+        case SQLEXPR_OP_LE: high = bound; break;
+        case SQLEXPR_OP_GT:
+            if (bound == INT64_MAX) where->never = true;
+            else low = bound + 1;
+            break;
+        default: low = bound; break;
+    }
+    if (where->never) return;
+    range_t *range = NULL;
+    for (size_t i = 0; i < where->range_count && range == NULL; i++) {
+        if (where->ranges[i].column == index) range = &where->ranges[i];
+    }
+    if (range == NULL) {
+        if (where->range_count == WHERE_MAX_PROBES) return;
+        range = &where->ranges[where->range_count++];
+        *range = (range_t){index, INT64_MIN, INT64_MAX};
+    }
+    if (low > range->low) range->low = low;
+    if (high < range->high) range->high = high;
+    if (range->low > range->high) where->never = true;
+}
+
+/* 최상위 AND를 따라 내려가며 컬럼 = 상수 조건과 정수 대소 비교를 모은다 */
 static bool collect_probes(database_t *db, const sqlexpr_t *expr, const resolver_t *resolver, where_t *where,
                            database_exec_status_t *status)
 {
     if (expr->kind == SQLEXPR_BINARY && expr->op == SQLEXPR_OP_AND) {
         return collect_probes(db, expr->args[0], resolver, where, status) &&
                collect_probes(db, expr->args[1], resolver, where, status);
+    }
+    if (expr->kind == SQLEXPR_BINARY && expr->op >= SQLEXPR_OP_LT && expr->op <= SQLEXPR_OP_GE) {
+        collect_range(expr, resolver, where);
+        return true;
     }
     if (expr->kind != SQLEXPR_BINARY || expr->op != SQLEXPR_OP_EQ) return true;
     const sqlexpr_t *column = expr->args[0], *constant = expr->args[1];
@@ -2688,6 +2767,20 @@ static size_t key_probe(const catalog_table_view_t *view, const heap_t *heap, co
     return SIZE_MAX;
 }
 
+/* 정수 기본 키의 구간 번호. 구간이 없거나 양쪽 다 열려 있으면 SIZE_MAX */
+static size_t key_range(const catalog_table_view_t *view, const heap_t *heap, const where_t *where)
+{
+    if (!heap_is_indexed(heap) || where->never) return SIZE_MAX;
+    for (size_t i = 0; i < where->range_count; i++) {
+        const range_t *range = &where->ranges[i];
+        if (range->column == view->primary_key_column && view->columns[range->column].type == VALUE_INTEGER &&
+            (range->low != INT64_MIN || range->high != INT64_MAX)) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
 /* 보조 색인 탐침 번호. 없으면 SIZE_MAX */
 static size_t secondary_probe(database_t *db, catalog_table_id_t table_id, const where_t *where,
                               heap_secondary_spec_t *spec)
@@ -2760,7 +2853,37 @@ static bool scan_secondary_row(void *context, heap_locator_t locator)
     return scan->status == DATABASE_EXEC_OK && !*scan->sink->stop;
 }
 
-/* 기본 키·보조 색인 탐침이 있으면 그것으로, 없으면 전체를 훑는다 */
+typedef struct {
+    database_t *db;
+    heap_t *heap;
+    const where_t *where;
+    value_t *row;
+    const bool *needed;
+    const row_sink_t *sink;
+    database_exec_status_t status;
+} range_scan_t;
+
+static bool scan_range_row(void *context, heap_locator_t locator)
+{
+    range_scan_t *scan = context;
+    database_t *db = scan->db;
+    if (cancel_requested(db)) {
+        scan->status = cancelled_result(db);
+        return false;
+    }
+    heap_status_t got = heap_get_projected(scan->heap, locator, scan->needed, scan->row);
+    if (got != HEAP_OK) {
+        scan->status = heap_failure(db, got, "index range");
+        return false;
+    }
+    bool matched = false;
+    scan->status = where_matches(db, scan->where, scan->row, &matched);
+    if (scan->status == DATABASE_EXEC_OK && matched) scan->status = scan->sink->fn(scan->sink->ctx, scan->row);
+    heap_release_row(scan->heap, scan->row);
+    return scan->status == DATABASE_EXEC_OK && !*scan->sink->stop;
+}
+
+/* 기본 키·보조 색인 탐침이나 기본 키 구간이 있으면 그것으로, 없으면 전체를 훑는다 */
 static database_exec_status_t scan_rows(database_t *db, const catalog_table_view_t *table, catalog_table_id_t id,
                                         heap_t *heap, const where_t *where, const bool *needed, value_t *row,
                                         const row_sink_t *sink)
@@ -2790,6 +2913,15 @@ static database_exec_status_t scan_rows(database_t *db, const catalog_table_view
         /* LIMIT을 채워 방문을 멈추면 색인은 멈춤을 NOMEM으로 알린다. 오류가 아니다 */
         if (scan.status != DATABASE_EXEC_OK || *sink->stop) return scan.status;
         return visited == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, visited, "index lookup");
+    }
+    size_t by_range = key_range(table, heap, where);
+    if (by_range != SIZE_MAX) {
+        range_scan_t scan = {db, heap, where, row, needed, sink, DATABASE_EXEC_OK};
+        bool stopped = false;
+        heap_status_t visited = heap_visit_key_range(heap, where->ranges[by_range].low, where->ranges[by_range].high,
+                                                     scan_range_row, &scan, &stopped);
+        if (scan.status != DATABASE_EXEC_OK) return scan.status;
+        return visited == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, visited, "index range");
     }
     heap_cursor_t *cursor = NULL;
     heap_status_t made = heap_cursor_open(heap, &cursor);
@@ -3431,6 +3563,7 @@ typedef struct {
     size_t column;              /* 원본 안 열 번호 */
     value_type_t type;
     sqleval_prog_t *value;
+    sqlexpr_op_t op;            /* 열 쪽에서 본 비교. EQ면 등가 탐침, 대소 비교면 정수 구간 */
 } join_probe_t;
 
 typedef struct join join_t;
@@ -3506,6 +3639,14 @@ static database_exec_status_t join_probes(join_t *join, const join_level_t *step
         if (sqleval_run(step->probes[i].value, join->row, &value, &error) != SQLEVAL_OK) return eval_failure(db, &error);
         if (value.view.type == VALUE_NULL) {
             where->never = true;
+            continue;
+        }
+        if (step->probes[i].op != SQLEXPR_OP_EQ) {
+            /* 정수 열과 정수 값의 대소 비교만 구간으로 쓴다. 나머지는 단계 조건 검사에 맡긴다 */
+            if (step->probes[i].type == VALUE_INTEGER && value.view.type == VALUE_INTEGER) {
+                narrow_range(where, step->probes[i].column, step->probes[i].op, value.view.integer);
+            }
+            value_clear(&value);
             continue;
         }
         probe_t *probe = &where->probes[where->probe_count];
@@ -3597,10 +3738,11 @@ static size_t last_level(join_t *join, const sqleval_prog_t *prog, bool *uses_an
     return level;
 }
 
-/* 열 = 식 꼴이면 그 단계의 색인 탐침으로 쓴다(조건 자체도 그대로 검사한다) */
+/* 열 = 식, 열 대소 비교 식 꼴이면 그 단계의 색인 탐침·구간으로 쓴다(조건 자체도 그대로 검사한다) */
 static database_exec_status_t try_probe(join_t *join, const sqlexpr_t *expr, const resolver_t *resolver, size_t level)
 {
-    if (expr->kind != SQLEXPR_BINARY || expr->op != SQLEXPR_OP_EQ || level >= join->level_count) {
+    if (expr->kind != SQLEXPR_BINARY || expr->op < SQLEXPR_OP_EQ || expr->op > SQLEXPR_OP_GE ||
+        expr->op == SQLEXPR_OP_NE || level >= join->level_count) {
         return DATABASE_EXEC_OK;
     }
     join_level_t *step = &join->levels[level];
@@ -3623,7 +3765,8 @@ static database_exec_status_t try_probe(join_t *join, const sqlexpr_t *expr, con
             sqleval_free(value);
             continue;
         }
-        step->probes[step->probe_count++] = (join_probe_t){at - source->offset, type, value};
+        sqlexpr_op_t op = side == 0 ? expr->op : flip_comparison(expr->op);
+        step->probes[step->probe_count++] = (join_probe_t){at - source->offset, type, value, op};
         return DATABASE_EXEC_OK;
     }
     return DATABASE_EXEC_OK;
@@ -4191,8 +4334,40 @@ static bool collect_secondary_match(void *context, heap_locator_t locator)
     return scan->status == DATABASE_EXEC_OK;
 }
 
+typedef struct {
+    database_t *db;
+    heap_t *heap;
+    const where_t *where;
+    value_t *row;
+    matches_t *matches;
+    bool keep_values;
+    database_exec_status_t status;
+} range_match_t;
+
+static bool collect_range_match(void *context, heap_locator_t locator)
+{
+    range_match_t *scan = context;
+    if (cancel_requested(scan->db)) {
+        scan->status = cancelled_result(scan->db);
+        return false;
+    }
+    heap_status_t got = heap_get(scan->heap, locator, scan->row);
+    if (got != HEAP_OK) {
+        scan->status = heap_failure(scan->db, got, "index range");
+        return false;
+    }
+    bool matched = false;
+    scan->status = where_matches(scan->db, scan->where, scan->row, &matched);
+    if (scan->status == DATABASE_EXEC_OK && matched &&
+        !matches_add(scan->db, scan->matches, locator, scan->row, scan->keep_values)) {
+        scan->status = DATABASE_EXEC_NOMEM;
+    }
+    heap_release_row(scan->heap, scan->row);
+    return scan->status == DATABASE_EXEC_OK;
+}
+
 /*
- * WHERE에 맞는 행을 모은다. 기본 키·보조 색인 탐침이 있으면 그것으로 후보를 찾고, 없으면 전체를 훑는다.
+ * WHERE에 맞는 행을 모은다. 기본 키·보조 색인 탐침이나 기본 키 구간이 있으면 그것으로 후보를 찾고, 없으면 전체를 훑는다.
  * scan_other가 NULL이 아니면 훑는 동안 맞지 않은 행마다 부른다(기본 키 갱신의 중복 검사용).
  */
 static database_exec_status_t collect_matches(database_t *db, const catalog_table_view_t *view, catalog_table_id_t id,
@@ -4228,6 +4403,15 @@ static database_exec_status_t collect_matches(database_t *db, const catalog_tabl
                                                            collect_secondary_match, &scan);
         if (scan.status != DATABASE_EXEC_OK) return scan.status;
         return visited == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, visited, "index lookup");
+    }
+    size_t by_range = force_scan ? SIZE_MAX : key_range(view, heap, where);
+    if (by_range != SIZE_MAX) {
+        range_match_t scan = {db, heap, where, row, matches, keep_values, DATABASE_EXEC_OK};
+        bool stopped = false;
+        heap_status_t visited = heap_visit_key_range(heap, where->ranges[by_range].low, where->ranges[by_range].high,
+                                                     collect_range_match, &scan, &stopped);
+        if (scan.status != DATABASE_EXEC_OK) return scan.status;
+        return visited == HEAP_OK ? DATABASE_EXEC_OK : heap_failure(db, visited, "index range");
     }
     heap_cursor_t *cursor = NULL;
     heap_status_t made = heap_cursor_open(heap, &cursor);
