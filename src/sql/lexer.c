@@ -301,8 +301,15 @@ static bool scan_punct(scan_t *s, size_t *at)
     size_t start = *at, length = 1;
     uint8_t next = start + 1 < s->size ? in[start + 1] : 0;
     switch (in[start]) {
-        case '(': case ')': case ',': case '.': case '*': case '=':
+        case '(': case ')': case ',': case '.': case '*':
         case '+': case '-': case '/': case '%':
+            break;
+        case '=':
+            if (next == '=') length = 2;
+            break;
+        case '|':
+            if (next != '|') return syntax(s, LEXER_REASON_UNEXPECTED_BYTE, start);
+            length = 2;
             break;
         case '<':
             if (next == '=' || next == '>') length = 2;

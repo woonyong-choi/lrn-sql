@@ -105,8 +105,11 @@ static void expect_fail_bound(const char *sql, const value_view_t *values, size_
         mismatches++;
         return;
     }
-    assert(out == (sqlstmt_t *)&marker);
-    assert(live_allocations == before);
+    if (out != (sqlstmt_t *)&marker || live_allocations != before) {
+        fprintf(stderr, "input %s: 실패했는데 출력이 바뀌었거나 할당 %zu개가 남음\n", sql, live_allocations - before);
+        mismatches++;
+        return;
+    }
     /* error가 NULL이어도 같은 상태를 돌려준다. */
     assert(run(sql, strlen(sql), values, value_count, &out, NULL) == status);
     assert(out == (sqlstmt_t *)&marker && live_allocations == before);
@@ -133,26 +136,41 @@ static bool name_is(const sqlstmt_name_t *name, const char *text)
     return name->size == strlen(text) && memcmp(name->bytes, text, name->size) == 0;
 }
 
-static bool is_integer(const value_t *value, int64_t expected)
+static bool is_integer(const sqlexpr_t *expr, int64_t expected)
 {
-    return value->view.type == VALUE_INTEGER && value->view.integer == expected;
+    return expr->kind == SQLEXPR_LITERAL && expr->value.view.type == VALUE_INTEGER && expr->value.view.integer == expected;
 }
 
-static bool is_real(const value_t *value, double expected)
+static bool is_real(const sqlexpr_t *expr, double expected)
 {
-    return value->view.type == VALUE_REAL && value->view.real == expected;
+    return expr->kind == SQLEXPR_LITERAL && expr->value.view.type == VALUE_REAL && expr->value.view.real == expected;
 }
 
-static bool is_text(const value_t *value, const void *bytes, size_t size)
+static bool is_text(const sqlexpr_t *expr, const void *bytes, size_t size)
 {
-    return value->view.type == VALUE_TEXT && value->view.size_bytes == size &&
-           (size == 0 || memcmp(value->view.bytes, bytes, size) == 0);
+    const value_view_t *v = &expr->value.view;
+    return expr->kind == SQLEXPR_LITERAL && v->type == VALUE_TEXT && v->size_bytes == size &&
+           (size == 0 || memcmp(v->bytes, bytes, size) == 0);
 }
 
-static bool is_blob(const value_t *value, const void *bytes, size_t size)
+static bool is_blob(const sqlexpr_t *expr, const void *bytes, size_t size)
 {
-    return value->view.type == VALUE_BLOB && value->view.size_bytes == size &&
-           (size == 0 || memcmp(value->view.bytes, bytes, size) == 0);
+    const value_view_t *v = &expr->value.view;
+    return expr->kind == SQLEXPR_LITERAL && v->type == VALUE_BLOB && v->size_bytes == size &&
+           (size == 0 || memcmp(v->bytes, bytes, size) == 0);
+}
+
+static bool is_null(const sqlexpr_t *expr) { return expr->kind == SQLEXPR_LITERAL && expr->value.view.type == VALUE_NULL; }
+
+static bool is_column(const sqlexpr_t *expr, const char *name)
+{
+    return expr->kind == SQLEXPR_COLUMN && expr->qualifier.size == 0 && name_is(&expr->name, name);
+}
+
+/* column op 리터럴 꼴의 이항 비교 */
+static bool is_compare(const sqlexpr_t *expr, const char *column, sqlexpr_op_t op)
+{
+    return expr != NULL && expr->kind == SQLEXPR_BINARY && expr->op == op && is_column(expr->args[0], column);
 }
 
 static void free_clean(sqlstmt_t *statement)
@@ -231,18 +249,18 @@ static void identifiers_and_case(void)
 
     /* 식별자는 대소문자를 구분하고 키워드만 구분하지 않는다. */
     statement = parse_ok("SeLeCt A, a FrOm T wHeRe B Is NoT NuLl");
-    assert(statement->select.column_count == 2 && name_is(&statement->select.columns[0], "A"));
-    assert(name_is(&statement->select.columns[1], "a") && name_is(&statement->select.table, "T"));
-    assert(statement->select.where.op == SQLSTMT_OP_IS_NOT_NULL);
+    assert(statement->select.item_count == 2 && is_column(statement->select.items[0].expr, "A"));
+    assert(is_column(statement->select.items[1].expr, "a") && name_is(&statement->select.table, "T"));
+    assert(statement->select.where->kind == SQLEXPR_IS_NULL && statement->select.where->negated);
     free_clean(statement);
 
     statement = parse_ok("SELECT \"from\", \"where\" FROM \"table\"");
-    assert(name_is(&statement->select.columns[0], "from") && name_is(&statement->select.table, "table"));
+    assert(is_column(statement->select.items[0].expr, "from") && name_is(&statement->select.table, "table"));
     free_clean(statement);
 
     /* 예약어 아닌 단어는 맨 이름으로 쓸 수 있다. */
-    statement = parse_ok("SELECT integer, x, count, if FROM exists");
-    assert(statement->select.column_count == 4 && name_is(&statement->select.table, "exists"));
+    statement = parse_ok("SELECT integer, x, count, if FROM limited");
+    assert(statement->select.item_count == 4 && name_is(&statement->select.table, "limited"));
     free_clean(statement);
 }
 
@@ -252,12 +270,12 @@ static void insert_values(void)
         "INSERT INTO t VALUES (1, -2, +3, 1.5, -0.25e1, 'it''s', '', NULL, X'00ff', x'')");
     assert(statement->kind == SQLSTMT_INSERT);
     sqlstmt_insert_t *insert = &statement->insert;
-    assert(name_is(&insert->table, "t") && !insert->has_columns && insert->value_count == 10);
-    assert(is_integer(&insert->values[0], 1) && is_integer(&insert->values[1], -2));
-    assert(is_integer(&insert->values[2], 3) && is_real(&insert->values[3], 1.5));
-    assert(is_real(&insert->values[4], -2.5) && is_text(&insert->values[5], "it's", 4));
-    assert(is_text(&insert->values[6], "", 0) && insert->values[7].view.type == VALUE_NULL);
-    assert(is_blob(&insert->values[8], "\x00\xff", 2) && is_blob(&insert->values[9], "", 0));
+    assert(name_is(&insert->table, "t") && !insert->has_columns && insert->value_count == 10 && insert->row_count == 1);
+    assert(is_integer(insert->values[0], 1) && is_integer(insert->values[1], -2));
+    assert(is_integer(insert->values[2], 3) && is_real(insert->values[3], 1.5));
+    assert(is_real(insert->values[4], -2.5) && is_text(insert->values[5], "it's", 4));
+    assert(is_text(insert->values[6], "", 0) && is_null(insert->values[7]));
+    assert(is_blob(insert->values[8], "\x00\xff", 2) && is_blob(insert->values[9], "", 0));
     free_clean(statement);
 
     statement = parse_ok("INSERT INTO t (b, \"a c\") VALUES (NULL, 'x')");
@@ -269,6 +287,15 @@ static void insert_values(void)
     statement = parse_ok("INSERT INTO t VALUES (1)");
     assert(statement->insert.value_count == 1);
     free_clean(statement);
+
+    /* 여러 행과 식 값 */
+    statement = parse_ok("INSERT INTO t (a, b) VALUES (1, 'x' || 'y'), (2 * 3, NULL), (-4, lower('Z'))");
+    assert(statement->insert.row_count == 3 && statement->insert.value_count == 2);
+    assert(is_integer(statement->insert.values[0], 1) && statement->insert.values[1]->op == SQLEXPR_OP_CONCAT);
+    assert(statement->insert.values[2]->kind == SQLEXPR_BINARY && statement->insert.values[2]->op == SQLEXPR_OP_MUL);
+    assert(is_integer(statement->insert.values[4], -4) && statement->insert.values[5]->kind == SQLEXPR_FUNCTION);
+    assert(name_is(&statement->insert.values[5]->name, "LOWER"));
+    free_clean(statement);
 }
 
 static void text_values_keep_every_byte(void)
@@ -277,8 +304,8 @@ static void text_values_keep_every_byte(void)
     sqlstmt_t *statement = NULL;
     sqlstmt_error_t error;
     assert(run(sql, sizeof(sql) - 1, NULL, 0, &statement, &error) == SQLSTMT_OK);
-    assert(is_text(&statement->insert.values[0], "a\0b", 3));
-    assert(is_text(&statement->insert.values[1], "\xed\x95\x9c\xea\xb8\x80 \xf0\x9f\x98\x80", 11));
+    assert(is_text(statement->insert.values[0], "a\0b", 3));
+    assert(is_text(statement->insert.values[1], "\xed\x95\x9c\xea\xb8\x80 \xf0\x9f\x98\x80", 11));
     free_clean(statement);
 
     /* 페이지보다 긴 문자열도 잘리지 않는다. */
@@ -289,8 +316,8 @@ static void text_values_keep_every_byte(void)
     memset(long_sql + used, 'q', length);
     memcpy(long_sql + used + length, "')", 3);
     assert(run(long_sql, used + length + 2, NULL, 0, &statement, &error) == SQLSTMT_OK);
-    assert(statement->insert.values[0].view.size_bytes == length);
-    assert(statement->insert.values[0].view.bytes[length - 1] == 'q');
+    assert(statement->insert.values[0]->value.view.size_bytes == length);
+    assert(statement->insert.values[0]->value.view.bytes[length - 1] == 'q');
     free_clean(statement);
     free(long_sql);
 }
@@ -301,13 +328,13 @@ static void numeric_literals(void)
         "INSERT INTO t VALUES (9223372036854775807, -9223372036854775808, 007, - 5, 1e3, "
         "1.0, 2.5E-1, -0.0, 4.9e-324)");
     sqlstmt_insert_t *insert = &statement->insert;
-    assert(is_integer(&insert->values[0], INT64_MAX) && is_integer(&insert->values[1], INT64_MIN));
-    assert(is_integer(&insert->values[2], 7) && is_integer(&insert->values[3], -5));
-    assert(is_real(&insert->values[4], 1000.0) && is_real(&insert->values[5], 1.0));
-    assert(is_real(&insert->values[6], 0.25));
-    assert(insert->values[7].view.type == VALUE_REAL && insert->values[7].view.real == 0.0 &&
-           signbit(insert->values[7].view.real));
-    assert(is_real(&insert->values[8], 4.9e-324));
+    assert(is_integer(insert->values[0], INT64_MAX) && is_integer(insert->values[1], INT64_MIN));
+    assert(is_integer(insert->values[2], 7) && is_integer(insert->values[3], -5));
+    assert(is_real(insert->values[4], 1000.0) && is_real(insert->values[5], 1.0));
+    assert(is_real(insert->values[6], 0.25));
+    assert(insert->values[7]->value.view.type == VALUE_REAL && insert->values[7]->value.view.real == 0.0 &&
+           signbit(insert->values[7]->value.view.real));
+    assert(is_real(insert->values[8], 4.9e-324));
     free_clean(statement);
 
     const char *prefix = "INSERT INTO t VALUES (";
@@ -320,8 +347,12 @@ static void numeric_literals(void)
     expect_fail("INSERT INTO t VALUES (1e-999)", SQLSTMT_LIMIT, SQLSTMT_REASON_NUMBER_OUT_OF_RANGE,
                 strlen(prefix));
     expect_syntax("INSERT INTO t VALUES (-)", SQLSTMT_REASON_EXPECTED_VALUE, at("INSERT INTO t VALUES (-)", ")"));
-    expect_syntax("INSERT INTO t VALUES (- 'a')", SQLSTMT_REASON_EXPECTED_VALUE, at("INSERT INTO t VALUES (- 'a')", "'a'"));
-    expect_syntax("INSERT INTO t VALUES (-NULL)", SQLSTMT_REASON_EXPECTED_VALUE, at("INSERT INTO t VALUES (-NULL)", "NULL"));
+    /* 문자열·NULL의 단항 부호는 문법상 식이다. 형식 검사는 실행기 몫이다 */
+    statement = parse_ok("INSERT INTO t VALUES (- 'a', -NULL, - - 3)");
+    assert(statement->insert.values[0]->kind == SQLEXPR_UNARY && statement->insert.values[0]->op == SQLEXPR_OP_NEG);
+    assert(statement->insert.values[1]->kind == SQLEXPR_UNARY && is_null(statement->insert.values[1]->args[0]));
+    assert(statement->insert.values[2]->kind == SQLEXPR_UNARY && is_integer(statement->insert.values[2]->args[0], -3));
+    free_clean(statement);
 
     /* 숫자 리터럴은 4096바이트까지다. 앞의 0이 길어도 값이 작으면 같은 한도로 거절한다. */
     char digits[5000];
@@ -332,7 +363,7 @@ static void numeric_literals(void)
     digits[4096] = '\0';
     sprintf(sql, "INSERT INTO t VALUES (%s)", digits);
     statement = parse_ok(sql);
-    assert(is_integer(&statement->insert.values[0], 1));
+    assert(is_integer(statement->insert.values[0], 1));
     free_clean(statement);
     digits[4096] = '0';
     digits[4097] = '\0';
@@ -356,9 +387,9 @@ static void parameters(void)
     /* binding이 바뀌어도 복사한 값은 그대로다. */
     memset(text, 'Z', sizeof(text));
     memset(blob, 'Z', sizeof(blob));
-    assert(is_integer(&insert->values[0], 42) && is_text(&insert->values[1], "a\0b", 3));
-    assert(is_blob(&insert->values[2], "\xff\x00", 2) && insert->values[3].view.type == VALUE_NULL);
-    assert(insert->values[4].view.type == VALUE_REAL && signbit(insert->values[4].view.real));
+    assert(is_integer(insert->values[0], 42) && is_text(insert->values[1], "a\0b", 3));
+    assert(is_blob(insert->values[2], "\xff\x00", 2) && is_null(insert->values[3]));
+    assert(insert->values[4]->value.view.type == VALUE_REAL && signbit(insert->values[4]->value.view.real));
     free_clean(statement);
 
     text[0] = 'x';
@@ -366,10 +397,10 @@ static void parameters(void)
     text[2] = 'z';
     /* ?N은 번호로 찾고 같은 번호를 다시 써도 된다. */
     statement = parse_bound("UPDATE t SET a = ?2, b = ?1 WHERE c >= ?2", values, 2);
-    assert(is_text(&statement->update.assignments[0].value, "xyz", 3));
-    assert(is_integer(&statement->update.assignments[1].value, 42));
-    assert(statement->update.where.op == SQLSTMT_OP_GE);
-    assert(is_text(&statement->update.where.value, "xyz", 3));
+    assert(is_text(statement->update.assignments[0].value, "xyz", 3));
+    assert(is_integer(statement->update.assignments[1].value, 42));
+    assert(is_compare(statement->update.where, "c", SQLEXPR_OP_GE));
+    assert(is_text(statement->update.where->args[1], "xyz", 3));
     free_clean(statement);
 
     expect_fail_bound("INSERT INTO t VALUES (?)", NULL, 0, SQLSTMT_INVALID,
@@ -389,45 +420,88 @@ static void parameters(void)
 static void select_forms(void)
 {
     sqlstmt_t *statement = parse_ok("SELECT * FROM t;");
-    assert(statement->kind == SQLSTMT_SELECT && statement->select.select_all);
-    assert(statement->select.column_count == 0 && !statement->select.where.present);
+    assert(statement->kind == SQLSTMT_SELECT && statement->select.item_count == 1 && statement->select.items[0].star);
+    assert(statement->select.where == NULL && statement->select.has_from);
     free_clean(statement);
 
     statement = parse_ok("SELECT a, b, a FROM t WHERE c <> 'x'");
-    assert(!statement->select.select_all && statement->select.column_count == 3);
-    assert(statement->select.where.present && name_is(&statement->select.where.column, "c"));
-    assert(statement->select.where.op == SQLSTMT_OP_NE);
-    assert(is_text(&statement->select.where.value, "x", 1));
+    assert(statement->select.item_count == 3 && is_compare(statement->select.where, "c", SQLEXPR_OP_NE));
+    assert(is_text(statement->select.where->args[1], "x", 1));
     free_clean(statement);
 
     struct {
         const char *sql;
-        sqlstmt_op_t op;
+        sqlexpr_op_t op;
     } cases[] = {
-        {"SELECT * FROM t WHERE a = 1", SQLSTMT_OP_EQ},
-        {"SELECT * FROM t WHERE a != 1", SQLSTMT_OP_NE},
-        {"SELECT * FROM t WHERE a <> 1", SQLSTMT_OP_NE},
-        {"SELECT * FROM t WHERE a < 1", SQLSTMT_OP_LT},
-        {"SELECT * FROM t WHERE a <= 1", SQLSTMT_OP_LE},
-        {"SELECT * FROM t WHERE a > 1", SQLSTMT_OP_GT},
-        {"SELECT * FROM t WHERE a >= 1", SQLSTMT_OP_GE},
-        {"SELECT * FROM t WHERE a IS NULL", SQLSTMT_OP_IS_NULL},
-        {"SELECT * FROM t WHERE a IS NOT NULL", SQLSTMT_OP_IS_NOT_NULL},
+        {"SELECT * FROM t WHERE a = 1", SQLEXPR_OP_EQ},  {"SELECT * FROM t WHERE a == 1", SQLEXPR_OP_EQ},
+        {"SELECT * FROM t WHERE a != 1", SQLEXPR_OP_NE}, {"SELECT * FROM t WHERE a <> 1", SQLEXPR_OP_NE},
+        {"SELECT * FROM t WHERE a < 1", SQLEXPR_OP_LT},  {"SELECT * FROM t WHERE a <= 1", SQLEXPR_OP_LE},
+        {"SELECT * FROM t WHERE a > 1", SQLEXPR_OP_GT},  {"SELECT * FROM t WHERE a >= 1", SQLEXPR_OP_GE},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         statement = parse_ok(cases[i].sql);
-        assert(statement->select.where.op == cases[i].op);
-        bool is_null_test =
-            cases[i].op == SQLSTMT_OP_IS_NULL || cases[i].op == SQLSTMT_OP_IS_NOT_NULL;
-        assert(is_null_test ? statement->select.where.value.view.type == VALUE_NULL
-                            : is_integer(&statement->select.where.value, 1));
+        assert(is_compare(statement->select.where, "a", cases[i].op) && is_integer(statement->select.where->args[1], 1));
         free_clean(statement);
     }
 
     /* NULL과의 = 비교도 그대로 구조에 담는다. */
     statement = parse_ok("SELECT * FROM t WHERE a = NULL");
-    assert(statement->select.where.op == SQLSTMT_OP_EQ);
-    assert(statement->select.where.value.view.type == VALUE_NULL);
+    assert(is_compare(statement->select.where, "a", SQLEXPR_OP_EQ) && is_null(statement->select.where->args[1]));
+    free_clean(statement);
+
+    /* 우선순위: OR < AND < NOT < 비교 < +,- < *,/,% < || < 단항 */
+    statement = parse_ok("SELECT * FROM t WHERE a = 1 OR b = 2 AND NOT c = 3");
+    const sqlexpr_t *w = statement->select.where;
+    assert(w->op == SQLEXPR_OP_OR && is_compare(w->args[0], "a", SQLEXPR_OP_EQ));
+    assert(w->args[1]->op == SQLEXPR_OP_AND && w->args[1]->args[1]->kind == SQLEXPR_UNARY);
+    assert(w->args[1]->args[1]->op == SQLEXPR_OP_NOT && is_compare(w->args[1]->args[1]->args[0], "c", SQLEXPR_OP_EQ));
+    free_clean(statement);
+
+    statement = parse_ok("SELECT 1 + 2 * 3 - 4 % 5 || 'x' AS v");
+    assert(!statement->select.has_from && name_is(&statement->select.items[0].alias, "v"));
+    const sqlexpr_t *e = statement->select.items[0].expr;
+    assert(e->op == SQLEXPR_OP_SUB && e->args[0]->op == SQLEXPR_OP_ADD && e->args[0]->args[1]->op == SQLEXPR_OP_MUL);
+    assert(e->args[1]->op == SQLEXPR_OP_MOD && e->args[1]->args[1]->op == SQLEXPR_OP_CONCAT);
+    free_clean(statement);
+
+    statement = parse_ok("SELECT * FROM t WHERE a BETWEEN 1 AND 2 AND b NOT IN (1, 2, 3) AND c LIKE 'x%' ESCAPE '!'"
+                         " AND d IS NULL AND e NOT BETWEEN 0 AND 9 AND f NOT LIKE '_'");
+    w = statement->select.where;
+    assert(w->op == SQLEXPR_OP_AND && w->args[1]->kind == SQLEXPR_LIKE && w->args[1]->negated);
+    const sqlexpr_t *chain = w;
+    size_t conjuncts = 1;
+    while (chain->kind == SQLEXPR_BINARY && chain->op == SQLEXPR_OP_AND) {
+        conjuncts++;
+        chain = chain->args[0];
+    }
+    assert(conjuncts == 6 && chain->kind == SQLEXPR_BETWEEN && !chain->negated && chain->arg_count == 3);
+    free_clean(statement);
+
+    statement = parse_ok("SELECT CASE WHEN a > 1 THEN 'big' WHEN a = 1 THEN 'one' ELSE 'small' END, "
+                         "CASE a WHEN 1 THEN 2 END, CAST(a AS TEXT), coalesce(a, b, 0), t.a, u.* FROM t AS u");
+    const sqlstmt_select_t *q = &statement->select;
+    assert(q->item_count == 6 && q->items[0].expr->kind == SQLEXPR_CASE && q->items[0].expr->has_else);
+    assert(!q->items[0].expr->has_operand && q->items[0].expr->arg_count == 5);
+    assert(q->items[1].expr->has_operand && !q->items[1].expr->has_else && q->items[1].expr->arg_count == 3);
+    assert(q->items[2].expr->kind == SQLEXPR_CAST && q->items[2].expr->cast_type == VALUE_TEXT);
+    assert(q->items[3].expr->kind == SQLEXPR_FUNCTION && name_is(&q->items[3].expr->name, "COALESCE"));
+    assert(name_is(&q->items[4].expr->qualifier, "t") && name_is(&q->items[4].expr->name, "a"));
+    assert(q->items[5].star && name_is(&q->items[5].qualifier, "u") && name_is(&q->table_alias, "u"));
+    free_clean(statement);
+
+    statement = parse_ok("SELECT DISTINCT a x, b FROM t u WHERE TRUE ORDER BY 1 DESC, b NULLS LAST, a + 1 ASC NULLS FIRST "
+                         "LIMIT 10 OFFSET 2");
+    q = &statement->select;
+    assert(q->distinct && name_is(&q->items[0].alias, "x") && name_is(&q->table_alias, "u"));
+    assert(is_integer(q->where, 1) && q->order_count == 3 && q->order[0].desc && is_integer(q->order[0].expr, 1));
+    assert(!q->order[1].desc && q->order[1].nulls == SQLSTMT_NULLS_LAST);
+    assert(q->order[2].nulls == SQLSTMT_NULLS_FIRST && q->order[2].expr->op == SQLEXPR_OP_ADD);
+    assert(is_integer(q->limit, 10) && q->offset != NULL);
+    free_clean(statement);
+
+    statement = parse_ok("SELECT count(*), count(DISTINCT a), f() FROM t");
+    q = &statement->select;
+    assert(q->items[0].expr->star && q->items[1].expr->distinct && q->items[2].expr->arg_count == 0);
     free_clean(statement);
 }
 
@@ -436,21 +510,21 @@ static void update_delete_drop(void)
     sqlstmt_t *statement = parse_ok("UPDATE t SET a = 1, \"b c\" = NULL, d = 'x' WHERE id = 7");
     assert(statement->kind == SQLSTMT_UPDATE && statement->update.assignment_count == 3);
     assert(name_is(&statement->update.assignments[1].column, "b c"));
-    assert(statement->update.assignments[1].value.view.type == VALUE_NULL);
-    assert(statement->update.where.present && is_integer(&statement->update.where.value, 7));
+    assert(is_null(statement->update.assignments[1].value));
+    assert(is_compare(statement->update.where, "id", SQLEXPR_OP_EQ) && is_integer(statement->update.where->args[1], 7));
     free_clean(statement);
 
-    statement = parse_ok("UPDATE t SET a = 1");
-    assert(!statement->update.where.present);
+    statement = parse_ok("UPDATE t SET a = a + 1, b = upper(b)");
+    assert(statement->update.where == NULL && statement->update.assignments[0].value->op == SQLEXPR_OP_ADD);
     free_clean(statement);
 
     statement = parse_ok("DELETE FROM t WHERE a < -1.5");
     assert(statement->kind == SQLSTMT_DELETE && name_is(&statement->del.table, "t"));
-    assert(statement->del.where.op == SQLSTMT_OP_LT && is_real(&statement->del.where.value, -1.5));
+    assert(is_compare(statement->del.where, "a", SQLEXPR_OP_LT) && is_real(statement->del.where->args[1], -1.5));
     free_clean(statement);
 
     statement = parse_ok("DELETE FROM t");
-    assert(!statement->del.where.present);
+    assert(statement->del.where == NULL);
     free_clean(statement);
 
     statement = parse_ok("DROP TABLE \"t u\";");
@@ -564,69 +638,62 @@ static void insert_errors(void)
     expect_syntax("INSERT INTO", SQLSTMT_REASON_UNEXPECTED_END, 11);
     expect_syntax("INSERT INTO t", SQLSTMT_REASON_UNEXPECTED_END, 13);
     expect_syntax("INSERT INTO t DEFAULT VALUES", SQLSTMT_REASON_EXPECTED_KEYWORD, 14);
-    expect_syntax("INSERT INTO t SELECT 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 14);
+    expect_unsupported("INSERT INTO t SELECT 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 14);
     expect_syntax("INSERT INTO t VALUES ()", SQLSTMT_REASON_EXPECTED_VALUE, 22);
     expect_syntax("INSERT INTO t VALUES (1", SQLSTMT_REASON_UNEXPECTED_END, 23);
     expect_syntax("INSERT INTO t VALUES (1,", SQLSTMT_REASON_UNEXPECTED_END, 24);
     expect_syntax("INSERT INTO t VALUES (1 2)", SQLSTMT_REASON_EXPECTED_KEYWORD, 24);
-    expect_syntax("INSERT INTO t VALUES (a)", SQLSTMT_REASON_EXPECTED_VALUE, 22);
-    expect_syntax("INSERT INTO t VALUES (X)", SQLSTMT_REASON_EXPECTED_VALUE, 22);
     expect_syntax("INSERT INTO t VALUES (X 'ab')", SQLSTMT_REASON_EXPECTED_VALUE, 22);
     expect_syntax("INSERT INTO t VALUES (X'0')", SQLSTMT_REASON_BAD_BLOB_LITERAL, 23);
     expect_syntax("INSERT INTO t VALUES (X'zz')", SQLSTMT_REASON_BAD_BLOB_LITERAL, 23);
-    expect_syntax("INSERT INTO t VALUES (TRUE)", SQLSTMT_REASON_EXPECTED_VALUE, 22);
     expect_syntax("INSERT INTO t () VALUES ()", SQLSTMT_REASON_EXPECTED_IDENTIFIER, 15);
     expect_syntax("INSERT INTO t (a, b) VALUES (1)", SQLSTMT_REASON_COLUMN_VALUE_COUNT_MISMATCH, 30);
     expect_syntax("INSERT INTO t (a) VALUES (1, 2)", SQLSTMT_REASON_COLUMN_VALUE_COUNT_MISMATCH, 30);
     expect_syntax("INSERT INTO t (a, a) VALUES (1, 2)", SQLSTMT_REASON_DUPLICATE_COLUMN, 18);
     expect_syntax("INSERT INTO t (a, b VALUES (1, 2)", SQLSTMT_REASON_EXPECTED_KEYWORD, 20);
     expect_syntax("INSERT INTO t VALUES (1) x", SQLSTMT_REASON_TRAILING_TOKENS, 25);
-    expect_unsupported("INSERT INTO t VALUES (1), (2)", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 24);
+    expect_syntax("INSERT INTO t VALUES (1), (2, 3)", SQLSTMT_REASON_COLUMN_VALUE_COUNT_MISMATCH, 31);
+    expect_syntax("INSERT INTO t VALUES (1, 2), (3)", SQLSTMT_REASON_COLUMN_VALUE_COUNT_MISMATCH, 31);
+    expect_syntax("INSERT INTO t VALUES (1),", SQLSTMT_REASON_UNEXPECTED_END, 25);
     expect_unsupported("INSERT INTO t.u VALUES (1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 13);
 }
 
 static void select_and_where_errors(void)
 {
     expect_syntax("SELECT", SQLSTMT_REASON_UNEXPECTED_END, 6);
-    expect_syntax("SELECT FROM t", SQLSTMT_REASON_EXPECTED_IDENTIFIER, 7);
-    expect_syntax("SELECT a, FROM t", SQLSTMT_REASON_EXPECTED_IDENTIFIER, 10);
-    expect_syntax("SELECT a b FROM t", SQLSTMT_REASON_EXPECTED_KEYWORD, 9);
-    expect_syntax("SELECT * a FROM t", SQLSTMT_REASON_EXPECTED_KEYWORD, 9);
-    expect_syntax("SELECT *, a FROM t", SQLSTMT_REASON_EXPECTED_KEYWORD, 8);
+    expect_syntax("SELECT FROM t", SQLSTMT_REASON_EXPECTED_VALUE, 7);
+    expect_syntax("SELECT a, FROM t", SQLSTMT_REASON_EXPECTED_VALUE, 10);
+    expect_syntax("SELECT a b c FROM t", SQLSTMT_REASON_TRAILING_TOKENS, 11);
+    expect_syntax("SELECT * a FROM t", SQLSTMT_REASON_TRAILING_TOKENS, 9);
     expect_syntax("SELECT * FROM", SQLSTMT_REASON_UNEXPECTED_END, 13);
-    expect_syntax("SELECT * FROM t u", SQLSTMT_REASON_TRAILING_TOKENS, 16);
+    expect_syntax("SELECT * FROM t u v", SQLSTMT_REASON_TRAILING_TOKENS, 18);
     expect_syntax("SELECT * FROM t WHERE", SQLSTMT_REASON_UNEXPECTED_END, 21);
-    expect_syntax("SELECT * FROM t WHERE 1 = a", SQLSTMT_REASON_EXPECTED_IDENTIFIER, 22);
-    expect_syntax("SELECT * FROM t WHERE a", SQLSTMT_REASON_UNEXPECTED_END, 23);
     expect_syntax("SELECT * FROM t WHERE a =", SQLSTMT_REASON_UNEXPECTED_END, 25);
-    expect_syntax("SELECT * FROM t WHERE a = b", SQLSTMT_REASON_EXPECTED_VALUE, 26);
     expect_syntax("SELECT * FROM t WHERE a IS 5", SQLSTMT_REASON_EXPECTED_KEYWORD, 27);
     expect_syntax("SELECT * FROM t WHERE a IS NOT 5", SQLSTMT_REASON_EXPECTED_KEYWORD, 31);
-    expect_syntax("SELECT * FROM t WHERE a IN (1)", SQLSTMT_REASON_EXPECTED_KEYWORD, 24);
-    expect_syntax("SELECT * FROM t WHERE a BETWEEN 1 AND 2", SQLSTMT_REASON_EXPECTED_KEYWORD, 24);
-    expect_syntax("SELECT * FROM t WHERE a LIKE 'x'", SQLSTMT_REASON_EXPECTED_KEYWORD, 24);
-    expect_syntax("SELECT * FROM t WHERE a == 1", SQLSTMT_REASON_EXPECTED_VALUE, 25);
+    expect_syntax("SELECT * FROM t WHERE a NOT 5", SQLSTMT_REASON_TRAILING_TOKENS, 24);
+    expect_syntax("SELECT * FROM t WHERE a BETWEEN 1", SQLSTMT_REASON_UNEXPECTED_END, 33);
+    expect_syntax("SELECT * FROM t WHERE a IN ()", SQLSTMT_REASON_EXPECTED_VALUE, 28);
+    expect_syntax("SELECT * FROM t WHERE (a = 1", SQLSTMT_REASON_UNEXPECTED_END, 28);
     expect_syntax("SELECT * FROM t WHERE a = 1 WHERE b = 2", SQLSTMT_REASON_TRAILING_TOKENS, 28);
+    expect_syntax("SELECT CASE END FROM t", SQLSTMT_REASON_EXPECTED_VALUE, 12);
+    expect_syntax("SELECT CASE WHEN 1 THEN 2 FROM t", SQLSTMT_REASON_EXPECTED_KEYWORD, 26);
+    expect_syntax("SELECT CAST(a TEXT) FROM t", SQLSTMT_REASON_EXPECTED_KEYWORD, 14);
+    expect_syntax("SELECT * FROM t ORDER a", SQLSTMT_REASON_EXPECTED_KEYWORD, 22);
+    expect_syntax("SELECT * FROM t ORDER BY a NULLS", SQLSTMT_REASON_UNEXPECTED_END, 32);
+    expect_syntax("SELECT * FROM t LIMIT", SQLSTMT_REASON_UNEXPECTED_END, 21);
+    expect_syntax("SELECT a FROM t OFFSET 1 LIMIT 2", SQLSTMT_REASON_TRAILING_TOKENS, 25);
 
-    expect_unsupported("SELECT * FROM t ORDER BY a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
-    expect_unsupported("SELECT * FROM t LIMIT 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t GROUP BY a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
     expect_unsupported("SELECT * FROM t JOIN u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
+    expect_unsupported("SELECT * FROM t, u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 15);
     expect_unsupported("SELECT * FROM t UNION SELECT * FROM u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
-    expect_unsupported("SELECT * FROM t WHERE a = 1 ORDER BY a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 28);
-    expect_unsupported("SELECT DISTINCT a FROM t", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 7);
-    expect_unsupported("SELECT a AS b FROM t", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 9);
-    expect_unsupported("SELECT * FROM t AS u", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 16);
-    expect_unsupported("SELECT * FROM t WHERE a = 1 AND b = 2", SQLSTMT_REASON_UNSUPPORTED_CONDITION, 28);
-    expect_unsupported("SELECT * FROM t WHERE a = 1 OR b = 2", SQLSTMT_REASON_UNSUPPORTED_CONDITION, 28);
-    expect_unsupported("SELECT * FROM t WHERE a IS NULL AND b IS NULL", SQLSTMT_REASON_UNSUPPORTED_CONDITION, 32);
-    expect_unsupported("SELECT COUNT(*) FROM t", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 12);
-    expect_unsupported("SELECT t.a FROM t", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 8);
+    expect_unsupported("SELECT * FROM t WHERE a IN (SELECT b FROM u)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 28);
+    expect_unsupported("SELECT (SELECT 1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 7);
+    expect_unsupported("SELECT * FROM t WHERE EXISTS (SELECT 1)", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 22);
     expect_unsupported("SELECT * FROM t.u", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 15);
-    expect_unsupported("SELECT * FROM t WHERE f(a) = 1", SQLSTMT_REASON_UNSUPPORTED_EXPRESSION, 23);
-    expect_unsupported("DELETE FROM t WHERE a = 1 AND b = 2", SQLSTMT_REASON_UNSUPPORTED_CONDITION, 26);
-    expect_unsupported("DELETE FROM t ORDER BY a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 14);
-    expect_unsupported("UPDATE t SET a = 1 LIMIT 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 19);
+    expect_syntax("DELETE FROM t ORDER BY a", SQLSTMT_REASON_TRAILING_TOKENS, 14);
+    expect_unsupported("UPDATE t SET a = 1 RETURNING a", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 19);
 }
 
 static void update_delete_drop_errors(void)
@@ -639,7 +706,6 @@ static void update_delete_drop_errors(void)
     expect_syntax("UPDATE t SET a =", SQLSTMT_REASON_UNEXPECTED_END, 16);
     expect_syntax("UPDATE t SET a = 1,", SQLSTMT_REASON_UNEXPECTED_END, 19);
     expect_syntax("UPDATE t SET a = 1, a = 2", SQLSTMT_REASON_DUPLICATE_COLUMN, 20);
-    expect_syntax("UPDATE t SET a = b", SQLSTMT_REASON_EXPECTED_VALUE, 17);
     expect_syntax("UPDATE t SET a = 1 b", SQLSTMT_REASON_TRAILING_TOKENS, 19);
     expect_syntax("DELETE t", SQLSTMT_REASON_EXPECTED_KEYWORD, 7);
     expect_syntax("DELETE FROM", SQLSTMT_REASON_UNEXPECTED_END, 11);
@@ -671,9 +737,10 @@ static void limits(void)
     sprintf(sql, "DROP TABLE \"%s\"", name);
     expect_fail(sql, SQLSTMT_LIMIT, SQLSTMT_REASON_NAME_TOO_LONG, 11);
 
-    /* 컬럼·값·SET 항목은 CATALOG_MAX_COLUMNS개까지다. */
+    /* 컬럼·선택 항목·SET 항목은 CATALOG_MAX_COLUMNS개까지다(INSERT 값은 행 수를 곱해 더 많을 수 있다). */
     size_t max = CATALOG_MAX_COLUMNS;
     for (int kind = 0; kind < 4; kind++) {
+        if (kind == 1) continue;
         for (size_t count = max; count <= max + 1; count++) {
             size_t capacity = 64 * (count + 4);
             char *big = malloc(capacity);
@@ -759,6 +826,9 @@ static void allocation_failures(void)
         "INSERT INTO t VALUES (1, -2, 'long text value', NULL, X'ff')",
         "SELECT a, b, c, d, e FROM t WHERE a >= 'x'",
         "SELECT * FROM t WHERE a IS NOT NULL",
+        "SELECT DISTINCT a + 1 AS x, CASE WHEN b IN (1, 2) THEN 'y' ELSE lower(c) END FROM t u "
+        "WHERE a BETWEEN 1 AND 9 AND c LIKE 'a%' OR NOT d IS NULL ORDER BY 1 DESC, x LIMIT 3 OFFSET 1",
+        "INSERT INTO t VALUES (1, 'a' || 'b'), (2, CAST(?1 AS BLOB))",
         "UPDATE t SET a = 1, b = ?1, c = X'01', d = -1.5 WHERE e <> ?2",
         "DELETE FROM t WHERE \"column name\" = 'v'",
         "DROP TABLE t",

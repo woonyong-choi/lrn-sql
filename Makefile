@@ -340,7 +340,7 @@ endif
 
 DATABASE_OBJS = $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store.o $(BUILD_DIR)/storage/transaction.o \
                 $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/sql/database_txn.o \
-                $(BUILD_DIR)/sql/sql_statement.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/sql/result.o
+                $(BUILD_DIR)/sql/sql_statement.o $(BUILD_DIR)/sql/sql_eval.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/sql/result.o
 DATABASE_TESTS = test_sql_statement test_heap_store test_database test_database_sqlite test_database_fault test_database_bounded_open test_primary_index
 DATABASE_BINS = $(addprefix $(BUILD_DIR)/,$(DATABASE_TESTS))
 DATABASE_AUDIT_OBJS = $(patsubst $(BUILD_DIR)/%.o,$(BUILD_DIR)/audit/%.o,$(DATABASE_OBJS))
