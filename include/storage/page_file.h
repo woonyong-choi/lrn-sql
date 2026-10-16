@@ -26,7 +26,8 @@
  *   알리지만, 손상된 쪽이 최신이었는지는 알 수 없다.
  * - 여러 페이지 갱신의 원자성은 없다. commit은 "데이터 페이지 fsync → 제어 페이지 쓰기 → fsync"
  *   순서만 지킨다.
- * - 해제한 페이지의 재사용 목록은 메모리에만 있다. 다시 열면 회수되지 않고 새는 공간이 된다.
+ * 빈 페이지 목록(재사용 가능·한 세대 대기)은 commit마다 제어 페이지에 함께 쓴다. 제어 페이지 본문에 다 들어가지
+ * 않으면 나머지를 PAGE_KIND_FREE_LIST 사슬 페이지에 쓴다. 그래서 다시 열어도 놓은 페이지가 새지 않는다.
  * 단일 스레드 계약이다.
  */
 
@@ -35,7 +36,7 @@
 #define PAGE_BODY_BYTES (PAGE_FILE_PAGE_BYTES - PAGE_ENVELOPE_BYTES)
 #define PAGE_FILE_CONTROL_PAGES 2u
 #define PAGE_FILE_NO_PAGE 0u
-#define PAGE_FILE_FORMAT_VERSION 1u
+#define PAGE_FILE_FORMAT_VERSION 3u
 #define PAGE_FILE_MAX_PAGES 0xFFFFFFF0u
 
 typedef enum {
@@ -45,7 +46,9 @@ typedef enum {
     /* 테이블 heap의 페이지 디렉터리. 본문은 자체 magic·version을 갖는다(heap_store.h). */
     PAGE_KIND_DIRECTORY = 4,
     /* 테이블 기본 키 색인 노드. 본문은 자체 magic·version을 갖는다(pk_tree.h). */
-    PAGE_KIND_INDEX = 5
+    PAGE_KIND_INDEX = 5,
+    /* 제어 페이지에 다 들어가지 않은 빈 페이지 목록의 이어지는 사슬. page_file만 쓴다 */
+    PAGE_KIND_FREE_LIST = 6
 } page_kind_t;
 
 typedef enum {
@@ -177,17 +180,27 @@ page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
 /*
  * 새 페이지 번호를 받는다. 재사용 가능한 페이지를 먼저 돌려주고 없으면 높은 수위를 올린다.
  * 이 시점에는 파일에 아무것도 쓰지 않으며 현재 제어 페이지와 fallback 제어 페이지 어느 쪽이
- * 가리켰을 수 있는 페이지도 돌려주지 않는다. 실패하면 상태를 바꾸지 않는다.
+ * 가리켰을 수 있는 페이지도 돌려주지 않는다. 실패하면 상태를 바꾸지 않는다. 받은 페이지는 다음
+ * commit이 성공할 때까지 "새 페이지"다(page_file_is_fresh). poison된 핸들은 IO다.
  */
 page_file_status_t page_file_alloc(page_file_t *file, uint32_t *page_id);
 /*
- * 페이지를 놓는다. 곧바로 재사용하지 않는다. 가리키던 참조를 바꾼 제어 페이지가 commit되어도
- * 그 직전 세대(fallback)가 아직 이 페이지를 가리킬 수 있으므로, 그 commit 다음의 commit까지
- * 두 번 성공한 뒤에야 alloc이 돌려줄 수 있다. 그래서 최신 제어 쓰기가 사라져 한 세대 전으로
- * 열려도 그 세대가 가리키는 페이지는 덮어쓰이지 않았다. 호출자는 가리키던 참조를 바꾼 다음에
- * release한다. commit이 실패하면 놓은 페이지는 계속 보류 상태이다.
+ * 페이지를 놓는다. 마지막 commit 뒤에 받은 새 페이지는 어느 제어 페이지도 가리킨 적 없으므로 곧바로
+ * 재사용 목록으로 간다. 게시된 상태가 가리키는 페이지는 "다음 commit에서 빠지는 페이지"(보류)가 된다. 호출자는
+ * 그 페이지를 가리키지 않는 상태를 commit하기 전에 놓는다. 그래야 그 commit이 빈 목록에 함께 적어 다시 열거나
+ * 프로세스가 죽어도 새지 않는다. 보류 페이지는 commit 뒤에도 그 직전 세대(fallback)가 가리킬 수 있으므로 다음
+ * commit이 한 번 더 성공한 뒤에야 alloc이 돌려준다. 그래서 최신 제어 쓰기가 사라져 한 세대 전으로 열려도 그
+ * 세대가 가리키는 페이지는 덮어쓰이지 않았다. commit이 실패해 변경을 버리면 page_file_restore_pending으로
+ * 되돌린다. 목록 공간은 alloc·open이 미리 잡아 두므로 release는 NOMEM이 아니다. 이중 해제는 INVALID이며
+ * 페이지 상태로 O(1)에 확인한다.
  */
 page_file_status_t page_file_release(page_file_t *file, uint32_t page_id);
+/* 보류 페이지를 모두 게시된 상태의 페이지로 되돌린다. 실패한 commit의 변경을 버릴 때 쓴다 */
+void page_file_restore_pending(page_file_t *file);
+/* 마지막 commit 뒤에 alloc으로 받았고 아직 놓지 않은 페이지인지(O(1)) */
+bool page_file_is_fresh(const page_file_t *file, uint32_t page_id);
+/* 마지막 commit 뒤에 받은 새 페이지를 모두 놓는다(곧바로 재사용 가능). 게시하지 않고 버리는 작업의 rollback용 */
+void page_file_release_fresh(page_file_t *file);
 size_t page_file_pending_release_count(const page_file_t *file);
 size_t page_file_aging_release_count(const page_file_t *file);
 size_t page_file_reusable_count(const page_file_t *file);
@@ -220,9 +233,9 @@ bool page_file_is_poisoned(const page_file_t *file);
 /*
  * 메모리 회계용 읽기 전용 접근자(요청 바이트 기준, allocator 오버헤드 제외).
  * page_file_handle_bytes: 핸들이 쥔 고정 할당(구조체와 경로 사본). 해제 목록은 포함하지 않는다.
- * page_file_list_peak_bytes: 해제 목록 셋(pending·aging·reusable)이 page_count쪽 이하의 페이지를 담을 때
- *   요청 바이트의 순간 최대치 상한. 각 목록은 8에서 시작해 두 배씩 늘며 길이가 page_count를 넘지 않고,
- *   늘 때 옛 배열과 새 배열이 함께 있다.
+ * page_file_list_peak_bytes: 쓰기 핸들의 페이지 상태 배열(페이지당 1바이트)과 목록 다섯(pending·aging·
+ *   reusable·새 페이지·빈 목록 사슬)이 page_count쪽 이하의 페이지를 담을 때 요청 바이트의 순간 최대치 상한.
+ *   각 배열은 8에서 시작해 두 배씩 늘며 page_count 이상을 미리 잡고, 늘 때 옛 배열과 새 배열이 함께 있다.
  */
 size_t page_file_handle_bytes(const page_file_t *file);
 size_t page_file_list_peak_bytes(uint32_t page_count);

@@ -444,10 +444,13 @@ static void test_budget(void)
     assert(session_open(sdb, &s) == SESSION_OK);
     schema(s);
     expect(s, "BEGIN", "CMD BEGIN 0");
+    /* 작업 목록은 새 페이지를 곧바로 재사용해 자라지 않으므로, 점점 큰 값으로 문장 임시 메모리가 예산을 넘게 한다 */
     bool refused = false;
-    for (int i = 0; i < 400 && !refused; i++) {
-        char sql[160];
-        snprintf(sql, sizeof(sql), "INSERT INTO t (v) VALUES ('a longer row to use up the small budget %d')", i);
+    static char sql[256 * 1024];
+    for (int i = 1; i <= 128 && !refused; i++) {
+        int n = snprintf(sql, sizeof(sql), "INSERT INTO t (v) VALUES ('");
+        memset(sql + n, 'x', (size_t)i * 2048);
+        snprintf(sql + n + (size_t)i * 2048, sizeof(sql) - (size_t)n - (size_t)i * 2048, "')");
         char *line = run(s, sql);
         if (strncmp(line, "ERR ", 4) == 0) {
             refused = true;

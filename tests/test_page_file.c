@@ -228,6 +228,16 @@ static void reseal(uint8_t *page)
  * 고정 합성 파일: 레코드 페이지 1장(table 7), overflow 3페이지 체인(table 7), commit 한 번.
  * 반환: 게시된 파일 경로 DB_PATH. 호출 전 fresh_dir 필요.
  */
+/* 세대가 큰 제어 슬롯 */
+static uint32_t page_file_control_generation_slot(const uint8_t *bytes)
+{
+    uint64_t gen[2] = {0, 0};
+    for (uint32_t slot = 0; slot < 2; slot++) {
+        for (int i = 7; i >= 0; i--) gen[slot] = (gen[slot] << 8) | bytes[(size_t)slot * PAGE_FILE_PAGE_BYTES + 32 + 20 + i];
+    }
+    return gen[1] > gen[0] ? 1 : 0;
+}
+
 static uint8_t g_big[20000];
 static overflow_ref_t g_big_ref;
 static uint32_t g_record_page;
@@ -276,7 +286,8 @@ static void test_fixture_roundtrip_is_page_size_independent(void)
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 4] == 1 && bytes[PAGE_FILE_PAGE_BYTES + 5] == 0, "envelope 버전 1 LE");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 6] == PAGE_KIND_CONTROL, "종류 제어");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 8] == 1, "제어 slot 1의 page ID");
-    CHECK(bytes[PAGE_FILE_PAGE_BYTES + 16] == 52, "제어 본문 길이 52");
+    CHECK(bytes[PAGE_FILE_PAGE_BYTES + 16] == 68, "빈 목록이 없는 제어 본문 길이 68");
+    CHECK(bytes[PAGE_FILE_PAGE_BYTES + 40] == PAGE_FILE_FORMAT_VERSION, "형식 버전 3");
     CHECK(memcmp(bytes + PAGE_FILE_PAGE_BYTES + 32, "LRSQLDB\0", 8) == 0, "파일 magic");
     CHECK(bytes[PAGE_FILE_PAGE_BYTES + 48] == 4 && bytes[PAGE_FILE_PAGE_BYTES + 49] == 3 &&
               bytes[PAGE_FILE_PAGE_BYTES + 50] == 2 && bytes[PAGE_FILE_PAGE_BYTES + 51] == 1,
@@ -576,8 +587,8 @@ static void test_commit_failures_keep_current_generation(void)
     CHECK(page_file_pending_release_count(file) == 1 && page_file_reusable_count(file) == 0,
           "실패한 commit은 보류 해제를 재사용 목록으로 옮기지 않음");
     uint32_t again;
-    assert(page_file_alloc(file, &again) == PAGE_FILE_OK);
-    CHECK(again != first, "보류 중인 페이지는 alloc이 돌려주지 않음");
+    CHECK(page_file_alloc(file, &again) == PAGE_FILE_IO && page_file_write(file, first, PAGE_KIND_OVERFLOW, 0, body) ==
+              PAGE_FILE_IO, "poison된 핸들은 어느 세대가 가리킬지 모르는 페이지를 받거나 쓰지 않음");
     hooks_reset();
     errno = 0;
     CHECK(page_file_commit(file) == PAGE_FILE_IO && errno == EIO, "poison된 핸들은 이후 commit도 거절");
@@ -1049,6 +1060,171 @@ static void test_read_cache_matches_disk(void)
     clean_dir();
 }
 
+/* ══════════════════════════════════════════════════════════════ */
+static void test_free_list_survives_reopen(void)
+{
+    printf("\n[test_free_list_survives_reopen]\n");
+    fresh_dir();
+    hooks_reset();
+    enum { N = 5000 };
+    page_file_t *file;
+    assert(page_file_create(DB_PATH, &file) == PAGE_FILE_OK);
+    uint8_t body[PAGE_BODY_BYTES];
+    memset(body, 0x5A, sizeof(body));
+    static uint32_t ids[N];
+    for (int i = 0; i < N; i++) {
+        assert(page_file_alloc(file, &ids[i]) == PAGE_FILE_OK);
+        assert(page_file_write(file, ids[i], PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    }
+    assert(page_file_commit(file) == PAGE_FILE_OK && page_file_publish(file) == PAGE_FILE_OK);
+    uint32_t high = page_file_allocated_pages(file);
+
+    /* 새 페이지는 놓는 즉시 재사용된다 */
+    uint32_t fresh, again;
+    assert(page_file_alloc(file, &fresh) == PAGE_FILE_OK);
+    CHECK(page_file_is_fresh(file, fresh) && !page_file_is_fresh(file, ids[0]), "새 페이지 표시");
+    CHECK(page_file_release(file, fresh) == PAGE_FILE_OK && page_file_pending_release_count(file) == 0 &&
+              page_file_reusable_count(file) == 1, "새 페이지는 보류 없이 재사용 목록으로");
+    CHECK(page_file_alloc(file, &again) == PAGE_FILE_OK && again == fresh, "놓은 새 페이지를 곧바로 다시 받음");
+    page_file_release_fresh(file);
+    CHECK(page_file_reusable_count(file) == 1 && !page_file_is_fresh(file, fresh), "rollback은 새 페이지를 모두 놓음");
+
+    /* 게시된 페이지 N장을 놓으면 제어 페이지에 다 들어가지 않아 사슬로 넘친다 */
+    for (int i = 0; i < N; i++) assert(page_file_release(file, ids[i]) == PAGE_FILE_OK);
+    CHECK(page_file_release(file, ids[7]) == PAGE_FILE_INVALID, "이중 해제 거절");
+    CHECK(page_file_commit(file) == PAGE_FILE_OK, "commit");
+    size_t aging = page_file_aging_release_count(file), reusable = page_file_reusable_count(file);
+    CHECK(aging == N && reusable == 0, "대기 %zu 재사용 %zu (사슬 페이지는 재사용 목록에서 받음)", aging, reusable);
+    assert(page_file_close(file) == PAGE_FILE_OK);
+
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    CHECK(page_file_aging_release_count(file) == N && page_file_reusable_count(file) == 0,
+          "다시 열어도 대기 목록이 남음 (%zu)", page_file_aging_release_count(file));
+    CHECK(page_file_commit(file) == PAGE_FILE_OK, "빈 commit");
+    reusable = page_file_reusable_count(file);
+    aging = page_file_aging_release_count(file);
+    assert(page_file_close(file) == PAGE_FILE_OK);
+
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    CHECK(page_file_reusable_count(file) == reusable && page_file_aging_release_count(file) == aging &&
+              reusable + aging >= N, "다시 열어도 재사용 %zu 대기 %zu 그대로", reusable, aging);
+    uint32_t before = page_file_allocated_pages(file);
+    bool in_old_range = true;
+    for (size_t i = 0; i < reusable; i++) {
+        uint32_t id;
+        assert(page_file_alloc(file, &id) == PAGE_FILE_OK);
+        in_old_range = in_old_range && id < before;
+    }
+    CHECK(in_old_range && page_file_allocated_pages(file) == before && before <= high + 4,
+          "재사용 페이지로 할당하고 파일이 자라지 않음 (%u -> %u)", high, before);
+    page_file_release_fresh(file);
+    assert(page_file_close(file) == PAGE_FILE_OK);
+
+    /* 읽기 핸들은 빈 목록을 읽지 않는다 */
+    CHECK(page_file_open(DB_PATH, false, &file, NULL) == PAGE_FILE_OK && page_file_reusable_count(file) == 0,
+          "읽기 열기");
+    page_file_close(file);
+
+    /* 빈 목록의 중복 번호는 쓰기 열기에서 손상이다 */
+    size_t size;
+    uint8_t *bytes = slurp(DB_PATH, &size);
+    uint32_t slot = page_file_control_generation_slot(bytes);
+    uint8_t *control = bytes + (size_t)slot * PAGE_FILE_PAGE_BYTES;
+    memcpy(control + 32 + 72, control + 32 + 68, 4);
+    reseal(control);
+    spit(DB_PATH, bytes, size);
+    free(bytes);
+    CHECK(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_CORRUPT, "중복 번호 거절");
+    clean_dir();
+}
+
+/* ══════════════════════════════════════════════════════════════ */
+/* 사슬로 넘치는 빈 목록을 쓰는 commit의 모든 pwrite·fsync 실패 지점에서 다시 열면 이전 또는 새 빈 목록이다 */
+static void free_list_op(page_file_t *file)
+{
+    uint8_t body[PAGE_BODY_BYTES];
+    memset(body, 0x33, sizeof(body));
+    for (int i = 0; i < 3; i++) {
+        uint32_t id;
+        assert(page_file_alloc(file, &id) == PAGE_FILE_OK);
+        assert(page_file_write(file, id, PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    }
+}
+
+static void test_free_list_commit_failures(void)
+{
+    printf("\n[test_free_list_commit_failures]\n");
+    fresh_dir();
+    hooks_reset();
+    enum { N = 5000 };
+    page_file_t *file;
+    assert(page_file_create(DB_PATH, &file) == PAGE_FILE_OK);
+    uint8_t body[PAGE_BODY_BYTES];
+    memset(body, 0x44, sizeof(body));
+    static uint32_t ids[N];
+    for (int i = 0; i < N; i++) {
+        assert(page_file_alloc(file, &ids[i]) == PAGE_FILE_OK);
+        assert(page_file_write(file, ids[i], PAGE_KIND_OVERFLOW, 0, body) == PAGE_FILE_OK);
+    }
+    assert(page_file_commit(file) == PAGE_FILE_OK && page_file_publish(file) == PAGE_FILE_OK);
+    for (int i = 0; i < N; i++) assert(page_file_release(file, ids[i]) == PAGE_FILE_OK);
+    assert(page_file_commit(file) == PAGE_FILE_OK && page_file_close(file) == PAGE_FILE_OK);
+    size_t size;
+    uint8_t *base = slurp(DB_PATH, &size);
+
+    assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+    size_t old_r = page_file_reusable_count(file), old_a = page_file_aging_release_count(file);
+    free_list_op(file);
+    assert(page_file_commit(file) == PAGE_FILE_OK);
+    size_t new_r = page_file_reusable_count(file), new_a = page_file_aging_release_count(file);
+    assert(page_file_close(file) == PAGE_FILE_OK);
+    CHECK(old_a >= N && new_r >= N - 10, "기준: 이전 재사용 %zu 대기 %zu, 새 재사용 %zu 대기 %zu", old_r, old_a, new_r,
+          new_a);
+
+    int injected = 0, bad = 0, old_seen = 0, new_seen = 0;
+    for (int which = 0; which < 2; which++) {
+        for (int k = 1; k <= 40; k++) {
+            spit(DB_PATH, base, size);
+            hooks_reset();
+            assert(page_file_open(DB_PATH, true, &file, NULL) == PAGE_FILE_OK);
+            free_list_op(file);
+            if (which == 0) g_hooks.pwrite_fail_at = k;
+            else g_hooks.fsync_fail_at = k;
+            page_file_status_t status = page_file_commit(file);
+            hooks_reset();
+            page_file_close(file);
+            if (status == PAGE_FILE_OK) break;
+            injected++;
+            page_file_t *again = NULL;
+            if (page_file_open(DB_PATH, true, &again, NULL) != PAGE_FILE_OK) {
+                printf("  %s %d: 다시 열기 실패\n", which == 0 ? "pwrite" : "fsync", k);
+                bad++;
+                continue;
+            }
+            size_t r = page_file_reusable_count(again), a = page_file_aging_release_count(again);
+            bool is_old = r == old_r && a == old_a, is_new = r == new_r && a == new_a;
+            old_seen += is_old;
+            new_seen += is_new;
+            /* 재사용 목록의 페이지는 모두 받을 수 있고 파일 범위 안이다 */
+            uint32_t high = page_file_allocated_pages(again);
+            bool in_range = true;
+            for (size_t i = 0; i < r; i++) {
+                uint32_t id;
+                in_range = in_range && page_file_alloc(again, &id) == PAGE_FILE_OK && id < high;
+            }
+            if (!(is_old || is_new) || !in_range) {
+                printf("  %s %d: 재사용 %zu 대기 %zu\n", which == 0 ? "pwrite" : "fsync", k, r, a);
+                bad++;
+            }
+            page_file_close(again);
+        }
+    }
+    CHECK(bad == 0 && injected > 0 && old_seen > 0 && new_seen > 0,
+          "주입 %d곳에서 어긋남 %d (이전 %d, 새 %d)", injected, bad, old_seen, new_seen);
+    free(base);
+    clean_dir();
+}
+
 int main(void)
 {
     page_file_set_default_io(&HOOKED);
@@ -1063,6 +1239,8 @@ int main(void)
     test_released_pages_survive_for_fallback_generation();
     test_page_info_reports_verified_kind();
     test_read_cache_matches_disk();
+    test_free_list_survives_reopen();
+    test_free_list_commit_failures();
     page_file_set_default_io(NULL);
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);

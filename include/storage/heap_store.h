@@ -63,14 +63,15 @@
  * 새로 할당한 페이지에 쓴다. 바뀌지 않은 잎은 옛 페이지를 그대로 쓰므로 해제 목록에 넣지 않는다.
  * 호출자(database)의 순서:
  *   1. heap_batch_begin -> insert/update/delete -> heap_batch_finish (new_root와 해제 목록)
- *   2. catalog_set_locators(new_root) 후 catalog_store_save로 게시
- *   3. 성공이 확실하면 heap_batch_release_old (옛 페이지를 page_file_release)
- *      NOT_APPLIED로 확인된 실패면 heap_batch_abort (이번에 새로 할당한 페이지를 release)
- *      CATALOG_STORE_OUTCOME_UNKNOWN이면 둘 다 하지 않고 heap_batch_free만 한다. 디스크가
- *      어느 쪽을 가리키는지 알 수 없어 옛 페이지도 새 페이지도 재사용하면 안 된다.
- * heap_store는 page_file_commit·catalog 저장을 호출하지 않는다. 옛 페이지를 release하는 시점은
- * 반드시 게시 성공 뒤다. 그 전에 release하면 실패한 게시 뒤의 다른 commit이 아직 도달 가능한
- * 페이지를 재사용 가능으로 만들 수 있다.
+ *   2. catalog_set_locators(new_root) 후 heap_batch_release_old (옛 페이지를 page_file_release해
+ *      "다음 commit에서 빠지는 페이지"로 표시) 뒤 catalog_store_save로 게시
+ *   3. NOT_APPLIED로 확인된 실패면 heap_batch_abort (이번에 새로 할당한 페이지를 release).
+ *      옛 페이지의 표시는 catalog_store_save가 page_file_restore_pending으로 되돌린다.
+ *      CATALOG_STORE_OUTCOME_UNKNOWN이면 heap_batch_free만 한다. 디스크가 어느 쪽을 가리키는지
+ *      알 수 없어 옛 페이지도 새 페이지도 재사용하면 안 된다(핸들은 poison되어 더 commit하지 않는다).
+ * heap_store는 page_file_commit·catalog 저장을 호출하지 않는다. 옛 페이지를 commit 전에 놓아야 그
+ * commit이 빈 목록에 함께 적어 다시 열거나 프로세스가 죽어도 새지 않는다. 놓은 페이지는 commit이 두 번
+ * 성공한 뒤에야 재사용되므로(page_file_release) 실패한 게시가 도달 가능한 페이지를 덮어쓰지 않는다.
  *
  * locator(heap_locator_t)는 한 heap_t 또는 한 batch 안에서만 유효하다. 디렉터리 항목 순번과
  * slot이며 COW로 page 번호가 바뀌어도 같은 batch 안에서는 유지된다. 삭제한 slot 번호는
@@ -272,7 +273,7 @@ typedef struct {
  * 유효). 바뀐 것이 없어도 새 디렉터리를 쓰지 않고 현재 root를 돌려준다. 실패하면 batch는 FAILED다.
  */
 heap_status_t heap_batch_finish(heap_batch_t *batch, heap_batch_result_t *result);
-/* 게시 성공 뒤 옛 페이지를 release한다. 모든 페이지를 시도하고 처음 실패 상태를 돌려준다. */
+/* 게시(commit) 전에 옛 페이지를 release한다. 모든 페이지를 시도하고 처음 실패 상태를 돌려준다. */
 heap_status_t heap_batch_release_old(heap_batch_t *batch);
 /* 게시하지 않기로 했을 때 새로 할당한 페이지를 release한다. */
 heap_status_t heap_batch_abort(heap_batch_t *batch);
