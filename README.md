@@ -8,7 +8,7 @@
 </p>
 
 > [!NOTE]
-> 개발 중입니다. 배포판은 없고 소스에서 빌드해 실행합니다.
+> 첫 공개판 0.1.0입니다. 소스에서 빌드해 실행합니다. 1.0 전에는 파일 형식과 API가 바뀔 수 있습니다.
 
 ## 빠른 시작
 
@@ -94,7 +94,7 @@ make example-outbox
 | at-least-once ACK 큐, lease와 fence, lease 연장, 업무 갱신과 같은 commit, purge 뒤에도 보존 기간(기본 7일) 동안 유지되는 idempotency 키, 큐별 payload 상한(기본 1 MiB), 여러 프로세스·언어(Python, C)가 같은 큐 사용 | Python·C 밖의 언어 바인딩 | — |
 | 시험마다 SQLite와 PostgreSQL에 같은 SQL을 실행해 결과 대조, commit 중 모든 쓰기 지점의 종료·I/O 실패 시험([안전성 시험 결과](docs/safety.md)), SQLite와 같은 입력의 CRUD·혼합 부하·강제 종료 뒤 복구 측정 | 전원 차단 검증, SQLite 수준의 파일 크기(같은 1만 행에서 약 1.6배) | — |
 
-1.0 전에는 파일 형식과 API가 예고 없이 바뀔 수 있습니다.
+1.0 전에는 파일 형식과 API가 예고 없이 바뀔 수 있습니다. 바뀐 내용은 [변경 기록](CHANGELOG.md)에 있습니다.
 
 ## 문서
 
@@ -104,7 +104,7 @@ make example-outbox
 - [C 코딩 규칙](docs/convention/c-style.md): C 코드 작성 기준
 - [Python 코딩 규칙](docs/convention/python-style.md): Python 코드 작성 기준
 - [폴더 구조 규칙](docs/convention/project-structure.md): 파일과 폴더를 두는 자리
-- [커밋 규칙](docs/convention/commit-convention.md): 커밋·브랜치·PR 형식
+- [기여 안내](.github/CONTRIBUTING.md): 검사, 커밋·PR 형식
 - [전체 문서](docs/README.md)
 
 ## 개발
@@ -115,3 +115,7 @@ make test-all test-runner test-fault test-result
 make SANITIZE=thread BUILD_DIR=build-tsan test-transaction test-session test-ack-queue
 make test-sql-diff
 ```
+
+## 라이선스
+
+[MIT](LICENSE)

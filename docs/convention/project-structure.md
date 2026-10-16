@@ -229,53 +229,7 @@ Thumbs.db
 ## 테스트
 
 (테스트 실행 명령어)
-
-## 팀원
-
-- 이름 (역할)
 ```
-
----
-
-## docs/ 폴더 구조
-
-```
-docs/
-├── convention/           # 팀 컨벤션 (이 문서들)
-│   ├── commit-convention.md
-│   ├── c-style.md
-│   ├── python-style.md
-│   └── project-structure.md
-│
-├── design/               # 설계 문서
-│   └── architecture.md
-│
-├── questions/            # 학습 검증 질문
-│   └── q01-xxx.md
-│
-└── <topic>/              # 주제별 학습 아카이브
-    └── keyword-tree.md
-```
-
----
-
-## 브랜치와 디렉터리 관계
-
-주(week) 단위 과제가 반복되는 크래프톤 정글 환경:
-
-```
-repository/
-├── docs/                 # 프로젝트 전체에 걸친 문서
-│   └── convention/
-│
-├── week07/               # 주차별 과제 (필요 시)
-│   ├── malloc-lab/
-│   └── proxy-lab/
-│
-└── (또는 주차별 별도 레포지토리)
-```
-
-주차별 레포지토리를 쓰는 경우, `docs/convention/`은 개인 workspace에 두고 심링크하거나 복사한다.
 
 ---
 

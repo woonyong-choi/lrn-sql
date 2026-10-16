@@ -65,6 +65,11 @@ typedef struct {
     size_t size;
 } tote_param_t;
 
+/* 이 헤더의 버전(유의적 버전). 1.0 전에는 파일 형식과 API가 바뀔 수 있다 */
+#define TOTE_VERSION "0.1.0"
+
+/* 링크한 라이브러리의 버전. 헤더의 TOTE_VERSION과 다르면 다른 빌드를 섞어 쓴 것이다 */
+const char *tote_version(void);
 const char *tote_status_name(int status);
 void tote_free(void *pointer);
 
