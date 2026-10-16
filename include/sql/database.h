@@ -131,6 +131,8 @@ database_exec_status_t database_exec(database_t *db, const uint8_t *sql, size_t 
 #define DATABASE_CODE_AMBIGUOUS_COLUMN 46
 #define DATABASE_CODE_BAD_LIMIT 47          /* LIMIT·OFFSET이 음수이거나 정수가 아님 */
 #define DATABASE_CODE_BAD_ORDER_POSITION 48 /* ORDER BY 번호가 선택 목록 밖 */
+#define DATABASE_CODE_AGGREGATE_MISUSE 49   /* WHERE·GROUP BY·집계 안 등 집계를 쓸 수 없는 자리 */
+#define DATABASE_CODE_NOT_GROUPED 50        /* 그룹 질의에서 GROUP BY에 없는 컬럼을 집계 밖에서 씀 */
 
 typedef struct {
     bool (*requested)(void *ctx);

@@ -326,7 +326,8 @@ static void test_two_schemas_crud_and_reopen(void)
     expect_text(db, "SELECT id FROM users WHERE name = 'dave'", "[1] 4");
 
     db = reopen(db, false);
-    expect_class(db, "SELECT COUNT(*) FROM users", RESULT_E_SEMANTIC);  /* 함수 호출은 지원하지 않는다 */
+    expect_text(db, "SELECT COUNT(*) FROM users", "[1] 3");
+    expect_class(db, "SELECT name, COUNT(*) FROM users", RESULT_E_SEMANTIC);  /* 묶지 않은 열 */
     expect_class(db, "INSERT INTO logs VALUES (1, 'x')", RESULT_E_SEMANTIC);
     expect_text(db, "SELECT name FROM users WHERE id = 4", "[1] 'dave'");
     assert(database_close(db) == DATABASE_OK);
@@ -876,9 +877,17 @@ static void test_order_and_distinct_respect_budget(void)
     expect_text(db, "SELECT id FROM sorted WHERE grp = -1 ORDER BY id LIMIT 2 OFFSET 1", "[2] 14/ 21");
     expect_text(db, "SELECT DISTINCT grp FROM sorted ORDER BY grp", "[6] -1/ 0/ 1/ 2/ 3/ 4");
     expect_text(db, "SELECT id FROM sorted WHERE grp = 9 ORDER BY id", "[0]");
+    expect_text(db, "SELECT grp, COUNT(*) FROM sorted GROUP BY grp ORDER BY grp",
+                "[6] -1|42/ 0|52/ 1|52/ 2|51/ 3|52/ 4|51");
+    expect_text(db, "SELECT SUM(id), MAX(id) FROM sorted WHERE grp = 4", "[1] 7704|299");
+    expect_text(db, "SELECT grp FROM sorted GROUP BY grp HAVING COUNT(*) < 52 ORDER BY 1", "[3] -1/ 2/ 4");
+    expect_text(db, "SELECT COUNT(*), SUM(id) FROM sorted WHERE grp = 9", "[1] 0|NULL");
 
-    const char *queries[] = {"SELECT body, id FROM sorted ORDER BY grp DESC, id", "SELECT DISTINCT body FROM sorted"};
-    for (size_t q = 0; q < 2; q++) {
+    const char *queries[] = {"SELECT body, id FROM sorted ORDER BY grp DESC, id", "SELECT DISTINCT body FROM sorted",
+                             "SELECT body, COUNT(*), MIN(id) FROM sorted GROUP BY body ORDER BY body",
+                             "SELECT COUNT(DISTINCT body), MAX(body) FROM sorted"};
+    const size_t expected_rows[] = {300, 40, 40, 1};
+    for (size_t q = 0; q < sizeof(queries) / sizeof(queries[0]); q++) {
         projection_memory_t memory = {0};
         result_t *result = NULL;
         CHECK(run_budgeted(db, &memory, queries[q], &result) == DATABASE_EXEC_OK && result_kind(result) == RESULT_KIND_ROWS,
@@ -887,7 +896,7 @@ static void test_order_and_distinct_respect_budget(void)
         result_row_t row;
         while (result_next(result, &row) == RESULT_NEXT_ROW) rows++;
         result_release(&result);
-        CHECK(rows == (q == 0 ? 300u : 40u) && memory.used == 0, "%s: 행 %zu, 남은 계상 %zu", queries[q], rows, memory.used);
+        CHECK(rows == expected_rows[q] && memory.used == 0, "%s: 행 %zu, 남은 계상 %zu", queries[q], rows, memory.used);
         size_t peak = memory.peak;
         memory.peak = 0;
         memory.limit = peak / 2;
@@ -897,6 +906,13 @@ static void test_order_and_distinct_respect_budget(void)
         CHECK(refused, "%s: 예산 %zu(최대 %zu의 절반)에서 결과를 자르지 않고 거절", queries[q], memory.limit, peak);
         result_release(&result);
         CHECK(memory.used == 0, "%s: 거절 뒤 계상 정리", queries[q]);
+        /* 어느 지점에서 한도에 걸려도 계상이 0으로 돌아온다 */
+        for (size_t limit = 0; limit < peak; limit += peak / 97 + 1) {
+            projection_memory_t swept = {.limit = limit};
+            run_budgeted(db, &swept, queries[q], &result);
+            result_release(&result);
+            CHECK(swept.used == 0, "%s: 한도 %zu에서 계상 %zu 남음", queries[q], limit, swept.used);
+        }
     }
     /* 정렬이 없는 LIMIT은 모으지 않고 내보내다 멈춘다 */
     projection_memory_t whole = {0}, first = {0};

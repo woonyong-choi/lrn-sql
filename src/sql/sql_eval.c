@@ -37,6 +37,7 @@ static const fn_spec_t FUNCTIONS[] = {
 typedef struct node {
     const sqlexpr_t *src;
     value_type_t type;
+    bool matched;           /* match가 바꾼 부분식. row[column]을 읽는다 */
     size_t column;
     fn_t fn;
     struct node **args;
@@ -53,6 +54,7 @@ struct sqleval_prog {
 
 typedef struct {
     sqleval_resolve_fn resolve;
+    sqleval_match_fn match;
     void *ctx;
     node_t *nodes;
     size_t used;
@@ -108,9 +110,21 @@ static bool name_is(const sqlstmt_name_t *name, const char *text)
 
 static sqleval_status_t compile_node(compiler_t *c, const sqlexpr_t *expr, node_t **out);
 
+static const char *const AGGREGATES[] = {"COUNT", "SUM", "AVG", "MIN", "MAX", NULL};
+
+bool sqleval_is_aggregate(const sqlexpr_t *expr)
+{
+    if (expr == NULL || expr->kind != SQLEXPR_FUNCTION) return false;
+    for (size_t i = 0; AGGREGATES[i] != NULL; i++) {
+        if (name_is(&expr->name, AGGREGATES[i])) return expr->star ? i == 0 && expr->arg_count == 0 : expr->arg_count == 1;
+    }
+    return false;
+}
+
 static sqleval_status_t compile_function(compiler_t *c, node_t *node)
 {
     const sqlexpr_t *expr = node->src;
+    if (sqleval_is_aggregate(expr)) return failed(c->error, SQLEVAL_AGGREGATE, expr, &expr->name);
     const fn_spec_t *spec = NULL;
     for (size_t i = 0; i < sizeof(FUNCTIONS) / sizeof(FUNCTIONS[0]); i++) {
         if (name_is(&expr->name, FUNCTIONS[i].name)) spec = &FUNCTIONS[i];
@@ -180,6 +194,7 @@ static sqleval_status_t type_node(compiler_t *c, node_t *node)
             size_t column = c->resolve(c->ctx, &expr->qualifier, &expr->name, &type);
             if (column == SQLEVAL_NO_COLUMN) return failed(c->error, SQLEVAL_UNKNOWN_COLUMN, expr, &expr->name);
             if (column == SQLEVAL_AMBIGUOUS) return failed(c->error, SQLEVAL_AMBIGUOUS_COLUMN, expr, &expr->name);
+            if (column == SQLEVAL_UNGROUPED) return failed(c->error, SQLEVAL_NOT_GROUPED, expr, &expr->name);
             node->column = column;
             node->type = type;
             return SQLEVAL_OK;
@@ -273,6 +288,17 @@ static sqleval_status_t compile_node(compiler_t *c, const sqlexpr_t *expr, node_
     node->src = expr;
     node->args = &c->slots[c->slots_used];
     c->slots_used += expr->arg_count;
+    if (c->match != NULL) {
+        value_type_t type = VALUE_NULL;
+        size_t index = c->match(c->ctx, expr, &type);
+        if (index != SQLEVAL_NO_COLUMN) {
+            node->matched = true;
+            node->column = index;
+            node->type = type;
+            *out = node;
+            return SQLEVAL_OK;
+        }
+    }
     for (size_t i = 0; i < expr->arg_count; i++) {
         sqleval_status_t status = compile_node(c, expr->args[i], &node->args[i]);
         if (status != SQLEVAL_OK) return status;
@@ -281,7 +307,7 @@ static sqleval_status_t compile_node(compiler_t *c, const sqlexpr_t *expr, node_
     return type_node(c, node);
 }
 
-sqleval_status_t sqleval_compile(const sqlexpr_t *expr, sqleval_resolve_fn resolve, void *ctx,
+sqleval_status_t sqleval_compile(const sqlexpr_t *expr, sqleval_resolve_fn resolve, sqleval_match_fn match, void *ctx,
                                  sqleval_prog_t **out, sqleval_error_t *error)
 {
     if (out == NULL) return failed(error, SQLEVAL_ARGUMENT, NULL, NULL);
@@ -301,7 +327,7 @@ sqleval_status_t sqleval_compile(const sqlexpr_t *expr, sqleval_resolve_fn resol
     prog->nodes = array;
     prog->slots = slot_array;
     prog->node_count = nodes;
-    compiler_t c = {resolve, ctx, array, 0, slot_array, 0, error};
+    compiler_t c = {resolve, match, ctx, array, 0, slot_array, 0, error};
     sqleval_status_t status = compile_node(&c, expr, &prog->root);
     if (status != SQLEVAL_OK) {
         sqleval_free(prog);
@@ -326,7 +352,7 @@ void sqleval_mark_columns(const sqleval_prog_t *prog, bool *needed, size_t colum
     if (prog == NULL) return;
     for (size_t i = 0; i < prog->node_count; i++) {
         const node_t *node = &prog->nodes[i];
-        if (node->src->kind == SQLEXPR_COLUMN && node->column < column_count) needed[node->column] = true;
+        if ((node->matched || node->src->kind == SQLEXPR_COLUMN) && node->column < column_count) needed[node->column] = true;
     }
 }
 
@@ -832,6 +858,10 @@ static sqleval_status_t eval_function(const runner_t *r, const node_t *node, val
 static sqleval_status_t eval(const runner_t *r, const node_t *node, value_t *tmp, value_view_t *view)
 {
     const sqlexpr_t *expr = node->src;
+    if (node->matched) {
+        *view = r->row[node->column].view;
+        return SQLEVAL_OK;
+    }
     switch (expr->kind) {
         case SQLEXPR_LITERAL:
             *view = expr->value.view;
