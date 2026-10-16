@@ -185,6 +185,15 @@ static void names_clear(sqlstmt_name_t *names, size_t count)
     free(names);
 }
 
+static void assignments_free(sqlstmt_assignment_t *assignments, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        name_clear(&assignments[i].column);
+        expr_free(assignments[i].value);
+    }
+    free(assignments);
+}
+
 static void items_free(sqlstmt_select_item_t *items, size_t count)
 {
     for (size_t i = 0; i < count; i++) {
@@ -266,17 +275,16 @@ void sqlstmt_free(sqlstmt_t *statement)
             }
             free(statement->insert.values);
             name_clear(&statement->insert.table);
+            name_clear(&statement->insert.conflict.target);
+            assignments_free(statement->insert.conflict.assignments, statement->insert.conflict.assignment_count);
+            expr_free(statement->insert.conflict.where);
             items_free(statement->insert.returning.items, statement->insert.returning.count);
             break;
         case SQLSTMT_SELECT:
             select_clear(&statement->select);
             break;
         case SQLSTMT_UPDATE:
-            for (size_t i = 0; i < statement->update.assignment_count; i++) {
-                name_clear(&statement->update.assignments[i].column);
-                expr_free(statement->update.assignments[i].value);
-            }
-            free(statement->update.assignments);
+            assignments_free(statement->update.assignments, statement->update.assignment_count);
             expr_free(statement->update.where);
             name_clear(&statement->update.table);
             items_free(statement->update.returning.items, statement->update.returning.count);
@@ -1326,30 +1334,62 @@ static bool parse_select(parser_t *p, sqlstmt_t *statement)
     return parse_query(p, &statement->select) && parse_end(p);
 }
 
-static bool parse_update(parser_t *p, sqlstmt_t *statement)
+/* column = expr {, column = expr}. SET 뒤에서 부른다 */
+static bool parse_assignments(parser_t *p, sqlstmt_assignment_t **assignments, size_t *count)
 {
-    sqlstmt_update_t *update = &statement->update;
-    statement->kind = SQLSTMT_UPDATE;
-    if (!parse_name(p, &update->table, false) || !expect_word(p, "SET")) return false;
     size_t capacity = 0;
     do {
         size_t offset = here_offset(p);
-        void *grown = reserve(p, update->assignments, &capacity, update->assignment_count,
-                              sizeof(*update->assignments), offset);
+        void *grown = reserve(p, *assignments, &capacity, *count, sizeof(**assignments), offset);
         if (grown == NULL) return false;
-        update->assignments = grown;
-        sqlstmt_assignment_t *assignment = &update->assignments[update->assignment_count];
+        *assignments = grown;
+        sqlstmt_assignment_t *assignment = &(*assignments)[*count];
         if (!parse_name(p, &assignment->column, false)) return false;
-        update->assignment_count++;
-        for (size_t i = 0; i + 1 < update->assignment_count; i++) {
-            if (names_equal(&update->assignments[i].column, &assignment->column)) {
+        (*count)++;
+        for (size_t i = 0; i + 1 < *count; i++) {
+            if (names_equal(&(*assignments)[i].column, &assignment->column)) {
                 return fail(p, SQLSTMT_SYNTAX, SQLSTMT_REASON_DUPLICATE_COLUMN, offset);
             }
         }
         if (!expect_punct(p, "=") || !parse_expr(p, &assignment->value)) return false;
     } while (take_punct(p, ","));
+    return true;
+}
+
+static bool parse_update(parser_t *p, sqlstmt_t *statement)
+{
+    sqlstmt_update_t *update = &statement->update;
+    statement->kind = SQLSTMT_UPDATE;
+    if (!parse_name(p, &update->table, false) || !expect_word(p, "SET")) return false;
+    if (!parse_assignments(p, &update->assignments, &update->assignment_count)) return false;
     if (!parse_where(p, &update->where)) return false;
     return parse_returning(p, &update->returning) && parse_end(p);
+}
+
+/* ON CONFLICT ... (ON은 호출자가 읽었다) */
+static bool parse_conflict(parser_t *p, sqlstmt_conflict_t *conflict)
+{
+    conflict->present = true;
+    if (!expect_word(p, "CONFLICT")) return false;
+    if (take_punct(p, "(")) {
+        conflict->has_target = true;
+        if (!parse_name(p, &conflict->target, false)) return false;
+        if (punct_is(current(p), ",")) {
+            return fail(p, SQLSTMT_UNSUPPORTED, SQLSTMT_REASON_UNSUPPORTED_CLAUSE, here_offset(p));
+        }
+        if (!expect_punct(p, ")")) return false;
+    }
+    if (!expect_word(p, "DO")) return false;
+    if (take_word(p, "NOTHING")) return true;
+    size_t offset = here_offset(p);
+    if (!expect_word(p, "UPDATE")) return false;
+    /* 어느 행과 충돌했는지 알아야 갱신할 수 있다(PostgreSQL과 같음) */
+    if (!conflict->has_target) return fail(p, SQLSTMT_SYNTAX, SQLSTMT_REASON_EXPECTED_KEYWORD, offset);
+    conflict->do_update = true;
+    if (!expect_word(p, "SET") || !parse_assignments(p, &conflict->assignments, &conflict->assignment_count)) {
+        return false;
+    }
+    return parse_where(p, &conflict->where);
 }
 
 static bool parse_insert(parser_t *p, sqlstmt_t *statement)
@@ -1384,6 +1424,7 @@ static bool parse_insert(parser_t *p, sqlstmt_t *statement)
         if (!expect_word(p, "VALUES")) return false;
         insert->has_columns = true;
         insert->row_count = 1;
+        if (take_word(p, "ON") && !parse_conflict(p, &insert->conflict)) return false;
         return parse_returning(p, &insert->returning) && parse_end(p);
     }
     if (!expect_word(p, "VALUES")) return false;
@@ -1410,6 +1451,7 @@ static bool parse_insert(parser_t *p, sqlstmt_t *statement)
         }
         insert->row_count++;
     } while (take_punct(p, ","));
+    if (take_word(p, "ON") && !parse_conflict(p, &insert->conflict)) return false;
     return parse_returning(p, &insert->returning) && parse_end(p);
 failed:
     /* 해제는 row_count × value_count를 따르므로 끝나지 않은 행의 값은 여기서 지운다 */

@@ -1882,6 +1882,288 @@ static database_exec_status_t returning_finish(database_t *db, returning_t *ret,
                                                result_t **success);
 static void returning_close(database_t *db, returning_t *ret);
 
+/* ── INSERT ... ON CONFLICT ── */
+
+/* 충돌을 볼 유일 제약: 기본 키 색인이거나 batch의 유일 보조 색인 */
+typedef struct {
+    size_t column;
+    bool primary;
+    size_t index;
+} conflict_target_t;
+
+/* 이 문장에서 넣거나 바꾼 행(DO UPDATE가 같은 행을 두 번 바꾸지 않게 한다) */
+typedef struct {
+    uint64_t *slots;            /* 0은 빈 자리. 값은 (directory_index << 16 | slot) + 1 */
+    size_t cap;
+    size_t count;
+} locator_set_t;
+
+typedef struct {
+    const sqlstmt_conflict_t *spec;
+    conflict_target_t targets[1 + CATALOG_MAX_INDEXES];
+    size_t target_count;
+    source_ref_t sources[2];    /* 이미 있는 행, excluded */
+    resolver_t existing;        /* sources[0]만. 바깥 열을 보는 서브쿼리가 쓴다 */
+    size_t *columns;            /* SET 대상 열 */
+    sqleval_prog_t **progs;
+    sqleval_prog_t *where;
+    value_t *combined;          /* [이미 있는 행 n][excluded n] */
+    value_view_t *views;
+    size_t n;
+    locator_set_t touched;
+    uint64_t updated;
+} conflict_t;
+
+static const sqlstmt_name_t EXCLUDED_NAME = {(uint8_t *)"excluded", 8};
+
+static uint64_t locator_key(heap_locator_t at) { return (((uint64_t)at.directory_index << 16) | at.slot) + 1; }
+
+static size_t locator_slot(const locator_set_t *set, uint64_t key)
+{
+    size_t at = (size_t)(key * UINT64_C(0x9E3779B97F4A7C15) >> 32) & (set->cap - 1);
+    while (set->slots[at] != 0 && set->slots[at] != key) at = (at + 1) & (set->cap - 1);
+    return at;
+}
+
+static bool locator_seen(const locator_set_t *set, heap_locator_t at)
+{
+    return set->cap > 0 && set->slots[locator_slot(set, locator_key(at))] != 0;
+}
+
+static database_exec_status_t locator_add(database_t *db, locator_set_t *set, heap_locator_t at)
+{
+    if ((set->count + 1) * 2 > set->cap) {
+        size_t cap = set->cap == 0 ? 64 : set->cap * 2;
+        uint64_t *grown = q_calloc(db, cap, sizeof(uint64_t));
+        if (grown == NULL) return DATABASE_EXEC_NOMEM;
+        locator_set_t bigger = {grown, cap, 0};
+        for (size_t i = 0; i < set->cap; i++) {
+            if (set->slots[i] != 0) bigger.slots[locator_slot(&bigger, set->slots[i])] = set->slots[i];
+        }
+        bigger.count = set->count;
+        q_free(db, set->slots, set->cap * sizeof(uint64_t));
+        *set = bigger;
+    }
+    size_t slot = locator_slot(set, locator_key(at));
+    if (set->slots[slot] == 0) {
+        set->slots[slot] = locator_key(at);
+        set->count++;
+    }
+    return DATABASE_EXEC_OK;
+}
+
+/*
+ * DO UPDATE 식의 열: excluded.c는 넣으려던 값, 테이블.c는 이미 있는 행. 한정 없는 이름은 두 쪽에 다 있어 모호하다
+ * (PostgreSQL과 같음. SQLite는 이미 있는 행으로 받아 서로 다르다)
+ */
+static size_t conflict_resolve(void *ctx, const sqlstmt_name_t *qualifier, const sqlstmt_name_t *name,
+                               value_type_t *type)
+{
+    conflict_t *c = ctx;
+    bool excluded = qualifier->size == EXCLUDED_NAME.size && memcmp(qualifier->bytes, EXCLUDED_NAME.bytes, 8) == 0;
+    resolver_t one = {&c->sources[excluded ? 1 : 0], 1};
+    const sqlstmt_name_t none = {NULL, 0};
+    size_t column = resolve_column(&one, excluded ? &none : qualifier, name, type);
+    return qualifier->size == 0 && column != SQLEVAL_NO_COLUMN ? SQLEVAL_AMBIGUOUS : column;
+}
+
+static bool conflict_compile(database_t *db, conflict_t *c, const sqlexpr_t *expr, sqleval_prog_t **prog,
+                             database_exec_status_t *status)
+{
+    sqleval_error_t error = {SQLEVAL_OK, 0, NULL};
+    sqleval_env_t env = {conflict_resolve, NULL, c, subquery_hook, db, outer_hook};
+    const resolver_t *saved = db->compile_resolver;
+    db->compile_resolver = &c->existing;
+    sqleval_status_t compiled = sqleval_compile(expr, &env, prog, &error);
+    db->compile_resolver = saved;
+    if (compiled == SQLEVAL_OK) return true;
+    *status = eval_failure(db, &error);
+    return false;
+}
+
+static void conflict_close(database_t *db, conflict_t *c)
+{
+    size_t count = c->spec != NULL ? c->spec->assignment_count : 0;
+    for (size_t i = 0; c->progs != NULL && i < count; i++) sqleval_free(c->progs[i]);
+    q_free(db, c->progs, (count > 0 ? count : 1) * sizeof(sqleval_prog_t *));
+    q_free(db, c->columns, (count > 0 ? count : 1) * sizeof(size_t));
+    sqleval_free(c->where);
+    if (c->combined != NULL) owned_clear(db, c->combined + c->n, c->n);
+    q_free(db, c->combined, (c->n > 0 ? 2 * c->n : 1) * sizeof(value_t));
+    q_free(db, c->views, (c->n > 0 ? c->n : 1) * sizeof(value_view_t));
+    q_free(db, c->touched.slots, c->touched.cap * sizeof(uint64_t));
+    memset(c, 0, sizeof(*c));
+}
+
+static bool unique_indexed(const catalog_t *catalog, catalog_table_id_t id, size_t column, size_t *index)
+{
+    size_t count = catalog_index_count(catalog, id);
+    for (size_t i = 0; i < count; i++) {
+        catalog_index_view_t view;
+        if (catalog_index_at(catalog, id, i, &view) == CATALOG_OK && view.unique && view.column == column) {
+            *index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static database_exec_status_t conflict_open(database_t *db, const sqlstmt_insert_t *insert,
+                                            const catalog_table_view_t *view, catalog_table_id_t id, bool indexed,
+                                            conflict_t *c)
+{
+    memset(c, 0, sizeof(*c));
+    const sqlstmt_conflict_t *spec = &insert->conflict;
+    if (!spec->present) return DATABASE_EXEC_OK;
+    c->spec = spec;
+    c->n = view->column_count;
+    const catalog_t *catalog = base_catalog(db);
+    size_t pk = view->primary_key_column;
+    if (spec->has_target) {
+        size_t column = find_column(view, &spec->target);
+        if (column == SIZE_MAX) return unknown_column(db, &spec->target);
+        size_t index = 0;
+        if (column == pk && indexed) {
+            c->targets[c->target_count++] = (conflict_target_t){column, true, 0};
+        } else if (unique_indexed(catalog, id, column, &index)) {
+            c->targets[c->target_count++] = (conflict_target_t){column, false, index};
+        } else {
+            return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_CONFLICT, "ON CONFLICT 대상 열에 유일 색인이 없습니다: %.*s",
+                               name_len(spec->target.size), (const char *)spec->target.bytes);
+        }
+    } else {
+        if (pk != NO_COLUMN) {
+            if (!indexed) {
+                return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_CONFLICT, "색인이 없는 기본 키에는 ON CONFLICT를 쓸 수 없습니다");
+            }
+            c->targets[c->target_count++] = (conflict_target_t){pk, true, 0};
+        }
+        size_t count = catalog_index_count(catalog, id);
+        for (size_t i = 0; i < count; i++) {
+            catalog_index_view_t index;
+            if (catalog_index_at(catalog, id, i, &index) == CATALOG_OK && index.unique) {
+                c->targets[c->target_count++] = (conflict_target_t){index.column, false, i};
+            }
+        }
+    }
+    c->combined = q_calloc(db, c->n > 0 ? 2 * c->n : 1, sizeof(value_t));
+    c->views = q_malloc(db, (c->n > 0 ? c->n : 1) * sizeof(value_view_t));
+    if (c->combined == NULL || c->views == NULL) return DATABASE_EXEC_NOMEM;
+    if (!spec->do_update) return DATABASE_EXEC_OK;
+    c->sources[0] = (source_ref_t){view, &insert->table, NULL, 0, false};
+    c->sources[1] = (source_ref_t){view, &EXCLUDED_NAME, NULL, c->n, false};
+    c->existing = (resolver_t){&c->sources[0], 1};
+    size_t count = spec->assignment_count;
+    c->columns = q_calloc(db, count > 0 ? count : 1, sizeof(size_t));
+    c->progs = q_calloc(db, count > 0 ? count : 1, sizeof(sqleval_prog_t *));
+    if (c->columns == NULL || c->progs == NULL) return DATABASE_EXEC_NOMEM;
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    for (size_t i = 0; i < count; i++) {
+        const sqlstmt_assignment_t *assignment = &spec->assignments[i];
+        size_t column = find_column(view, &assignment->column);
+        if (column == SIZE_MAX) return unknown_column(db, &assignment->column);
+        size_t unused;
+        if (column == pk || unique_indexed(catalog, id, column, &unused)) {
+            return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_CONFLICT,
+                               "ON CONFLICT DO UPDATE로 기본 키나 유일 색인 열은 바꿀 수 없습니다: %.*s",
+                               name_len(assignment->column.size), (const char *)assignment->column.bytes);
+        }
+        c->columns[i] = column;
+        if (!conflict_compile(db, c, assignment->value, &c->progs[i], &status)) return status;
+    }
+    if (spec->where != NULL) {
+        if (!conflict_compile(db, c, spec->where, &c->where, &status)) return status;
+        value_type_t type = sqleval_type(c->where);
+        if (type != VALUE_INTEGER && type != VALUE_NULL) {
+            return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_TYPE, "ON CONFLICT의 WHERE 조건은 참·거짓이어야 합니다");
+        }
+    }
+    return DATABASE_EXEC_OK;
+}
+
+/* 넣으려는 행이 대상 제약 중 하나와 충돌하면 그 행의 위치를 준다 */
+static database_exec_status_t conflict_find(database_t *db, conflict_t *c, heap_batch_t *batch, const value_t *cells,
+                                            bool *found, heap_locator_t *at)
+{
+    *found = false;
+    for (size_t t = 0; t < c->target_count && !*found; t++) {
+        const conflict_target_t *target = &c->targets[t];
+        const value_view_t *value = &cells[target->column].view;
+        if (value->type == VALUE_NULL) continue;  /* NULL은 어떤 값과도 충돌하지 않는다 */
+        heap_status_t looked = target->primary ? heap_batch_find_key(batch, value, at)
+                                               : heap_batch_secondary_find(batch, target->index, value, at);
+        if (looked == HEAP_OK) *found = true;
+        else if (looked != HEAP_NOT_FOUND) return heap_failure(db, looked, "conflict lookup");
+    }
+    return DATABASE_EXEC_OK;
+}
+
+/* DO UPDATE: 충돌한 행을 SET으로 바꾼다. WHERE가 거짓이면 아무것도 하지 않는다 */
+static database_exec_status_t conflict_update(database_t *db, conflict_t *c, heap_t *heap, heap_batch_t *batch,
+                                              const catalog_table_view_t *view, heap_locator_t at, const value_t *cells,
+                                              returning_t *ret)
+{
+    if (locator_seen(&c->touched, at)) {
+        return fail_result(db, RESULT_E_CONSTRAINT, DATABASE_CODE_CONFLICT,
+                           "ON CONFLICT DO UPDATE는 한 문장에서 같은 행을 두 번 바꿀 수 없습니다");
+    }
+    size_t n = c->n;
+    value_t *existing = c->combined;
+    memset(existing, 0, n * sizeof(value_t));
+    heap_status_t got = heap_batch_get(batch, at, existing);
+    if (got != HEAP_OK) return heap_failure(db, got, "conflict row");
+    for (size_t i = 0; i < n; i++) c->combined[n + i] = (value_t){cells[i].view, false};
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    bool apply = true;
+    if (c->where != NULL) {
+        sqleval_error_t error = {SQLEVAL_OK, 0, NULL};
+        if (sqleval_test(c->where, c->combined, &apply, &error) != SQLEVAL_OK) status = eval_failure(db, &error);
+    }
+    size_t count = c->spec->assignment_count;
+    value_t *fresh = NULL;
+    size_t fresh_bytes = (count > 0 ? count : 1) * sizeof(value_t);
+    if (status == DATABASE_EXEC_OK && apply) {
+        fresh = q_calloc(db, count > 0 ? count : 1, sizeof(value_t));
+        if (fresh == NULL) status = DATABASE_EXEC_NOMEM;
+    }
+    for (size_t i = 0; status == DATABASE_EXEC_OK && apply && i < count; i++) {
+        value_t computed = {0};
+        sqleval_error_t error = {SQLEVAL_OK, 0, NULL};
+        if (sqleval_run(c->progs[i], c->combined, &computed, &error) != SQLEVAL_OK) {
+            status = eval_failure(db, &error);
+            break;
+        }
+        const catalog_column_t *column = &view->columns[c->columns[i]];
+        bool cast = cast_for_column(db, &computed.view, column, &fresh[i], &status);
+        value_clear(&computed);
+        if (cast && column->not_null && fresh[i].view.type == VALUE_NULL) status = not_null_violation(db, column);
+    }
+    if (status == DATABASE_EXEC_OK && apply) {
+        for (size_t i = 0; i < n; i++) c->views[i] = existing[i].view;
+        heap_status_t changed = heap_batch_secondary_remove(batch, c->views, n, at);
+        for (size_t i = 0; i < count; i++) c->views[c->columns[i]] = fresh[i].view;
+        heap_locator_t placed = at;
+        if (changed == HEAP_OK) changed = heap_batch_update(batch, at, c->views, n, &placed);
+        if (changed == HEAP_OK) changed = heap_batch_secondary_insert(batch, c->views, n, placed);
+        if (changed != HEAP_OK) status = heap_failure(db, changed, "conflict update");
+        if (status == DATABASE_EXEC_OK) status = locator_add(db, &c->touched, at);
+        if (status == DATABASE_EXEC_OK) status = locator_add(db, &c->touched, placed);
+        if (status == DATABASE_EXEC_OK && ret != NULL) {
+            /* 돌려줄 행: 이미 있는 행 자리를 바뀐 값으로 빌려 쓴다 */
+            value_t *row = c->combined + n;
+            for (size_t i = 0; i < n; i++) row[i] = (value_t){c->views[i], false};
+            status = returning_row(ret, row);
+        }
+        if (status == DATABASE_EXEC_OK) c->updated++;
+    }
+    if (fresh != NULL) owned_clear(db, fresh, count);
+    q_free(db, fresh, fresh_bytes);
+    heap_release_row(heap, existing);
+    memset(c->combined, 0, 2 * n * sizeof(value_t));
+    return status;
+}
+
+
 static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t *insert, result_t **out)
 {
     database_exec_status_t status = DATABASE_EXEC_OK;
@@ -1903,6 +2185,9 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
     heap_batch_t *batch = NULL;
     work_t work = {NULL, 0};
     result_t *success = NULL;
+    conflict_t conflict;
+    memset(&conflict, 0, sizeof(conflict));
+    uint64_t inserted_rows = 0;
     if (cells == NULL || source == NULL || views == NULL) {
         status = DATABASE_EXEC_NOMEM;
         goto done;
@@ -1948,6 +2233,8 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
     }
     size_t pk = view.primary_key_column;
     bool indexed = heap_is_indexed(heap);
+    status = conflict_open(db, insert, &view, id, indexed, &conflict);
+    if (status != DATABASE_EXEC_OK) goto done;
     bool max_known = false, any = false;
     int64_t max_key = INT64_MIN;
     if (pk != NO_COLUMN && !indexed) {
@@ -1978,6 +2265,27 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
             bool cast = cast_for_column(db, &computed.view, &view.columns[i], &cells[i], &status);
             value_clear(&computed);
             if (!cast) goto done;
+        }
+        if (conflict.spec != NULL) {
+            /* 넣으려는 행의 NOT NULL을 먼저 본다(자동 번호 키는 아직 비어 있다) */
+            for (size_t i = 0; i < n; i++) {
+                bool auto_key = i == pk && view.has_identity;
+                if (!auto_key && view.columns[i].not_null && cells[i].view.type == VALUE_NULL) {
+                    status = not_null_violation(db, &view.columns[i]);
+                    goto done;
+                }
+            }
+            bool found = false;
+            heap_locator_t at;
+            status = conflict_find(db, &conflict, batch, cells, &found, &at);
+            if (status != DATABASE_EXEC_OK) goto done;
+            if (found) {
+                if (conflict.spec->do_update) {
+                    status = conflict_update(db, &conflict, heap, batch, &view, at, cells, ret);
+                    if (status != DATABASE_EXEC_OK) goto done;
+                }
+                continue;
+            }
         }
         bool auto_id = pk != NO_COLUMN && view.has_identity && cells[pk].view.type == VALUE_NULL;
         bool check_pk = pk != NO_COLUMN && cells[pk].view.type != VALUE_NULL;
@@ -2050,13 +2358,15 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
             goto done;
         }
         status = returning_row(ret, cells);
+        if (status == DATABASE_EXEC_OK && conflict.spec != NULL) status = locator_add(db, &conflict.touched, placed);
         if (status != DATABASE_EXEC_OK) goto done;
+        inserted_rows++;
     }
-    if (catalog_set_row_count(work.cat, id, view.row_count + insert->row_count) != CATALOG_OK) {
+    if (catalog_set_row_count(work.cat, id, view.row_count + inserted_rows) != CATALOG_OK) {
         status = fail_result(db, RESULT_E_LIMIT, 14, "행 수 한도를 넘습니다");
         goto done;
     }
-    status = returning_finish(db, ret, "INSERT", insert->row_count, &success);
+    status = returning_finish(db, ret, "INSERT", inserted_rows + conflict.updated, &success);
     if (status != DATABASE_EXEC_OK) goto done;
     status = publish(db, &work, id, batch, NULL, 0, success, out);
     success = NULL;
@@ -2069,6 +2379,7 @@ done:
     result_release(&success);
     if (earlier != NULL) owned_clear(db, earlier, earlier_count);
     q_free(db, earlier, earlier_bytes);
+    conflict_close(db, &conflict);
     returning_close(db, ret);
     q_free(db, views, views_bytes);
     if (cells != NULL) owned_clear(db, cells, n);

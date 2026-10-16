@@ -395,6 +395,9 @@ static const statement_case_t CASES[] = {
     {"update returning", "UPDATE users SET bio = ? WHERE id <= 3 RETURNING id, bio", true},
     {"delete returning", "DELETE FROM users WHERE id = 2 RETURNING *", false},
     {"insert returning", "INSERT INTO users (name, bio) VALUES ('ret', ?) RETURNING id, name", true},
+    {"upsert update", "INSERT INTO users (id, name, bio) VALUES (1, 'up', ?) ON CONFLICT (id) DO UPDATE SET bio = excluded.bio "
+                      "RETURNING id", true},
+    {"upsert mixed", "INSERT INTO users (id, name) VALUES (3, 'x'), (77, 'new') ON CONFLICT DO NOTHING", false},
     {"build secondary index", "CREATE INDEX by_log_msg ON logs (msg)", false},
     {"drop indexed", "DROP TABLE users", false},
 };
