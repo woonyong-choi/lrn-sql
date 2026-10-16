@@ -31,7 +31,11 @@ struct tote_db {
     session_t *running;           /* cancel_lock 안에서만 읽고 쓴다 */
     size_t live_queues;           /* mutex 안에서만 바꾼다 */
     size_t live_txns;
+    pid_t owner;                  /* 연 프로세스. fork한 자식은 mutex를 잡기 전에 거절한다 */
 };
+
+/* 자식은 fork 순간 다른 스레드가 쥔 mutex를 영원히 기다릴 수 있으므로 잠그기 전에 확인한다 */
+static bool forked(const tote_db_t *db) { return db->owner != getpid(); }
 
 struct tote_queue {
     tote_db_t *db;
@@ -67,6 +71,7 @@ const char *tote_status_name(int status)
         case TOTE_DB_UNSUPPORTED: return "DB_UNSUPPORTED";
         case TOTE_DB_NOMEM: return "DB_NOMEM";
         case TOTE_DB_NOT_FOUND: return "DB_NOT_FOUND";
+        case TOTE_DB_FORKED: return "DB_FORKED";
         default: return ackq_status_name((ackq_status_t)status);
     }
 }
@@ -85,6 +90,7 @@ static int map_database_status(database_status_t status)
         case DATABASE_LOCKED: return TOTE_DB_LOCKED;
         case DATABASE_UNSUPPORTED: return TOTE_DB_UNSUPPORTED;
         case DATABASE_NOMEM: return TOTE_DB_NOMEM;
+        case DATABASE_FORKED: return TOTE_DB_FORKED;
         default: return TOTE_DB_INVALID;
     }
 }
@@ -137,6 +143,7 @@ int tote_open(const char *path, int create, tote_db_t **out)
     }
     pthread_mutex_init(&handle->mutex, NULL);
     pthread_mutex_init(&handle->cancel_lock, NULL);
+    handle->owner = getpid();
     *out = handle;
     return TOTE_OK;
 }
@@ -145,6 +152,7 @@ int tote_close(tote_db_t **db)
 {
     if (db == NULL || *db == NULL) return TOTE_OK;
     tote_db_t *handle = *db;
+    if (forked(handle)) return TOTE_DB_FORKED;
     pthread_mutex_lock(&handle->mutex);
     if (handle->live_queues > 0 || handle->live_txns > 0) {
         pthread_mutex_unlock(&handle->mutex);
@@ -165,7 +173,7 @@ int tote_close(tote_db_t **db)
 
 void tote_cancel(tote_db_t *db)
 {
-    if (db == NULL) return;
+    if (db == NULL || forked(db)) return;
     pthread_mutex_lock(&db->cancel_lock);
     if (db->running != NULL) session_cancel(db->running);
     pthread_mutex_unlock(&db->cancel_lock);
@@ -358,6 +366,7 @@ int tote_exec(tote_db_t *db, tote_txn_t *txn, const char *sql, const tote_param_
     *out = NULL;
     *out_size = 0;
     if (txn != NULL && txn->db != db) return ACKQ_INVALID;   /* 다른 database의 트랜잭션은 실행 전에 거절 */
+    if (forked(db)) return TOTE_DB_FORKED;
     value_view_t *views;
     int status = build_views(params, param_count, &views);
     if (status != TOTE_OK) return status;
@@ -410,6 +419,7 @@ int tote_begin(tote_db_t *db, tote_txn_t **out)
 {
     if (db == NULL || out == NULL) return ACKQ_INVALID;
     *out = NULL;
+    if (forked(db)) return TOTE_DB_FORKED;
     tote_txn_t *handle = calloc(1, sizeof(*handle));
     if (handle == NULL) return ACKQ_NOMEM;
     session_txn_options_t options = {TXN_GUARANTEE_DURABLE, 0};
@@ -445,6 +455,7 @@ int tote_commit(tote_txn_t **txn)
 {
     if (txn == NULL || *txn == NULL) return ACKQ_INVALID;
     tote_db_t *db = (*txn)->db;
+    if (forked(db)) return TOTE_DB_FORKED;
     pthread_mutex_lock(&db->mutex);
     txn_status_t status = session_txn_commit((*txn)->session, NULL);
     /* 실패 상태(INVALID)이면 트랜잭션이 남으므로 rollback으로 정리한다 */
@@ -458,6 +469,7 @@ int tote_rollback(tote_txn_t **txn)
 {
     if (txn == NULL || *txn == NULL) return ACKQ_INVALID;
     tote_db_t *db = (*txn)->db;
+    if (forked(db)) return TOTE_DB_FORKED;
     pthread_mutex_lock(&db->mutex);
     txn_status_t status = session_txn_rollback((*txn)->session);
     forget_txn(txn);
@@ -477,6 +489,7 @@ int tote_queue_open(tote_db_t *db, const char *name, int install, const tote_que
 {
     if (db == NULL || out == NULL) return ACKQ_INVALID;
     *out = NULL;
+    if (forked(db)) return TOTE_DB_FORKED;
     static const tote_queue_options_t defaults = {0};
     const tote_queue_options_t *given = options != NULL ? options : &defaults;
     tote_queue_t *handle = calloc(1, sizeof(*handle));
@@ -507,6 +520,7 @@ void tote_queue_close(tote_queue_t **queue)
 {
     if (queue == NULL || *queue == NULL) return;
     tote_db_t *db = (*queue)->db;
+    if (forked(db)) return;
     pthread_mutex_lock(&db->mutex);
     ackq_close(&(*queue)->queue);
     db->live_queues--;
@@ -522,6 +536,7 @@ void tote_queue_close(tote_queue_t **queue)
 #define QUEUE_CALL(q, txn, call)                                              \
     do {                                                                      \
         if ((q) == NULL || ((txn) != NULL && (txn)->db != (q)->db)) return ACKQ_INVALID; \
+        if (forked((q)->db)) return TOTE_DB_FORKED;                           \
         pthread_mutex_lock(&(q)->db->mutex);                                  \
         session_t *session = session_for((q)->db, (txn));                    \
         set_running((q)->db, session);                                        \

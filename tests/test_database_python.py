@@ -2,7 +2,7 @@
 
 경쟁 갱신: 조건부 원자 갱신(UPDATE ... WHERE 상태 조건 RETURNING)으로 여러 스레드가 같은 행을 다퉈도
 한 행은 한 번만 바뀌고(이중 claim 없음), 더하기 갱신은 하나도 잃지 않는다(분실 갱신 없음).
-파일 하나는 핸들 하나로만 열 수 있으므로(두 번째 열기는 DB_LOCKED) 스레드는 한 핸들을 같이 쓴다.
+이 시험의 스레드는 한 핸들을 같이 쓴다. 여러 핸들·프로세스의 공유는 tests/test_multiprocess.py가 시험한다.
 """
 
 from __future__ import annotations

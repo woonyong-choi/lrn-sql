@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "storage/page_file.h"
@@ -94,6 +95,10 @@ struct page_file {
     size_t cache_pages;     /* 이 핸들의 캐시 상한. 계상은 이 값으로 한다 */
     page_cache_t *cache;    /* 처음 쓰일 때 만든다. 만들지 못하면 NULL로 두고 캐시 없이 동작한다 */
     bool cache_tried;
+    pid_t owner;            /* 연 프로세스. fork한 자식은 이 핸들을 쓰지 않는다 */
+    page_file_lock_t lock;  /* 지금 쥔 잠금 */
+    uint32_t lock_timeout_ms;
+    bool stale;             /* 버린 변경이 남았다. 다음 잠금에서 디스크의 게시 상태로 다시 읽는다 */
 };
 
 static ssize_t libc_pread(int fd, void *buf, size_t size, off_t offset)
@@ -109,8 +114,11 @@ static ssize_t libc_pwrite(int fd, const void *buf, size_t size, off_t offset)
 static const page_file_io_t LIBC_IO = {libc_pread, libc_pwrite, fsync, link, unlink};
 static page_file_io_t g_default_io = {libc_pread, libc_pwrite, fsync, link, unlink};
 static size_t g_default_cache_pages = PAGE_FILE_CACHE_PAGES;
+static uint32_t g_default_lock_timeout_ms = PAGE_FILE_LOCK_TIMEOUT_MS;
 
 void page_file_set_default_cache_pages(size_t pages) { g_default_cache_pages = pages; }
+
+void page_file_set_default_lock_timeout(uint32_t timeout_ms) { g_default_lock_timeout_ms = timeout_ms; }
 
 void page_file_set_default_io(const page_file_io_t *io)
 {
@@ -338,6 +346,8 @@ static page_file_t *new_handle(int fd, bool writable)
     file->writable = writable;
     file->io = g_default_io;
     file->cache_pages = g_default_cache_pages;
+    file->owner = getpid();
+    file->lock_timeout_ms = g_default_lock_timeout_ms;
     return file;
 }
 
@@ -366,10 +376,44 @@ static char *copy_string(const char *text, const char *suffix)
     return copy;
 }
 
-static page_file_status_t lock_fd(int fd, bool exclusive)
+static uint64_t monotonic_us(void)
 {
-    if (flock(fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) == 0) return PAGE_FILE_OK;
-    return errno == EWOULDBLOCK ? PAGE_FILE_LOCKED : PAGE_FILE_IO;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000u + (uint64_t)now.tv_nsec / 1000u;
+}
+
+/* 바쁘면 100µs에서 2ms까지 늘려 쉬며 다시 시도한다. 대기 상한을 넘으면 LOCKED다 */
+static page_file_status_t lock_fd(int fd, page_file_lock_t mode, uint32_t timeout_ms)
+{
+    int operation = mode == PAGE_FILE_LOCK_EXCLUSIVE ? LOCK_EX : LOCK_SH;
+    uint64_t deadline = monotonic_us() + (uint64_t)timeout_ms * 1000u;
+    long pause_us = 100;
+    for (;;) {
+        if (flock(fd, operation | LOCK_NB) == 0) return PAGE_FILE_OK;
+        if (errno == EINTR) continue;
+        if (errno != EWOULDBLOCK) return PAGE_FILE_IO;
+        if (monotonic_us() >= deadline) {
+            errno = EWOULDBLOCK;
+            return PAGE_FILE_LOCKED;
+        }
+        struct timespec pause = {0, pause_us * 1000};
+        nanosleep(&pause, NULL);
+        if (pause_us < 2000) pause_us *= 2;
+    }
+}
+
+static bool forked(const page_file_t *file) { return file->owner != getpid(); }
+
+/* 연산 앞 공통 검사. 연 프로세스이고, 읽기는 잠금, 변경은 배타 잠금을 쥐어야 한다 */
+static page_file_status_t check_access(const page_file_t *file, page_file_lock_t needed)
+{
+    if (forked(file)) return PAGE_FILE_FORKED;
+    if (needed == PAGE_FILE_LOCK_EXCLUSIVE && (!file->writable || file->lock != PAGE_FILE_LOCK_EXCLUSIVE)) {
+        return PAGE_FILE_INVALID;
+    }
+    if (needed == PAGE_FILE_LOCK_SHARED && file->lock == PAGE_FILE_LOCK_NONE) return PAGE_FILE_INVALID;
+    return PAGE_FILE_OK;
 }
 
 /* ── 생성·게시 ── */
@@ -392,7 +436,7 @@ page_file_status_t page_file_create(const char *path, page_file_t **out)
         free(final_path);
         return PAGE_FILE_NOMEM;
     }
-    int fd = open(partial, O_RDWR | O_CREAT | O_EXCL, 0644);
+    int fd = open(partial, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
     if (fd < 0) {
         int err = errno;
         free(partial);
@@ -410,7 +454,8 @@ page_file_status_t page_file_create(const char *path, page_file_t **out)
     }
     file->path = final_path;
     file->partial_path = partial;
-    page_file_status_t status = lock_fd(fd, true);
+    page_file_status_t status = lock_fd(fd, PAGE_FILE_LOCK_EXCLUSIVE, file->lock_timeout_ms);
+    if (status == PAGE_FILE_OK) file->lock = PAGE_FILE_LOCK_EXCLUSIVE;
     uint8_t zero[PAGE_FILE_PAGE_BYTES] = {0};
     for (uint32_t slot = 0; status == PAGE_FILE_OK && slot < PAGE_FILE_CONTROL_PAGES; slot++) {
         status = write_full(file, zero, sizeof(zero), (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
@@ -465,6 +510,7 @@ page_file_status_t page_file_publish(page_file_t *file)
         file->committed.generation == 0) {
         return PAGE_FILE_INVALID;
     }
+    if (forked(file)) return PAGE_FILE_FORKED;
     page_file_status_t status = sync_file(file);
     if (status != PAGE_FILE_OK) return status;
     /* link는 목적지가 이미 있으면 실패한다. rename은 조용히 덮어쓰므로 쓰지 않는다. */
@@ -557,6 +603,66 @@ static page_file_status_t pick_control(const uint8_t pages[2][PAGE_FILE_PAGE_BYT
     return PAGE_FILE_OK;
 }
 
+/*
+ * 두 제어 페이지를 읽어 세대가 큰 쪽을 고른다. 열기와 page_file_lock이 함께 쓴다. 그 commit이 끝났는지는 아직 보지
+ * 않는다(verify_published). pages에는 두 제어 페이지, file_bytes에는 파일 길이가 남는다.
+ */
+static page_file_status_t read_controls(page_file_t *file, uint8_t pages[2][PAGE_FILE_PAGE_BYTES],
+                                        page_file_control_t *chosen, free_header_t *chosen_free,
+                                        page_file_open_info_t *info, uint64_t *file_bytes)
+{
+    struct stat st;
+    page_file_status_t status = PAGE_FILE_OK;
+    if (fstat(file->fd, &st) != 0) {
+        status = PAGE_FILE_IO;
+    } else if (st.st_size == 0) {
+        status = PAGE_FILE_NO_CONTROL;
+    } else if (st.st_size < (off_t)(PAGE_FILE_CONTROL_PAGES * PAGE_FILE_PAGE_BYTES)) {
+        /* 제어 페이지 두 장보다 짧다. 읽은 앞부분이 0뿐이거나 파일 magic이 있으면 잘린 ToteDB 파일, 다른 내용이면 다른 형식이다 */
+        memset(pages[0], 0, PAGE_FILE_PAGE_BYTES);
+        size_t head = st.st_size < (off_t)PAGE_FILE_PAGE_BYTES ? (size_t)st.st_size : PAGE_FILE_PAGE_BYTES;
+        status = read_full(file, pages[0], head, 0);
+        if (status == PAGE_FILE_OK) {
+            status = is_blank(pages[0]) || has_file_magic(pages[0]) ? PAGE_FILE_CORRUPT : PAGE_FILE_UNSUPPORTED;
+        }
+    }
+    for (uint32_t slot = 0; status == PAGE_FILE_OK && slot < 2; slot++) {
+        status = read_full(file, pages[slot], PAGE_FILE_PAGE_BYTES, (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
+    }
+    /* 두 제어 페이지 어디에도 파일 magic이 없고 비어 있지도 않으면 ToteDB 파일이 아니다. 바꾸지 않고 거절한다 */
+    if (status == PAGE_FILE_OK && !has_file_magic(pages[0]) && !has_file_magic(pages[1]) &&
+        !(is_blank(pages[0]) && is_blank(pages[1]))) {
+        status = PAGE_FILE_UNSUPPORTED;
+    }
+    if (status == PAGE_FILE_OK) status = pick_control(pages, -1, chosen, chosen_free, info);
+    if (status == PAGE_FILE_OK) *file_bytes = (uint64_t)st.st_size;
+    return status;
+}
+
+/* 고른 commit이 끝나지 않았으면(fsync 전에 멈춤) 이전 세대로 바꾼다. 이전 세대도 끝나지 않았으면 손상이다 */
+static page_file_status_t verify_published(page_file_t *file, const uint8_t pages[2][PAGE_FILE_PAGE_BYTES],
+                                           page_file_control_t *chosen, free_header_t *chosen_free,
+                                           page_file_open_info_t *info, uint64_t file_bytes)
+{
+    int newest = (int)(chosen->generation % 2);
+    page_file_status_t status = commit_complete(file, pages[newest], chosen, chosen_free, file_bytes);
+    if (status != PAGE_FILE_CORRUPT) return status;
+    status = pick_control(pages, newest, chosen, chosen_free, info);
+    if (status == PAGE_FILE_NO_CONTROL) return PAGE_FILE_CORRUPT;
+    if (status != PAGE_FILE_OK) return status;
+    return commit_complete(file, pages[chosen->generation % 2], chosen, chosen_free, file_bytes);
+}
+
+static void adopt_published(page_file_t *file, const page_file_control_t *chosen, uint64_t file_bytes)
+{
+    file->committed = *chosen;
+    file->page_count = chosen->page_count;
+    file->file_bytes = file_bytes;
+    file->staged_head = chosen->catalog_head;
+    file->staged_size = chosen->catalog_size;
+    file->staged_generation = chosen->catalog_generation;
+}
+
 page_file_status_t page_file_open(const char *path, bool writable, page_file_t **out,
                                   page_file_open_info_t *info)
 {
@@ -568,9 +674,10 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
                                            void *ctx)
 {
     if (path == NULL || out == NULL) return PAGE_FILE_INVALID;
-    int fd = open(path, writable ? O_RDWR : O_RDONLY);
+    int fd = open(path, (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC);
     if (fd < 0) return PAGE_FILE_IO;
-    page_file_status_t status = lock_fd(fd, writable);
+    page_file_status_t status = lock_fd(fd, writable ? PAGE_FILE_LOCK_EXCLUSIVE : PAGE_FILE_LOCK_SHARED,
+                                        g_default_lock_timeout_ms);
     if (status != PAGE_FILE_OK) {
         int err = errno;
         close(fd);
@@ -604,47 +711,12 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
     }
 
     uint8_t pages[2][PAGE_FILE_PAGE_BYTES];
-    struct stat st;
     page_file_control_t chosen;
     free_header_t chosen_free;
     page_file_open_info_t local_info;
-    status = PAGE_FILE_OK;
-    if (fstat(fd, &st) != 0) {
-        status = PAGE_FILE_IO;
-    } else if (st.st_size == 0) {
-        status = PAGE_FILE_NO_CONTROL;
-    } else if (st.st_size < (off_t)(PAGE_FILE_CONTROL_PAGES * PAGE_FILE_PAGE_BYTES)) {
-        /* 제어 페이지 두 장보다 짧다. 읽은 앞부분이 0뿐이거나 파일 magic이 있으면 잘린 ToteDB 파일, 다른 내용이면 다른 형식이다 */
-        memset(pages[0], 0, PAGE_FILE_PAGE_BYTES);
-        size_t head = st.st_size < (off_t)PAGE_FILE_PAGE_BYTES ? (size_t)st.st_size : PAGE_FILE_PAGE_BYTES;
-        status = read_full(file, pages[0], head, 0);
-        if (status == PAGE_FILE_OK) {
-            status = is_blank(pages[0]) || has_file_magic(pages[0]) ? PAGE_FILE_CORRUPT : PAGE_FILE_UNSUPPORTED;
-        }
-    }
-    for (uint32_t slot = 0; status == PAGE_FILE_OK && slot < 2; slot++) {
-        status = read_full(file, pages[slot], PAGE_FILE_PAGE_BYTES,
-                           (uint64_t)slot * PAGE_FILE_PAGE_BYTES);
-    }
-    /* 두 제어 페이지 어디에도 파일 magic이 없고 비어 있지도 않으면 ToteDB 파일이 아니다. 바꾸지 않고 거절한다 */
-    if (status == PAGE_FILE_OK && !has_file_magic(pages[0]) && !has_file_magic(pages[1]) &&
-        !(is_blank(pages[0]) && is_blank(pages[1]))) {
-        status = PAGE_FILE_UNSUPPORTED;
-    }
-    if (status == PAGE_FILE_OK) status = pick_control(pages, -1, &chosen, &chosen_free, &local_info);
-    if (status == PAGE_FILE_OK) {
-        /* 최신 commit이 끝나지 않았으면(fsync 전에 멈춤) 이전 세대로 연다. 이전 세대도 끝나지 않았으면 손상이다 */
-        int newest = (int)(chosen.generation % 2);
-        status = commit_complete(file, pages[newest], &chosen, &chosen_free, (uint64_t)st.st_size);
-        if (status == PAGE_FILE_CORRUPT) {
-            status = pick_control(pages, newest, &chosen, &chosen_free, &local_info);
-            if (status == PAGE_FILE_NO_CONTROL) status = PAGE_FILE_CORRUPT;
-            if (status == PAGE_FILE_OK) {
-                status = commit_complete(file, pages[chosen.generation % 2], &chosen, &chosen_free,
-                                         (uint64_t)st.st_size);
-            }
-        }
-    }
+    uint64_t file_bytes = 0;
+    status = read_controls(file, pages, &chosen, &chosen_free, &local_info, &file_bytes);
+    if (status == PAGE_FILE_OK) status = verify_published(file, pages, &chosen, &chosen_free, &local_info, file_bytes);
     if (status == PAGE_FILE_OK && writable) {
         /* 빈 목록은 쓰기 핸들만 쓴다. 읽기 핸들은 읽지 않는다 */
         file->page_count = chosen.page_count;
@@ -657,13 +729,9 @@ page_file_status_t page_file_open_admitted(const char *path, bool writable, page
         errno = err;
         return status;
     }
-    file->committed = chosen;
-    file->page_count = chosen.page_count;
-    file->file_bytes = (uint64_t)st.st_size;
+    adopt_published(file, &chosen, file_bytes);
     file->published = true;
-    file->staged_head = chosen.catalog_head;
-    file->staged_size = chosen.catalog_size;
-    file->staged_generation = chosen.catalog_generation;
+    file->lock = writable ? PAGE_FILE_LOCK_EXCLUSIVE : PAGE_FILE_LOCK_SHARED;
     if (info != NULL) *info = local_info;
     *out = file;
     return PAGE_FILE_OK;
@@ -673,10 +741,115 @@ page_file_status_t page_file_close(page_file_t *file)
 {
     if (file == NULL) return PAGE_FILE_INVALID;
     page_file_status_t status = PAGE_FILE_OK;
-    if (!file->published && file->partial_path != NULL) file->io.unlink(file->partial_path);
+    /* fork한 자식의 close는 부모가 만드는 partial을 지우지 않는다. fd만 닫아 부모의 잠금도 그대로다 */
+    if (!file->published && file->partial_path != NULL && !forked(file)) file->io.unlink(file->partial_path);
     if (close(file->fd) != 0) status = PAGE_FILE_IO;
     free_handle(file);
     return status;
+}
+
+/* 쓰기 핸들의 빈 목록·페이지 상태를 비운다. 디스크에서 다시 읽기 전에 쓴다 */
+static void reset_free_state(page_file_t *file)
+{
+    if (file->state != NULL) memset(file->state, PS_USED, file->state_cap);
+    file->pending.len = 0;
+    file->aging.len = 0;
+    file->reusable.len = 0;
+    file->fresh.len = 0;
+    file->chain.len = 0;
+    file->manifest_len = 0;
+    file->needs_barrier = false;
+}
+
+/*
+ * 잠금을 얻은 직후 게시 상태를 디스크와 맞춘다. 세대가 같고 버린 변경이 없으면 그대로 둔다. 다르면 제어 상태와
+ * (쓰기 핸들은) 빈 목록을 다시 읽고 캐시를 비운다. 실패하면 stale로 남겨 다음 잠금이 다시 시도한다.
+ */
+static page_file_status_t sync_published(page_file_t *file, bool *changed)
+{
+    uint8_t pages[2][PAGE_FILE_PAGE_BYTES];
+    page_file_control_t chosen;
+    free_header_t chosen_free;
+    page_file_open_info_t info;
+    uint64_t file_bytes = 0;
+    page_file_status_t status = read_controls(file, pages, &chosen, &chosen_free, &info, &file_bytes);
+    if (status != PAGE_FILE_OK) return status;
+    /* 이 핸들이 쓰거나 확인한 세대 그대로면 manifest 대조 없이 쓴다. 문장마다 manifest 페이지를 다시 읽지 않기 위해서다 */
+    if (!file->stale && chosen.generation == file->committed.generation) {
+        file->file_bytes = file_bytes;
+        return PAGE_FILE_OK;
+    }
+    status = verify_published(file, pages, &chosen, &chosen_free, &info, file_bytes);
+    if (status != PAGE_FILE_OK) return status;
+    if (!file->stale && chosen.generation == file->committed.generation) {
+        /* 더 새 세대는 끝나지 않은 commit이었다(쓰던 핸들이 멈춤). 아는 세대가 여전히 게시 상태다 */
+        file->file_bytes = file_bytes;
+        return PAGE_FILE_OK;
+    }
+    file->stale = true;
+    if (file->writable) {
+        reset_free_state(file);
+        file->page_count = chosen.page_count;
+        status = load_free_list(file, pages[chosen.generation % 2], &chosen_free);
+        if (status != PAGE_FILE_OK) return status;
+    }
+    adopt_published(file, &chosen, file_bytes);
+    page_cache_destroy(file->cache);
+    file->cache = NULL;
+    file->cache_tried = false;
+    file->stale = false;
+    *changed = true;
+    return PAGE_FILE_OK;
+}
+
+void page_file_set_lock_timeout(page_file_t *file, uint32_t timeout_ms)
+{
+    if (file != NULL) file->lock_timeout_ms = timeout_ms;
+}
+
+page_file_lock_t page_file_lock_mode(const page_file_t *file)
+{
+    return file != NULL ? file->lock : PAGE_FILE_LOCK_NONE;
+}
+
+page_file_status_t page_file_lock(page_file_t *file, page_file_lock_t mode, bool *changed)
+{
+    bool ignored = false;
+    if (changed == NULL) changed = &ignored;
+    *changed = false;
+    if (file == NULL || !file->published || mode == PAGE_FILE_LOCK_NONE) return PAGE_FILE_INVALID;
+    if (forked(file)) return PAGE_FILE_FORKED;
+    if (file->lock != PAGE_FILE_LOCK_NONE || (mode == PAGE_FILE_LOCK_EXCLUSIVE && !file->writable)) {
+        return PAGE_FILE_INVALID;
+    }
+    page_file_status_t status = lock_fd(file->fd, mode, file->lock_timeout_ms);
+    if (status != PAGE_FILE_OK) return status;
+    file->lock = mode;
+    status = sync_published(file, changed);
+    if (status != PAGE_FILE_OK) {
+        int err = errno;
+        flock(file->fd, LOCK_UN);
+        file->lock = PAGE_FILE_LOCK_NONE;
+        errno = err;
+    }
+    return status;
+}
+
+page_file_status_t page_file_unlock(page_file_t *file)
+{
+    if (file == NULL || !file->published || file->lock == PAGE_FILE_LOCK_NONE) return PAGE_FILE_INVALID;
+    if (forked(file)) return PAGE_FILE_FORKED;
+    /* commit하지 않은 변경(새 페이지, 보류 해제, 카탈로그 지정)은 버린다. 다음 잠금이 디스크 상태로 다시 읽는다 */
+    if (file->lock == PAGE_FILE_LOCK_EXCLUSIVE &&
+        (file->fresh.len > 0 || file->pending.len > 0 || file->manifest_len > 0 || file->needs_barrier ||
+         file->page_count != file->committed.page_count || file->staged_head != file->committed.catalog_head ||
+         file->staged_size != file->committed.catalog_size ||
+         file->staged_generation != file->committed.catalog_generation)) {
+        file->stale = true;
+    }
+    if (flock(file->fd, LOCK_UN) != 0) return PAGE_FILE_IO;
+    file->lock = PAGE_FILE_LOCK_NONE;
+    return PAGE_FILE_OK;
 }
 
 const page_file_control_t *page_file_control(const page_file_t *file)
@@ -770,6 +943,8 @@ page_file_status_t page_file_read(page_file_t *file, uint32_t page_id, page_kind
                                   uint32_t table_id, uint8_t body[PAGE_BODY_BYTES])
 {
     if (file == NULL || body == NULL || kind == PAGE_KIND_CONTROL) return PAGE_FILE_INVALID;
+    page_file_status_t access = check_access(file, PAGE_FILE_LOCK_SHARED);
+    if (access != PAGE_FILE_OK) return access;
     if (!data_page_in_range(file, page_id)) return PAGE_FILE_INVALID;
     uint16_t cached_kind;
     uint32_t cached_table;
@@ -798,6 +973,8 @@ page_file_status_t page_file_write(page_file_t *file, uint32_t page_id, page_kin
     if (file == NULL || body == NULL || !file->writable || kind == PAGE_KIND_CONTROL || kind == PAGE_KIND_FREE_LIST) {
         return PAGE_FILE_INVALID;
     }
+    page_file_status_t access = check_access(file, PAGE_FILE_LOCK_EXCLUSIVE);
+    if (access != PAGE_FILE_OK) return access;
     if (!data_page_in_range(file, page_id)) return PAGE_FILE_INVALID;
     if (file->poisoned) {
         /* 게시 결과를 모르는 핸들은 어느 세대가 가리킬지 모르는 페이지를 덮어쓰지 않는다 */
@@ -822,9 +999,10 @@ page_file_status_t page_file_write(page_file_t *file, uint32_t page_id, page_kin
 page_file_status_t page_file_page_info(page_file_t *file, uint32_t page_id,
                                        page_file_page_info_t *info)
 {
-    if (file == NULL || info == NULL || !data_page_in_range(file, page_id)) {
-        return PAGE_FILE_INVALID;
-    }
+    if (file == NULL || info == NULL) return PAGE_FILE_INVALID;
+    page_file_status_t access = check_access(file, PAGE_FILE_LOCK_SHARED);
+    if (access != PAGE_FILE_OK) return access;
+    if (!data_page_in_range(file, page_id)) return PAGE_FILE_INVALID;
     uint8_t page[PAGE_FILE_PAGE_BYTES];
     envelope_t envelope;
     uint16_t cached_kind;
@@ -881,7 +1059,9 @@ static bool ensure_capacity(page_file_t *file, size_t n)
 
 page_file_status_t page_file_alloc(page_file_t *file, uint32_t *page_id)
 {
-    if (file == NULL || page_id == NULL || !file->writable) return PAGE_FILE_INVALID;
+    if (file == NULL || page_id == NULL) return PAGE_FILE_INVALID;
+    page_file_status_t access = check_access(file, PAGE_FILE_LOCK_EXCLUSIVE);
+    if (access != PAGE_FILE_OK) return access;
     if (file->poisoned) {
         errno = EIO;
         return PAGE_FILE_IO;
@@ -904,9 +1084,10 @@ page_file_status_t page_file_alloc(page_file_t *file, uint32_t *page_id)
 
 page_file_status_t page_file_release(page_file_t *file, uint32_t page_id)
 {
-    if (file == NULL || !file->writable || !data_page_in_range(file, page_id)) {
-        return PAGE_FILE_INVALID;
-    }
+    if (file == NULL) return PAGE_FILE_INVALID;
+    page_file_status_t access = check_access(file, PAGE_FILE_LOCK_EXCLUSIVE);
+    if (access != PAGE_FILE_OK) return access;
+    if (!data_page_in_range(file, page_id)) return PAGE_FILE_INVALID;
     switch ((page_state_t)file->state[page_id]) {
         case PS_USED:
             file->state[page_id] = PS_PENDING;
@@ -930,14 +1111,14 @@ bool page_file_is_fresh(const page_file_t *file, uint32_t page_id)
 
 void page_file_restore_pending(page_file_t *file)
 {
-    if (file == NULL || !file->writable) return;
+    if (file == NULL || check_access(file, PAGE_FILE_LOCK_EXCLUSIVE) != PAGE_FILE_OK) return;
     for (size_t i = 0; i < file->pending.len; i++) file->state[file->pending.items[i]] = PS_USED;
     file->pending.len = 0;
 }
 
 void page_file_release_fresh(page_file_t *file)
 {
-    if (file == NULL || !file->writable) return;
+    if (file == NULL || check_access(file, PAGE_FILE_LOCK_EXCLUSIVE) != PAGE_FILE_OK) return;
     for (size_t i = 0; i < file->fresh.len; i++) {
         uint32_t id = file->fresh.items[i];
         if (file->state[id] != PS_FRESH) continue;
@@ -1029,7 +1210,9 @@ static page_file_status_t load_free_list(page_file_t *file, const uint8_t *contr
 page_file_status_t page_file_stage_catalog(page_file_t *file, uint32_t head, uint32_t size,
                                            uint64_t catalog_generation)
 {
-    if (file == NULL || !file->writable) return PAGE_FILE_INVALID;
+    if (file == NULL) return PAGE_FILE_INVALID;
+    page_file_status_t access = check_access(file, PAGE_FILE_LOCK_EXCLUSIVE);
+    if (access != PAGE_FILE_OK) return access;
     if ((head == PAGE_FILE_NO_PAGE) != (size == 0)) return PAGE_FILE_INVALID;
     if (head != PAGE_FILE_NO_PAGE && !data_page_in_range(file, head)) return PAGE_FILE_INVALID;
     file->staged_head = head;
@@ -1067,7 +1250,9 @@ static void undo_chain(page_file_t *file, const id_list_t *chain)
 
 page_file_status_t page_file_commit(page_file_t *file)
 {
-    if (file == NULL || !file->writable) return PAGE_FILE_INVALID;
+    if (file == NULL) return PAGE_FILE_INVALID;
+    page_file_status_t access = check_access(file, PAGE_FILE_LOCK_EXCLUSIVE);
+    if (access != PAGE_FILE_OK) return access;
     if (file->poisoned) {
         /* 거절한 호출이 poison을 일으킨 commit의 결과를 덮어쓰지 않는다. */
         errno = EIO;

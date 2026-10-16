@@ -32,7 +32,7 @@ $(TOTEDB_SHARED_LIB): $(TOTEDB_SHARED_SRCS) $(wildcard include/*/*.h) $(wildcard
 TOTEDB_PYTHON ?= $(PYTHON)
 
 test-ack-queue-python: $(TOTEDB_SHARED_LIB)
-	TOTEDB_LIB=$(abspath $(TOTEDB_SHARED_LIB)) PYTHONPATH=python $(TOTEDB_PYTHON) -m pytest -q tests/test_ack_queue_python.py tests/test_ack_queue_markchain_contract.py tests/test_database_python.py
+	TOTEDB_LIB=$(abspath $(TOTEDB_SHARED_LIB)) PYTHONPATH=python $(TOTEDB_PYTHON) -m pytest -q tests/test_ack_queue_python.py tests/test_ack_queue_markchain_contract.py tests/test_database_python.py tests/test_multiprocess.py
 
 # 새 엔진·SQLite·PostgreSQL 3자 SQL 차분. SQLDIFF_DSN이 있으면 PostgreSQL까지 반드시 비교한다(psycopg 필요).
 test-sql-diff: $(TOTEDB_SHARED_LIB)

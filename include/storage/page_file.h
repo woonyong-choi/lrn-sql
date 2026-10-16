@@ -27,7 +27,7 @@
  * - 여러 페이지 갱신의 원자성은 없다. commit 순서는 page_file_commit에 있다.
  * 빈 페이지 목록(재사용 가능·한 세대 대기)은 commit마다 제어 페이지에 함께 쓴다. 제어 페이지 본문에 다 들어가지
  * 않으면 나머지를 PAGE_KIND_FREE_LIST 사슬 페이지에 쓴다. 그래서 다시 열어도 놓은 페이지가 새지 않는다.
- * 단일 스레드 계약이다.
+ * 한 핸들은 단일 스레드 계약이다. 여러 핸들·프로세스가 같은 파일을 함께 쓰는 규칙은 아래 "여러 프로세스" 절에 있다.
  */
 
 #define PAGE_FILE_PAGE_BYTES 8192u
@@ -58,10 +58,11 @@ typedef enum {
     PAGE_FILE_UNSUPPORTED,  /* 알 수 없는 version·페이지 크기·byte order, ToteDB 파일이 아님 */
     PAGE_FILE_NO_CONTROL,   /* 유효한 제어 페이지가 없음. 게시되지 않은 파일 */
     PAGE_FILE_EXISTS,       /* 목적지 또는 partial 파일이 이미 있음 */
-    PAGE_FILE_LOCKED,       /* 다른 열린 핸들이 잠금을 쥐고 있음 */
+    PAGE_FILE_LOCKED,       /* 다른 핸들이 잠금을 쥐고 있어 대기 상한 안에 얻지 못함 */
     PAGE_FILE_NOMEM,
     PAGE_FILE_LIMIT,        /* 페이지 번호 한계 */
-    PAGE_FILE_PUBLISHED_DIRTY  /* 게시는 됐으나 partial 삭제 또는 디렉터리 fsync가 실패함 */
+    PAGE_FILE_PUBLISHED_DIRTY,  /* 게시는 됐으나 partial 삭제 또는 디렉터리 fsync가 실패함 */
+    PAGE_FILE_FORKED        /* 핸들을 연 프로세스가 아님(fork한 자식). 파일을 바꾸지 않았다 */
 } page_file_status_t;
 
 /* 테스트가 실패를 주입하는 자리. 기본값은 libc다. */
@@ -80,7 +81,7 @@ void page_file_set_default_io(const page_file_io_t *io);
  * 읽기 캐시. 핸들마다 체크섬을 검증한 데이터 페이지 본문을 최대 PAGE_FILE_CACHE_PAGES장 담는다. 적중한 읽기는
  * pread와 체크섬 계산 없이 복사만 한다. 쓰기는 pwrite가 성공한 뒤에만 캐시를 갱신하고 실패하면 그 페이지를 뺀다.
  * 그래서 캐시는 그 핸들이 검증했거나 디스크에 쓴 바이트와 언제나 같다. 손상 페이지는 담지 않는다.
- * 쓰기 핸들은 파일을 배타 잠금하므로 다른 핸들이 같은 파일을 바꾸는 일은 계약 밖이다.
+ * 다른 핸들이 게시하면 page_file_lock이 캐시를 비운다. 잠금 밖에서는 읽지 않으므로 낡은 페이지를 돌려주지 않는다.
  * 프레임 메모리는 처음 쓰일 때 할당하며 할당에 실패하면 그 핸들은 캐시 없이 동작한다.
  */
 #define PAGE_FILE_CACHE_PAGES 256u
@@ -135,7 +136,8 @@ page_file_status_t page_file_publish(page_file_t *file);
 
 /*
  * 게시된 파일을 연다. 쓰기 전에는 아무것도 쓰지 않으며 version·길이·header가 맞지 않으면
- * 파일을 바꾸지 않고 거절한다. writable이면 배타, 아니면 공유 잠금을 non-blocking으로 잡는다.
+ * 파일을 바꾸지 않고 거절한다. writable이면 배타, 아니면 공유 잠금을 잡은 채 돌려준다. 다른 핸들이 잠금을 쥐고 있으면
+ * 대기 상한(page_file_set_default_lock_timeout)까지 기다리고 넘으면 PAGE_FILE_LOCKED다.
  * 두 제어 페이지 어디에도 파일 magic("TOTEDB")이 없는 파일은 PAGE_FILE_UNSUPPORTED다(다른 형식 파일). 제어 페이지
  * 두 장보다 짧은 파일은 앞부분이 0뿐이거나 magic이 있으면 잘린 파일(CORRUPT), 아니면 UNSUPPORTED다. 어떤 경우에도
  * 자동으로 변환하지 않는다.
@@ -263,6 +265,38 @@ typedef bool (*page_file_admit_fn)(void *ctx, uint64_t file_bytes);
 page_file_status_t page_file_open_admitted(const char *path, bool writable, page_file_t **out,
                                            page_file_open_info_t *info, page_file_admit_fn admit,
                                            void *ctx);
+
+/*
+ * 여러 프로세스(#199). 같은 컴퓨터의 여러 핸들이 같은 파일을 열고, 쓰기 거래는 한 번에 하나씩 실행한다.
+ * - 열기·생성은 잠금을 쥔 채 돌려준다. 함께 쓰려면 page_file_unlock으로 놓고, 읽기 전에 공유, 바꾸기 전에 배타 잠금을
+ *   page_file_lock으로 잡는다. 잠금은 열린 파일 설명마다(flock) 걸리므로 같은 프로세스의 두 핸들도 서로를 기다린다.
+ * - page_file_lock은 잠금을 얻은 뒤 디스크의 게시 상태를 열기와 같은 규칙(끝나지 않은 commit이면 이전 세대)으로 다시 읽는다.
+ *   다른 핸들이 그 사이 게시했으면 제어 상태·빈 목록을 다시 읽고 캐시를 비우며 changed를 true로 알린다.
+ * - 잠금이 없으면 읽기도 INVALID다. 다른 핸들의 commit이 놓은 페이지를 두 세대 뒤 다시 쓸 수 있기 때문이다.
+ *   할당·해제·쓰기·카탈로그 지정·commit은 배타 잠금이 있어야 한다.
+ * - 배타 잠금을 놓을 때 commit하지 않은 변경이 남았으면 버린 것으로 보고 다음 page_file_lock이 디스크 상태로 다시 읽는다.
+ * - 핸들은 연 프로세스에서만 쓴다. fork한 자식이 물려받은 핸들은 close 말고 모든 연산이 PAGE_FILE_FORKED이며 파일을
+ *   바꾸지 않는다. 자식의 close는 부모의 잠금과 partial 파일을 건드리지 않는다. exec한 자식에게는 fd가 넘어가지 않는다.
+ * - 잠금 대기는 바쁜 동안 짧게 쉬며 다시 시도하고, 대기 상한을 넘으면 PAGE_FILE_LOCKED다.
+ */
+#define PAGE_FILE_LOCK_TIMEOUT_MS 5000u
+
+typedef enum {
+    PAGE_FILE_LOCK_NONE,
+    PAGE_FILE_LOCK_SHARED,
+    PAGE_FILE_LOCK_EXCLUSIVE
+} page_file_lock_t;
+
+/* 이후 열리는 핸들의 잠금 대기 상한(밀리초). 0이면 기다리지 않는다. 기본 PAGE_FILE_LOCK_TIMEOUT_MS. 테스트용 */
+void page_file_set_default_lock_timeout(uint32_t timeout_ms);
+/* 이 핸들의 잠금 대기 상한(밀리초) */
+void page_file_set_lock_timeout(page_file_t *file, uint32_t timeout_ms);
+/* 잠금을 잡고 게시 상태를 디스크와 맞춘다. 이미 잠금을 쥐었으면(승격 포함) INVALID, 게시 전 핸들도 INVALID다.
+ * 읽기 핸들의 배타 잠금은 INVALID다. 실패하면 잠금을 쥐지 않는다. changed는 NULL이어도 된다. */
+page_file_status_t page_file_lock(page_file_t *file, page_file_lock_t mode, bool *changed);
+/* 잠금을 놓는다. 쥔 잠금이 없거나 게시 전 핸들이면 INVALID다 */
+page_file_status_t page_file_unlock(page_file_t *file);
+page_file_lock_t page_file_lock_mode(const page_file_t *file);
 
 /*
  * overflow 어댑터. 본문 8160바이트를 한 overflow 페이지로 쓴다. ctx 저장소는 호출자가 소유하며

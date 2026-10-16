@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -893,16 +894,159 @@ static void test_unfinished_and_autocommit(void)
     database_close(db);
 }
 
-/* ── 7. 지원하지 않는 열기 ── */
+/* ── 7. 같은 파일의 두 핸들(#199) ── */
 
-static void test_open_rejections(void)
+static void check_accounting(database_t *db, const char *who)
 {
-    printf("\n[열기 거절]\n");
+    database_page_check_t check;
+    CHECK(database_check_pages(db, &check) == DATABASE_OK && check.orphaned == 0 && check.conflicts == 0,
+          "%s 페이지 회계: 고아 %llu, 충돌 %llu", who, (unsigned long long)check.orphaned,
+          (unsigned long long)check.conflicts);
+}
+
+static void test_two_handles(void)
+{
+    printf("\n[같은 파일의 두 핸들]\n");
     prepare_base();
-    /* 같은 파일을 두 번 쓰기로 열 수 없다 */
+    database_t *a = open_tx();
+    database_t *b = open_tx();
+    CHECK(a != NULL && b != NULL, "같은 파일을 두 핸들로 연다");
+    if (a == NULL || b == NULL) {
+        database_close(a);
+        database_close(b);
+        return;
+    }
+    /* 한쪽이 commit하면 다른 쪽의 다음 문장이 새 행과 새 테이블을 본다 */
+    exec_ok(a, NULL, "INSERT INTO u VALUES (2, 'two')");
+    expect(b, NULL, "SELECT * FROM u", "[2] 1|'one'/ 2|'two'");
+    exec_ok(b, NULL, "CREATE TABLE w (x INTEGER)");
+    exec_ok(b, NULL, "INSERT INTO w VALUES (7)");
+    expect(a, NULL, "SELECT * FROM w", "[1] 7");
+    /* 한쪽의 쓰기 거래가 열린 동안 다른 쪽은 기다리지 않고 BUSY다. 1단계라 읽기도 BUSY다 */
+    txn_begin_options_t o = rw(TXN_GUARANTEE_DURABLE, 0);
+    database_txn_t *txn = NULL;
+    CHECK(database_txn_begin(a, &o, &txn) == TXN_OK, "a의 쓰기 거래");
+    exec_ok(a, txn, "INSERT INTO u VALUES (3, 'three')");
+    database_txn_t *other = NULL;
+    CHECK(database_txn_begin(b, &o, &other) == TXN_BUSY && other == NULL, "a가 쓰는 동안 b의 BEGIN은 BUSY");
+    char *blocked = run(b, NULL, "INSERT INTO u VALUES (9, 'x')", NULL, 0);
+    /* 거래 계층의 자동 commit은 쓰기 시작에서 막혀 writer BUSY(29)다. 읽기는 문장 잠금에서 막혀 30이다 */
+    CHECK(strcmp(blocked, "ERR 7/29") == 0, "a가 쓰는 동안 b의 변경은 BUSY: %s", blocked);
+    free(blocked);
+    char *read = run(b, NULL, "SELECT * FROM u", NULL, 0);
+    CHECK(strcmp(read, "ERR 7/30") == 0, "a가 쓰는 동안 b의 읽기는 파일 잠금 BUSY: %s", read);
+    free(read);
+    txn_commit_info_t info;
+    CHECK(database_txn_commit(txn, &info) == TXN_OK && info.outcome == TXN_OUTCOME_APPLIED, "a commit");
+    database_txn_release(&txn);
+    expect(b, NULL, "SELECT * FROM u", "[3] 1|'one'/ 2|'two'/ 3|'three'");
+    /* b가 버린 거래는 a에 보이지 않고, 그 뒤 a의 변경을 b가 다시 읽는다 */
+    CHECK(database_txn_begin(b, &o, &other) == TXN_OK, "b의 쓰기 거래");
+    exec_ok(b, other, "INSERT INTO u VALUES (4, 'four')");
+    CHECK(database_txn_rollback(other) == TXN_OK, "b rollback");
+    database_txn_release(&other);
+    expect(a, NULL, "SELECT * FROM u", "[3] 1|'one'/ 2|'two'/ 3|'three'");
+    exec_ok(a, NULL, "DELETE FROM u WHERE k = 1");
+    expect(b, NULL, "SELECT * FROM u", "[2] 2|'two'/ 3|'three'");
+    check_accounting(a, "a");
+    check_accounting(b, "b");
+    CHECK(database_close(a) == DATABASE_OK && database_close(b) == DATABASE_OK, "두 핸들 닫기");
+}
+
+/* ── 8. 쓰는 도중 강제 종료되는 여러 프로세스(#199) ── */
+
+/* 자식 프로세스: 자기 핸들로 큰 값 갱신·행 추가·카운터 증가를 한 거래로 계속 확정한다. 다른 writer가 있으면 다시 시도 */
+static void writer_child(int worker)
+{
+    database_t *db = NULL;
+    if (database_open_transactional(DB, NULL, &db) != DATABASE_OK) _exit(2);
+    txn_begin_options_t o = rw(TXN_GUARANTEE_DURABLE, 0);
+    for (int64_t i = 0;; i++) {
+        database_txn_t *txn = NULL;
+        txn_status_t begun = database_txn_begin(db, &o, &txn);
+        if (begun == TXN_BUSY) {
+            usleep(200);
+            i--;
+            continue;
+        }
+        if (begun != TXN_OK) _exit(3);
+        char sql[96];
+        snprintf(sql, sizeof(sql), "INSERT INTO w VALUES (%lld)", (long long)(worker * 1000000 + i));
+        char *added = run(db, txn, sql, NULL, 0);
+        char *counted = run(db, txn, "UPDATE c SET n = n + 1 WHERE id = 1", NULL, 0);
+        bool ok = is_ok(added) && is_ok(counted) &&
+                  run_bound_ok(db, txn, "UPDATE u SET tag = ? WHERE k = ?", 3, 9000 + (size_t)(i % 7) * 900, (char)i);
+        free(added);
+        free(counted);
+        txn_commit_info_t info;
+        if (!ok || database_txn_commit(txn, &info) != TXN_OK) _exit(4);
+        database_txn_release(&txn);
+    }
+}
+
+/* writer가 쓰는 동안 읽기는 BUSY(7/30)다. Python 바인딩처럼 짧게 쉬며 다시 시도한다 */
+static char *run_until_free(database_t *db, const char *sql)
+{
+    for (int attempt = 0;; attempt++) {
+        char *line = run(db, NULL, sql, NULL, 0);
+        if (strncmp(line, "ERR 7/", 6) != 0 || attempt == 20000) return line;
+        free(line);
+        usleep(250);
+    }
+}
+
+static int64_t counter_of(database_t *db)
+{
+    char *line = run_until_free(db, "SELECT n FROM c");
+    long long n = -1;
+    sscanf(line, "[1] %lld", &n);
+    free(line);
+    return n;
+}
+
+static void test_processes_killed_while_writing(void)
+{
+    printf("\n[쓰는 도중 강제 종료되는 여러 프로세스]\n");
+    g_large_values = true;
+    prepare_base();
+    g_large_values = false;
     database_t *db = open_tx();
-    database_t *second = NULL;
-    CHECK(database_open_transactional(DB, NULL, &second) == DATABASE_LOCKED && second == NULL, "이중 열기는 LOCKED");
+    exec_ok(db, NULL, "CREATE TABLE w (k INTEGER PRIMARY KEY)");
+    exec_ok(db, NULL, "CREATE TABLE c (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)");
+    exec_ok(db, NULL, "INSERT INTO c VALUES (1, 0)");
+    pid_t children[3];
+    for (int i = 0; i < 3; i++) {
+        children[i] = fork();
+        if (children[i] == 0) writer_child(i + 1);
+    }
+    /* 둘을 차례로 죽이고, 그 사이에도 남은 writer가 계속 확정하는지 본다 */
+    int64_t seen = 0;
+    for (int i = 0; i < 2; i++) {
+        usleep(300000);
+        kill(children[i], SIGKILL);
+        waitpid(children[i], NULL, 0);
+        seen = counter_of(db);
+        usleep(300000);
+        int64_t later = counter_of(db);
+        CHECK(later > seen, "%d번째 강제 종료 뒤 남은 writer가 계속 쓴다(%lld → %lld)", i + 1, (long long)seen,
+              (long long)later);
+    }
+    kill(children[2], SIGKILL);
+    int status = 0;
+    waitpid(children[2], &status, 0);
+    CHECK(WIFSIGNALED(status), "마지막 writer는 오류 없이 쓰다가 종료됨");
+    /* 거래마다 w 한 행과 카운터 1 증가를 함께 확정했다. 반만 적용된 거래가 있으면 둘이 다르다 */
+    char *rows = run_until_free(db, "SELECT COUNT(*) FROM w");
+    char expected[64];
+    snprintf(expected, sizeof(expected), "[1] %lld", (long long)counter_of(db));
+    CHECK(strcmp(rows, expected) == 0, "w 행 수와 카운터가 같다: %s / %s", rows, expected);
+    free(rows);
+    check_accounting(db, "강제 종료 뒤");
+    database_close(db);
+    /* 다시 열어도 같고, 이어서 쓸 수 있다 */
+    db = open_tx();
+    check_accounting(db, "다시 연 뒤");
+    exec_ok(db, NULL, "INSERT INTO w VALUES (-1)");
     database_close(db);
 }
 
@@ -920,7 +1064,8 @@ int main(void)
     test_crash_points();
     g_large_values = false;
     test_unfinished_and_autocommit();
-    test_open_rejections();
+    test_two_handles();
+    test_processes_killed_while_writing();
     fresh_dir();
     rmdir(DIR_NAME);
     printf("\n%d checks, %d failed\n", g_run, g_fail);
