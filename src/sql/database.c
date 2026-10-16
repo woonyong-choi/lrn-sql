@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3326,63 +3327,229 @@ static database_exec_status_t plan_groups(database_t *db, const sqlstmt_select_t
     return status;
 }
 
-/* 행마다 GROUP BY 값과 집계 인자를 모은다 */
+static int compare_group_keys(const void *ctx, const value_t *a, const value_t *b);
+
+/*
+ * 해시 집계. 그룹마다 [GROUP BY 값][집계 결과] 칸과 집계 누적 상태만 두므로 메모리는 입력 행 수가 아니라 그룹 수에
+ * 비례한다. DISTINCT 집계만 그룹 안의 NULL 아닌 값을 모아 끝에서 중복을 없앤다. 그룹 키의 같음은 sqleval_compare와
+ * 같다(1과 1.0은 같은 그룹, NULL끼리 한 그룹).
+ */
+typedef struct {
+    int64_t present;            /* NULL 아닌 인자 수(COUNT(*)는 행 수) */
+    __int128 whole;             /* 정수 합. 행마다 int64라 2^63행까지 넘치지 않는다 */
+    double real;
+    value_t best;               /* MIN·MAX 후보 */
+    value_t *seen;              /* DISTINCT 집계의 값 */
+    size_t seen_count, seen_cap;
+} agg_state_t;
+
+typedef struct {
+    uint64_t hash;
+    value_t *cells;             /* group_width칸. 키는 모을 때, 집계 결과는 내보낼 때 채운다 */
+    agg_state_t *states;
+} group_t;
+
 typedef struct {
     database_t *db;
     const group_plan_t *plan;
-    value_t **entries;
+    group_t **slots;            /* 열린 주소법 표. 크기는 2의 거듭제곱 */
+    size_t slot_cap;
+    group_t **groups;           /* 만든 순서 */
     size_t count;
     size_t cap;
+    value_t *keys;              /* 이번 행의 키 */
 } group_rows_t;
 
 static size_t group_width(const group_plan_t *plan) { return plan->key_count + plan->agg_count; }
+
+static uint64_t mix_hash(uint64_t hash, uint64_t word)
+{
+    hash ^= word + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
+/* sqleval_compare로 같은 값은 같은 해시. 정수값 REAL은 같은 정수로 본다 */
+static uint64_t value_hash(const value_view_t *v)
+{
+    switch (v->type) {
+        case VALUE_NULL: return UINT64_C(0x6e756c6c);
+        case VALUE_INTEGER: return mix_hash(1, (uint64_t)v->integer);
+        case VALUE_REAL:
+            if (v->real == floor(v->real) && v->real >= -9223372036854775808.0 && v->real < 9223372036854775808.0) {
+                return mix_hash(1, (uint64_t)(int64_t)v->real);
+            } else {
+                uint64_t bits;
+                memcpy(&bits, &v->real, sizeof(bits));
+                return mix_hash(2, bits);
+            }
+        default: {
+            uint64_t hash = UINT64_C(1469598103934665603) ^ (uint64_t)v->type;
+            for (size_t i = 0; i < v->size_bytes; i++) hash = (hash ^ v->bytes[i]) * UINT64_C(1099511628211);
+            return mix_hash(3, hash);
+        }
+    }
+}
+
+static bool group_table_grow(group_rows_t *rows)
+{
+    database_t *db = rows->db;
+    size_t cap = rows->slot_cap == 0 ? 64 : rows->slot_cap * 2;
+    if (cap > SIZE_MAX / sizeof(group_t *)) return false;
+    group_t **slots = q_calloc(db, cap, sizeof(group_t *));
+    if (slots == NULL) return false;
+    for (size_t i = 0; i < rows->count; i++) {
+        size_t at = (size_t)rows->groups[i]->hash & (cap - 1);
+        while (slots[at] != NULL) at = (at + 1) & (cap - 1);
+        slots[at] = rows->groups[i];
+    }
+    q_free(db, rows->slots, rows->slot_cap * sizeof(group_t *));
+    rows->slots = slots;
+    rows->slot_cap = cap;
+    return true;
+}
+
+/* 키가 같은 그룹을 찾고, 없으면 rows->keys를 넘겨받아 새 그룹을 만든다 */
+static database_exec_status_t group_find(group_rows_t *rows, uint64_t hash, group_t **out)
+{
+    database_t *db = rows->db;
+    const group_plan_t *plan = rows->plan;
+    if (rows->slot_cap != 0) {
+        for (size_t at = (size_t)hash & (rows->slot_cap - 1); rows->slots[at] != NULL;
+             at = (at + 1) & (rows->slot_cap - 1)) {
+            group_t *group = rows->slots[at];
+            if (group->hash == hash && compare_group_keys(plan, group->cells, rows->keys) == 0) {
+                *out = group;
+                return DATABASE_EXEC_OK;
+            }
+        }
+    }
+    /* 표를 반 넘게 채우지 않는다 */
+    if ((rows->count + 1) * 2 > rows->slot_cap && !group_table_grow(rows)) return DATABASE_EXEC_NOMEM;
+    if (rows->count == rows->cap) {
+        size_t cap = rows->cap == 0 ? 64 : rows->cap * 2;
+        group_t **grown = q_malloc(db, cap * sizeof(group_t *));
+        if (grown == NULL) return DATABASE_EXEC_NOMEM;
+        if (rows->count > 0) memcpy(grown, rows->groups, rows->count * sizeof(group_t *));
+        q_free(db, rows->groups, rows->cap * sizeof(group_t *));
+        rows->groups = grown;
+        rows->cap = cap;
+    }
+    size_t width = group_width(plan);
+    group_t *group = q_calloc(db, 1, sizeof(group_t));
+    value_t *cells = group == NULL ? NULL : q_calloc(db, width > 0 ? width : 1, sizeof(value_t));
+    agg_state_t *states = cells == NULL ? NULL : q_calloc(db, plan->agg_count > 0 ? plan->agg_count : 1, sizeof(agg_state_t));
+    if (states == NULL) {
+        q_free(db, cells, (width > 0 ? width : 1) * sizeof(value_t));
+        q_free(db, group, sizeof(group_t));
+        return DATABASE_EXEC_NOMEM;
+    }
+    if (plan->key_count > 0) {
+        memcpy(cells, rows->keys, plan->key_count * sizeof(value_t));
+        memset(rows->keys, 0, plan->key_count * sizeof(value_t));
+    }
+    *group = (group_t){hash, cells, states};
+    size_t at = (size_t)hash & (rows->slot_cap - 1);
+    while (rows->slots[at] != NULL) at = (at + 1) & (rows->slot_cap - 1);
+    rows->slots[at] = group;
+    rows->groups[rows->count++] = group;
+    *out = group;
+    return DATABASE_EXEC_OK;
+}
+
+/* 집계 인자 값 하나를 그룹 상태에 더한다. value는 계상된 값이며 넘겨받거나 비운다 */
+static database_exec_status_t agg_add(database_t *db, const aggregate_t *agg, agg_state_t *state, value_t *value)
+{
+    if (value->view.type == VALUE_NULL) return DATABASE_EXEC_OK;
+    if (agg->call->distinct) {
+        if (state->seen_count == state->seen_cap) {
+            size_t cap = state->seen_cap == 0 ? 8 : state->seen_cap * 2;
+            value_t *grown = q_malloc(db, cap * sizeof(value_t));
+            if (grown == NULL) return DATABASE_EXEC_NOMEM;
+            if (state->seen_count > 0) memcpy(grown, state->seen, state->seen_count * sizeof(value_t));
+            q_free(db, state->seen, state->seen_cap * sizeof(value_t));
+            state->seen = grown;
+            state->seen_cap = cap;
+        }
+        state->seen[state->seen_count++] = *value;
+        memset(value, 0, sizeof(*value));
+        return DATABASE_EXEC_OK;
+    }
+    state->present++;
+    if (agg->kind == AGG_MIN || agg->kind == AGG_MAX) {
+        int order = state->present == 1 ? 0 : sqleval_compare(&value->view, &state->best.view);
+        if (state->present == 1 || (agg->kind == AGG_MIN ? order < 0 : order > 0)) {
+            owned_clear(db, &state->best, 1);
+            state->best = *value;
+            memset(value, 0, sizeof(*value));
+        }
+    } else if (value->view.type == VALUE_INTEGER) {
+        state->whole += value->view.integer;
+    } else if (value->view.type == VALUE_REAL) {
+        state->real += value->view.real;
+    }
+    return DATABASE_EXEC_OK;
+}
 
 static database_exec_status_t group_collect(void *context, const value_t *row)
 {
     group_rows_t *rows = context;
     database_t *db = rows->db;
     const group_plan_t *plan = rows->plan;
-    if (rows->count == rows->cap) {
-        size_t cap = rows->cap == 0 ? 64 : rows->cap * 2;
-        if (cap > SIZE_MAX / sizeof(value_t *) || !q_reserve(db, cap * sizeof(value_t *))) return DATABASE_EXEC_NOMEM;
-        value_t **grown = realloc(rows->entries, cap * sizeof(*grown));
-        if (grown == NULL) {
-            q_release(db, cap * sizeof(value_t *));
-            return DATABASE_EXEC_NOMEM;
-        }
-        q_release(db, rows->cap * sizeof(value_t *));
-        rows->entries = grown;
-        rows->cap = cap;
+    if (rows->keys == NULL && plan->key_count > 0) {
+        rows->keys = q_calloc(db, plan->key_count, sizeof(value_t));
+        if (rows->keys == NULL) return DATABASE_EXEC_NOMEM;
     }
-    size_t width = group_width(plan);
-    value_t *entry = q_calloc(db, width > 0 ? width : 1, sizeof(value_t));
-    if (entry == NULL) return DATABASE_EXEC_NOMEM;
     database_exec_status_t status = DATABASE_EXEC_OK;
+    uint64_t hash = 0;
     for (size_t g = 0; g < plan->key_count && status == DATABASE_EXEC_OK; g++) {
-        status = select_value(db, plan->key_progs[g], 0, row, &entry[g]);
+        status = select_value(db, plan->key_progs[g], 0, row, &rows->keys[g]);
+        if (status == DATABASE_EXEC_OK) hash = mix_hash(hash, value_hash(&rows->keys[g].view));
     }
+    group_t *group = NULL;
+    if (status == DATABASE_EXEC_OK) status = group_find(rows, hash, &group);
+    owned_clear(db, rows->keys, plan->key_count);  /* 새 그룹이 넘겨받았으면 이미 비어 있다 */
     for (size_t a = 0; a < plan->agg_count && status == DATABASE_EXEC_OK; a++) {
-        if (plan->aggs[a].arg != NULL) status = select_value(db, plan->aggs[a].arg, 0, row, &entry[plan->key_count + a]);
+        const aggregate_t *agg = &plan->aggs[a];
+        if (agg->arg == NULL) {
+            group->states[a].present++;
+            continue;
+        }
+        value_t value = {0};
+        status = select_value(db, agg->arg, 0, row, &value);
+        if (status == DATABASE_EXEC_OK) status = agg_add(db, agg, &group->states[a], &value);
+        owned_clear(db, &value, 1);
     }
-    if (status != DATABASE_EXEC_OK) {
-        owned_clear(db, entry, width);
-        q_free(db, entry, (width > 0 ? width : 1) * sizeof(value_t));
-        return status;
-    }
-    rows->entries[rows->count++] = entry;
-    return DATABASE_EXEC_OK;
+    return status;
+}
+
+static void agg_state_clear(database_t *db, agg_state_t *state)
+{
+    owned_clear(db, &state->best, 1);
+    owned_clear(db, state->seen, state->seen_count);
+    q_free(db, state->seen, state->seen_cap * sizeof(value_t));
+    memset(state, 0, sizeof(*state));
 }
 
 static void group_rows_free(group_rows_t *rows)
 {
-    size_t width = group_width(rows->plan);
+    database_t *db = rows->db;
+    const group_plan_t *plan = rows->plan;
+    size_t width = group_width(plan);
     for (size_t i = 0; i < rows->count; i++) {
-        owned_clear(rows->db, rows->entries[i], width);
-        q_free(rows->db, rows->entries[i], (width > 0 ? width : 1) * sizeof(value_t));
+        group_t *group = rows->groups[i];
+        owned_clear(db, group->cells, width);
+        for (size_t a = 0; a < plan->agg_count; a++) agg_state_clear(db, &group->states[a]);
+        q_free(db, group->states, (plan->agg_count > 0 ? plan->agg_count : 1) * sizeof(agg_state_t));
+        q_free(db, group->cells, (width > 0 ? width : 1) * sizeof(value_t));
+        q_free(db, group, sizeof(group_t));
     }
-    q_free(rows->db, rows->entries, rows->cap * sizeof(value_t *));
-    rows->entries = NULL;
-    rows->count = rows->cap = 0;
+    if (rows->keys != NULL) {
+        owned_clear(db, rows->keys, plan->key_count);
+        q_free(db, rows->keys, plan->key_count * sizeof(value_t));
+    }
+    q_free(db, rows->groups, rows->cap * sizeof(group_t *));
+    q_free(db, rows->slots, rows->slot_cap * sizeof(group_t *));
+    memset(rows, 0, sizeof(*rows));
 }
 
 /* 안정 병합 정렬. cmp는 행 포인터 둘을 비교한다 */
@@ -3418,70 +3585,55 @@ static int compare_first_value(const void *ctx, const value_t *a, const value_t 
     return sqleval_compare(&a->view, &b->view);
 }
 
-/* 한 그룹의 집계 하나를 계산한다. run은 그 그룹의 행들이다 */
-static database_exec_status_t fold_aggregate(database_t *db, const group_plan_t *plan, size_t index, value_t **run,
-                                             size_t count, value_t *out)
+/* 그룹 하나의 집계 결과를 out에 만든다(계상하지 않은 값). DISTINCT 값은 정렬해 중복을 없앤 뒤 더한다 */
+static database_exec_status_t agg_finish(database_t *db, const aggregate_t *agg, agg_state_t *state, value_t *out)
 {
-    const aggregate_t *agg = &plan->aggs[index];
-    if (agg->arg == NULL) return value_set_integer(out, (int64_t)count) == VALUE_OK ? DATABASE_EXEC_OK : DATABASE_EXEC_NOMEM;
-    size_t slot = plan->key_count + index;
-    size_t values_bytes = (count > 0 ? count : 1) * sizeof(value_t *);
-    value_t **values = q_malloc(db, values_bytes);
-    if (values == NULL) return DATABASE_EXEC_NOMEM;
-    size_t present = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (run[i][slot].view.type != VALUE_NULL) values[present++] = &run[i][slot];
-    }
-    if (agg->call->distinct && present > 1) {
-        value_t **scratch = q_malloc(db, present * sizeof(value_t *));
+    if (agg->call->distinct && state->seen_count > 0) {
+        value_t **order = q_malloc(db, state->seen_count * sizeof(value_t *));
+        value_t **scratch = order == NULL ? NULL : q_malloc(db, state->seen_count * sizeof(value_t *));
         if (scratch == NULL) {
-            q_free(db, values, values_bytes);
+            q_free(db, order, state->seen_count * sizeof(value_t *));
             return DATABASE_EXEC_NOMEM;
         }
-        sort_rows(values, scratch, present, compare_first_value, NULL);
-        q_free(db, scratch, present * sizeof(value_t *));
-        size_t kept = 1;
-        for (size_t i = 1; i < present; i++) {
-            if (sqleval_compare(&values[kept - 1]->view, &values[i]->view) != 0) values[kept++] = values[i];
+        for (size_t i = 0; i < state->seen_count; i++) order[i] = &state->seen[i];
+        sort_rows(order, scratch, state->seen_count, compare_first_value, NULL);
+        q_free(db, scratch, state->seen_count * sizeof(value_t *));
+        agg_state_t folded = {0};
+        database_exec_status_t status = DATABASE_EXEC_OK;
+        for (size_t i = 0; i < state->seen_count && status == DATABASE_EXEC_OK; i++) {
+            if (i > 0 && sqleval_compare(&order[i - 1]->view, &order[i]->view) == 0) continue;
+            value_t copy = {0};
+            if (q_clone(db, &order[i]->view, &copy) != VALUE_OK) status = DATABASE_EXEC_NOMEM;
+            else {
+                aggregate_t plain = *agg;
+                sqlexpr_t call = *agg->call;
+                call.distinct = false;
+                plain.call = &call;
+                status = agg_add(db, &plain, &folded, &copy);
+                owned_clear(db, &copy, 1);
+            }
         }
-        present = kept;
+        q_free(db, order, state->seen_count * sizeof(value_t *));
+        if (status == DATABASE_EXEC_OK) status = agg_finish(db, agg, &folded, out);
+        agg_state_clear(db, &folded);
+        return status;
     }
-    database_exec_status_t status = DATABASE_EXEC_OK;
     value_status_t set = VALUE_OK;
     if (agg->kind == AGG_COUNT) {
-        set = value_set_integer(out, (int64_t)present);
-    } else if (present == 0) {
+        set = value_set_integer(out, state->present);
+    } else if (state->present == 0) {
         value_clear(out);
     } else if (agg->kind == AGG_MIN || agg->kind == AGG_MAX) {
-        const value_t *best = values[0];
-        for (size_t i = 1; i < present; i++) {
-            int order = sqleval_compare(&values[i]->view, &best->view);
-            if (agg->kind == AGG_MIN ? order < 0 : order > 0) best = values[i];
+        set = value_clone(&state->best.view, out);
+    } else if (agg->kind == AGG_SUM && agg->type == VALUE_INTEGER) {
+        if (state->whole > INT64_MAX || state->whole < INT64_MIN) {
+            return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_ARITHMETIC_OVERFLOW, "SUM이 정수 범위를 넘습니다");
         }
-        set = q_clone(db, &best->view, out) == VALUE_OK ? VALUE_OK : VALUE_NOMEM;
-        if (set == VALUE_OK) q_release(db, value_bytes(out));  /* 그룹 행이 따로 계상한다 */
+        set = value_set_integer(out, (int64_t)state->whole);
     } else {
-        bool integers = agg->type == VALUE_INTEGER;
-        __int128 whole = 0;
-        double real = 0.0;
-        for (size_t i = 0; i < present; i++) {
-            const value_view_t *v = &values[i]->view;
-            if (v->type == VALUE_INTEGER) whole += v->integer;
-            else real += v->real;
-        }
-        if (agg->kind == AGG_SUM && integers) {
-            if (whole > INT64_MAX || whole < INT64_MIN) {
-                status = fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_ARITHMETIC_OVERFLOW, "SUM이 정수 범위를 넘습니다");
-            } else {
-                set = value_set_integer(out, (int64_t)whole);
-            }
-        } else {
-            double total = (double)whole + real;
-            set = value_set_real(out, agg->kind == AGG_AVG ? total / (double)present : total);
-        }
+        double total = (double)state->whole + state->real;
+        set = value_set_real(out, agg->kind == AGG_AVG ? total / (double)state->present : total);
     }
-    q_free(db, values, values_bytes);
-    if (status != DATABASE_EXEC_OK) return status;
     if (set == VALUE_NOMEM) return DATABASE_EXEC_NOMEM;
     if (set != VALUE_OK) {
         return fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_ARITHMETIC_OVERFLOW, "집계 결과가 범위를 넘습니다");
@@ -3489,49 +3641,60 @@ static database_exec_status_t fold_aggregate(database_t *db, const group_plan_t 
     return DATABASE_EXEC_OK;
 }
 
-/* 모은 행을 그룹으로 접어 HAVING을 통과한 그룹 행을 내보낸다 */
+/* 그룹을 키 순서로 안정 병합 정렬한다 */
+static void sort_groups(const group_plan_t *plan, group_t **groups, group_t **scratch, size_t count)
+{
+    for (size_t width = 1; width < count; width *= 2) {
+        for (size_t lo = 0; lo < count; lo += 2 * width) {
+            size_t mid = lo + width < count ? lo + width : count;
+            size_t hi = lo + 2 * width < count ? lo + 2 * width : count;
+            size_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                scratch[k++] = compare_group_keys(plan, groups[j]->cells, groups[i]->cells) < 0 ? groups[j++] : groups[i++];
+            }
+            while (i < mid) scratch[k++] = groups[i++];
+            while (j < hi) scratch[k++] = groups[j++];
+        }
+        memcpy(groups, scratch, count * sizeof(*groups));
+    }
+}
+
+/* 그룹을 키 순서로 정렬해 집계를 마무리하고 HAVING을 통과한 그룹 행을 내보낸다 */
 static database_exec_status_t group_flush(database_t *db, const group_plan_t *plan, group_rows_t *rows,
                                           const sqleval_prog_t *having, select_ctx_t *ctx)
 {
-    size_t count = rows->count;
-    if (count > 1 && plan->key_count > 0) {
-        value_t **scratch = q_malloc(db, count * sizeof(value_t *));
-        if (scratch == NULL) return DATABASE_EXEC_NOMEM;
-        sort_rows(rows->entries, scratch, count, compare_group_keys, plan);
-        q_free(db, scratch, count * sizeof(value_t *));
-    }
-    size_t width = group_width(plan);
-    size_t group_bytes = (width > 0 ? width : 1) * sizeof(value_t);
-    value_t *group = q_calloc(db, width > 0 ? width : 1, sizeof(value_t));
-    if (group == NULL) return DATABASE_EXEC_NOMEM;
-    database_exec_status_t status = DATABASE_EXEC_OK;
     /* GROUP BY가 없으면 행이 없어도 그룹 하나다 */
-    size_t lo = 0;
-    bool single = plan->key_count == 0;
-    while (status == DATABASE_EXEC_OK && !ctx->done && (single ? lo == 0 : lo < count)) {
-        size_t hi = single ? count : lo + 1;
-        while (!single && hi < count && compare_group_keys(plan, rows->entries[lo], rows->entries[hi]) == 0) hi++;
-        for (size_t g = 0; g < plan->key_count && status == DATABASE_EXEC_OK; g++) {
-            status = q_clone(db, &rows->entries[lo][g].view, &group[g]) == VALUE_OK ? DATABASE_EXEC_OK : DATABASE_EXEC_NOMEM;
-        }
+    if (plan->key_count == 0 && rows->count == 0) {
+        group_t *empty = NULL;
+        database_exec_status_t made = group_find(rows, 0, &empty);
+        if (made != DATABASE_EXEC_OK) return made;
+    }
+    size_t count = rows->count;
+    database_exec_status_t status = DATABASE_EXEC_OK;
+    if (count > 1) {
+        group_t **scratch = q_malloc(db, count * sizeof(group_t *));
+        if (scratch == NULL) return DATABASE_EXEC_NOMEM;
+        sort_groups(plan, rows->groups, scratch, count);
+        q_free(db, scratch, count * sizeof(group_t *));
+    }
+    for (size_t i = 0; i < count && status == DATABASE_EXEC_OK && !ctx->done; i++) {
+        group_t *group = rows->groups[i];
         for (size_t a = 0; a < plan->agg_count && status == DATABASE_EXEC_OK; a++) {
-            status = fold_aggregate(db, plan, a, rows->entries + lo, hi - lo, &group[plan->key_count + a]);
-            if (status == DATABASE_EXEC_OK && !q_reserve(db, value_bytes(&group[plan->key_count + a]))) {
-                value_clear(&group[plan->key_count + a]);
+            value_t *out = &group->cells[plan->key_count + a];
+            status = agg_finish(db, &plan->aggs[a], &group->states[a], out);
+            if (status == DATABASE_EXEC_OK && !q_reserve(db, value_bytes(out))) {
+                value_clear(out);
                 status = DATABASE_EXEC_NOMEM;
             }
+            if (status == DATABASE_EXEC_OK) agg_state_clear(db, &group->states[a]);
         }
         bool keep = true;
         if (status == DATABASE_EXEC_OK && having != NULL) {
             sqleval_error_t error = {SQLEVAL_OK, 0, NULL};
-            if (sqleval_test(having, group, &keep, &error) != SQLEVAL_OK) status = eval_failure(db, &error);
+            if (sqleval_test(having, group->cells, &keep, &error) != SQLEVAL_OK) status = eval_failure(db, &error);
         }
-        if (status == DATABASE_EXEC_OK && keep) status = select_emit(ctx, group);
-        owned_clear(db, group, width);
-        if (single) break;
-        lo = hi;
+        if (status == DATABASE_EXEC_OK && keep) status = select_emit(ctx, group->cells);
     }
-    q_free(db, group, group_bytes);
     return status;
 }
 
@@ -3903,7 +4066,7 @@ static database_exec_status_t select_run(database_t *db, const sqlstmt_select_t 
 {
     group_plan_t plan;
     memset(&plan, 0, sizeof(plan));
-    group_rows_t groups = {db, &plan, NULL, 0, 0};
+    group_rows_t groups = {db, &plan, NULL, 0, NULL, 0, 0, NULL};
     sqleval_prog_t *having = NULL;
     join_t join;
     database_exec_status_t status = join_open(db, select, &join);

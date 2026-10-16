@@ -1034,6 +1034,69 @@ static void test_order_and_distinct_respect_budget(void)
     database_close(db);
 }
 
+/* #42: 집계의 문장 메모리는 입력 행 수가 아니라 그룹 수에 비례하고, 그룹이 예산을 넘으면 결과를 자르지 않고 거절한다 */
+static size_t aggregate_peak(database_t *db, const char *sql, size_t expected_rows)
+{
+    projection_memory_t memory = {0};
+    result_t *result = NULL;
+    CHECK(run_budgeted(db, &memory, sql, &result) == DATABASE_EXEC_OK && result_kind(result) == RESULT_KIND_ROWS,
+          "%s: 예산 없이 성공", sql);
+    size_t rows = 0;
+    result_row_t row;
+    while (result_next(result, &row) == RESULT_NEXT_ROW) rows++;
+    result_release(&result);
+    CHECK(rows == expected_rows && memory.used == 0, "%s: 행 %zu, 남은 계상 %zu", sql, rows, memory.used);
+    return memory.peak;
+}
+
+static void fill_events(database_t *db, int from, int to)
+{
+    for (int start = from; start <= to; start += 100) {
+        char sql[40000];
+        size_t used = (size_t)snprintf(sql, sizeof(sql), "INSERT INTO events VALUES ");
+        for (int i = start; i < start + 100; i++) {
+            used += (size_t)snprintf(sql + used, sizeof(sql) - used, "%s(%d, %d, '%0200d')", i == start ? "" : ", ", i,
+                                     i % 4, i);
+        }
+        exec_ok(db, sql);
+    }
+}
+
+static void test_aggregate_memory_scales_with_groups(void)
+{
+    printf("\n[test_aggregate_memory_scales_with_groups]\n");
+    database_t *db = fresh_db();
+    exec_ok(db, "CREATE TABLE events (id INTEGER PRIMARY KEY, kind INTEGER, body TEXT)");
+    const char *grouped = "SELECT kind, COUNT(*), SUM(id), MAX(body) FROM events GROUP BY kind";
+    const char *whole = "SELECT COUNT(*), SUM(id), MIN(body) FROM events";
+    fill_events(db, 1, 400);
+    size_t grouped_small = aggregate_peak(db, grouped, 4), whole_small = aggregate_peak(db, whole, 1);
+    fill_events(db, 401, 4000);
+    size_t grouped_large = aggregate_peak(db, grouped, 4), whole_large = aggregate_peak(db, whole, 1);
+    /* 행이 10배여도 그룹 4개의 상태와 행 하나의 버퍼만 쥔다(모든 행을 모으면 수백 KB가 늘어난다) */
+    CHECK(grouped_large <= grouped_small + 4096 && whole_large <= whole_small + 4096,
+          "행 400 → 4000에서 최대 계상 GROUP BY %zu → %zu, 전체 집계 %zu → %zu", grouped_small, grouped_large,
+          whole_small, whole_large);
+    expect_text(db, "SELECT kind, COUNT(*), SUM(id) FROM events GROUP BY kind",
+                "[4] 0|1000|2002000/ 1|1000|1999000/ 2|1000|2000000/ 3|1000|2001000");
+
+    /* 그룹이 많아 예산을 넘으면(다중 키·HAVING 포함) 결과를 자르지 않고 거절하고 계상을 모두 돌려준다 */
+    const char *many = "SELECT body, kind, COUNT(*) FROM events GROUP BY body, kind HAVING COUNT(*) > 0";
+    size_t peak = aggregate_peak(db, many, 4000);
+    for (size_t limit = 1; limit < peak; limit += peak / 37 + 1) {
+        projection_memory_t swept = {.limit = limit};
+        result_t *result = NULL;
+        database_exec_status_t status = run_budgeted(db, &swept, many, &result);
+        bool refused = status == DATABASE_EXEC_NOMEM ||
+                       (status == DATABASE_EXEC_OK && result != NULL && result_kind(result) == RESULT_KIND_ERROR);
+        CHECK(refused, "한도 %zu(최대 %zu)에서 결과를 자르지 않고 거절", limit, peak);
+        result_release(&result);
+        CHECK(swept.used == 0, "한도 %zu에서 계상 %zu 남음", limit, swept.used);
+    }
+    assert(database_close(db) == DATABASE_OK);
+    clean_dir();
+}
+
 static void test_defaults_survive_reopen(void)
 {
     printf("\n[test_defaults_survive_reopen]\n");
@@ -1068,6 +1131,7 @@ int main(void)
     test_open_rejects_other_files_without_change();
     test_argument_errors();
     test_order_and_distinct_respect_budget();
+    test_aggregate_memory_scales_with_groups();
     clean_dir();
     printf("\n%s: %d/%d\n", g_fail == 0 ? "ALL PASSED" : "FAILED", g_run - g_fail, g_run);
     return g_fail == 0 ? 0 : 1;
