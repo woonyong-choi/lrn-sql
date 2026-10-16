@@ -544,6 +544,8 @@ static const page_file_io_t HOOKED_IO = {hook_pread, hook_pwrite, hook_fsync, li
 static void test_io_sweep(void)
 {
     printf("n번째 pread·pwrite·fsync 실패 sweep\n");
+    /* 문장마다 파일 읽기 실패 경로를 모두 지나가게 하려고 읽기 캐시를 끈다(캐시가 있으면 적중한 읽기는 pread가 없다) */
+    page_file_set_default_cache_pages(0);
     static const char *const KINDS[] = {"pread", "pwrite", "fsync"};
     long total_points = 0;
     for (size_t ci = 0; ci < CASE_COUNT; ci++) {
@@ -628,6 +630,7 @@ static void test_io_sweep(void)
         printf("  %-13s 주입 지점 %ld곳 (poison %ld)\n", c->name, points, poisoned_total);
     }
     page_file_set_default_io(NULL);
+    page_file_set_default_cache_pages(PAGE_FILE_CACHE_PAGES);
     CHECK(total_points > 50, "총 주입 지점 %ld", total_points);
     clean_dir();
 }
