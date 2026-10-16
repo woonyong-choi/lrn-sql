@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/totedb-icon.png" width="96" height="96" alt="ToteDB를 상징하는 검은 토트백">
+</p>
+
 <h1 align="center">ToteDB</h1>
 
 <p align="center">

@@ -2,6 +2,12 @@
 
 버전별 주요 변경을 적는다. 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전: [유의적 버전](https://semver.org/lang/ko/). 1.0 전에는 파일 형식과 API가 호환 없이 바뀔 수 있다.
 
+## 미출시
+
+### 추가
+
+- README 머리에 ToteDB 대표 아이콘 추가
+
 ## 0.1.0 - 2026-10-16
 
 첫 공개판이다.
