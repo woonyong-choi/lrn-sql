@@ -36,11 +36,10 @@
  * 정한다). 그 밖의 비OK 상태(IO·NOMEM·LIMIT·INTERNAL 등)는 문장이 일부만 실행됐을 수 있으므로 호출자는 그 트랜잭션을
  * rollback해야 한다(commit하면 큐 상태가 일부만 반영될 수 있다).
  *
- * SQL로 표현하지 못해 이 모듈이 대신하는 것(database가 제공하지 않음): ORDER BY·LIMIT(claim은 상태별로 행 메타데이터만
- * 읽어 호출자 쪽에서 가장 작은 id k개를 고른다), AND·OR 조건, UPDATE의 계산식(값은 C에서 계산해 상수로 쓴다),
- * UNIQUE 제약과 보조 index(idempotency key는 전체 스캔으로 찾는다), RETURNING, 행 단위 잠금. 그래서 모든 연산이
- * 테이블 전체 스캔을 하며 claim·ack 하나가 O(행 수)다. 메모리는 payload를 제외한 메타데이터 스캔과 claim 개수 k에 비례하며
- * payload는 선택한 작업의 것만 읽는다. 큰 큐의 성능은 목표가 아니다.
+ * 저장과 조회: 설치 때 state·idem 보조 색인을 만든다. 정수 기본 키 테이블의 비고유 색인은 같은 값 안에서 id 순서라
+ * claim·recover·purge는 WHERE state = ? ... ORDER BY id LIMIT k로 맞는 작업 k개만 읽는다. ack·nack·fail·update는 기본 키
+ * 한 행을 읽고 고친다. stats는 상태별 개수라 테이블 전체를 읽는다. 행 단위 잠금은 없고 쓰기 트랜잭션은 하나다.
+ * payload는 선택한 작업의 것만 읽는다.
  *
  * 스레드: 한 세션은 한 번에 한 스레드만 쓴다(session 계약). ackq_t는 바뀌지 않으므로 여러 스레드가 각자 세션으로 같은
  * 큐를 써도 된다. 쓰기 트랜잭션은 데이터베이스마다 하나이므로 다른 세션이 쓰는 동안 자기 트랜잭션은 begin_timeout_ms까지
