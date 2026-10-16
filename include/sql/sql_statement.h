@@ -21,8 +21,10 @@
  *     column     = column_name type {constraint}
  *     type       = INTEGER | REAL | TEXT | BLOB | VARCHAR ( n )
  *     constraint = NOT NULL | PRIMARY KEY [AUTOINCREMENT] | DEFAULT 상수 | DEFAULT -숫자 | DEFAULT ( expr )
- *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )} [returning]
- *   INSERT INTO name DEFAULT VALUES [returning]
+ *   INSERT INTO name [( column_name {, column_name} )] VALUES ( expr {, expr} ) {, ( expr {, expr} )} [conflict] [returning]
+ *   INSERT INTO name DEFAULT VALUES [conflict] [returning]
+ *     conflict   = ON CONFLICT [( column_name )] DO NOTHING
+ *                | ON CONFLICT ( column_name ) DO UPDATE SET column_name = expr {, ...} [WHERE expr]
  *   [WITH cte {, cte}] SELECT core {set_op core} [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST] {, ...}] [LIMIT expr] [OFFSET expr]
  *     cte        = name [( column {, column} )] AS ( query )
  *     core       = [DISTINCT] item {, item} [FROM source {join}] [WHERE expr] [GROUP BY expr {, expr}] [HAVING expr]
@@ -219,6 +221,26 @@ typedef struct {
     sqlstmt_name_t alias;        /* [AS] alias. 없으면 size 0 */
 } sqlstmt_select_item_t;
 
+typedef struct {
+    sqlstmt_name_t column;
+    sqlexpr_t *value;
+} sqlstmt_assignment_t;
+
+/*
+ * INSERT ... ON CONFLICT [( column )] DO NOTHING | DO UPDATE SET ... [WHERE expr].
+ * target이 없으면 기본 키와 모든 유일 색인이 대상이다(DO NOTHING만). DO UPDATE의 식에서 excluded.column은
+ * 넣으려던 값, 한정 없는 이름과 테이블 이름 한정은 이미 있는 행이다.
+ */
+typedef struct {
+    bool present;
+    bool has_target;
+    sqlstmt_name_t target;
+    bool do_update;
+    sqlstmt_assignment_t *assignments;
+    size_t assignment_count;
+    sqlexpr_t *where;
+} sqlstmt_conflict_t;
+
 /* INSERT·UPDATE·DELETE의 RETURNING 목록. 없으면 count 0 */
 typedef struct {
     sqlstmt_select_item_t *items;
@@ -233,6 +255,7 @@ typedef struct {
     sqlexpr_t **values;          /* row_count × value_count, 행 순서 */
     size_t value_count;          /* 한 행의 값 수. has_columns이면 column_count와 같다 */
     size_t row_count;            /* DEFAULT VALUES면 1행, 값 0개, has_columns이고 컬럼 0개 */
+    sqlstmt_conflict_t conflict;
     sqlstmt_returning_t returning;
 } sqlstmt_insert_t;
 
@@ -294,11 +317,6 @@ typedef struct sqlstmt_select {
     struct sqlstmt_select *next;
     sqlstmt_set_op_t next_op;
 } sqlstmt_select_t;
-
-typedef struct {
-    sqlstmt_name_t column;
-    sqlexpr_t *value;
-} sqlstmt_assignment_t;
 
 typedef struct {
     sqlstmt_name_t table;

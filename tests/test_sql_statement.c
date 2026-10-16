@@ -457,6 +457,26 @@ static void set_operation_forms(void)
     free_clean(statement);
 }
 
+static void conflict_forms(void)
+{
+    sqlstmt_t *statement = parse_ok("INSERT INTO t (a, b) VALUES (1, 2) ON CONFLICT DO NOTHING RETURNING a");
+    const sqlstmt_conflict_t *c = &statement->insert.conflict;
+    assert(c->present && !c->has_target && !c->do_update && statement->insert.returning.count == 1);
+    free_clean(statement);
+    statement = parse_ok("INSERT INTO t (a, b) VALUES (1, 2) ON CONFLICT (a) DO UPDATE SET b = excluded.b + t.b, "
+                         "c = 3 WHERE t.b < 10");
+    c = &statement->insert.conflict;
+    assert(c->has_target && name_is(&c->target, "a") && c->do_update && c->assignment_count == 2 && c->where != NULL);
+    free_clean(statement);
+    statement = parse_ok("INSERT INTO t DEFAULT VALUES ON CONFLICT (a) DO NOTHING");
+    assert(statement->insert.conflict.present && statement->insert.conflict.has_target);
+    free_clean(statement);
+    expect_syntax("INSERT INTO t VALUES (1) ON CONFLICT DO UPDATE SET a = 1", SQLSTMT_REASON_EXPECTED_KEYWORD, 37);
+    expect_unsupported("INSERT INTO t VALUES (1) ON CONFLICT (a, b) DO NOTHING", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 39);
+    expect_syntax("INSERT INTO t VALUES (1) ON CONFLICT (a) DO", SQLSTMT_REASON_UNEXPECTED_END, 43);
+    expect_syntax("INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1, a = 2", SQLSTMT_REASON_DUPLICATE_COLUMN, 62);
+}
+
 static void default_forms(void)
 {
     sqlstmt_t *statement = parse_ok("CREATE TABLE t (a INTEGER DEFAULT -5 NOT NULL, b TEXT DEFAULT 'x', c REAL DEFAULT (1.5 * 2), "
@@ -1015,6 +1035,7 @@ int main(void)
     join_forms();
     returning_forms();
     default_forms();
+    conflict_forms();
     set_operation_forms();
     subquery_forms();
     update_delete_drop();

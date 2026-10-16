@@ -242,6 +242,14 @@ heap_status_t heap_batch_secondary_insert(heap_batch_t *batch, const value_view_
 heap_status_t heap_batch_secondary_remove(heap_batch_t *batch, const value_view_t *values,
                                           size_t count, heap_locator_t locator);
 heap_status_t heap_batch_secondary_build(heap_batch_t *batch, size_t index, heap_t *source);
+/*
+ * 이 batch가 보는 색인(게시된 내용 + 이 batch의 변경)에서 찾는다. 없으면 HEAP_NOT_FOUND다.
+ * heap_batch_find_key는 키 색인을 쓰는 heap만, heap_batch_secondary_find는 유일 보조 색인만 받는다.
+ * 색인 키 한도를 넘는 값은 색인에 없으므로 HEAP_NOT_FOUND다.
+ */
+heap_status_t heap_batch_find_key(heap_batch_t *batch, const value_view_t *key, heap_locator_t *locator);
+heap_status_t heap_batch_secondary_find(heap_batch_t *batch, size_t index, const value_view_t *value,
+                                        heap_locator_t *locator);
 /* 실패한 연산 뒤 batch는 HEAP_BATCH_FAILED를 돌려주고 abort·free만 한다(INVALID·NOT_FOUND 제외). */
 heap_status_t heap_batch_insert(heap_batch_t *batch, const value_view_t *values, size_t count,
                                 heap_locator_t *locator);

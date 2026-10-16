@@ -1474,6 +1474,40 @@ heap_status_t heap_secondary_visit_equal(heap_t *heap, heap_secondary_spec_t spe
     return heap_from_pk(heap, checked);
 }
 
+// cost: time O(d·log c), heap O(1), io O(d)
+// vars: d = 색인 깊이, c = 노드당 항목 수
+// basis: estimate
+heap_status_t heap_batch_find_key(heap_batch_t *batch, const value_view_t *key, heap_locator_t *locator)
+{
+    if (batch == NULL || key == NULL || locator == NULL || batch->failed || !batch->heap->indexed ||
+        key->type != batch->heap->key_type) return HEAP_INVALID;
+    if (key->type == VALUE_TEXT && key->size_bytes > TEXT_TREE_KEY_MAX_BYTES) return HEAP_NOT_FOUND;
+    if (batch->index_root == PAGE_FILE_NO_PAGE) return HEAP_NOT_FOUND;
+    pk_tree_io_t io = batch_index_io(batch);
+    pk_status_t found = key->type == VALUE_INTEGER
+                            ? pk_tree_find(&io, batch->heap->table_id, batch->index_root, key->integer, locator)
+                            : text_tree_find(&io, batch->heap->table_id, batch->index_root, key->bytes,
+                                             key->size_bytes, locator);
+    return found == PK_NOT_FOUND ? HEAP_NOT_FOUND : heap_from_pk(batch->heap, found);
+}
+
+heap_status_t heap_batch_secondary_find(heap_batch_t *batch, size_t index, const value_view_t *value,
+                                        heap_locator_t *locator)
+{
+    if (batch == NULL || value == NULL || locator == NULL || batch->failed || index >= batch->secondary_count ||
+        !batch->secondary[index].unique) return HEAP_INVALID;
+    if (value->type == VALUE_NULL || batch->secondary_roots[index] == PAGE_FILE_NO_PAGE) return HEAP_NOT_FOUND;
+    uint8_t key[TEXT_TREE_KEY_MAX_BYTES];
+    size_t key_bytes;
+    heap_status_t encoded = encode_secondary_key(value, true, (heap_locator_t){0, 0}, key, &key_bytes);
+    if (encoded == HEAP_LIMIT) return HEAP_NOT_FOUND;
+    if (encoded != HEAP_OK) return encoded;
+    pk_tree_io_t io = batch_index_io(batch);
+    pk_status_t found = text_tree_find(&io, batch->heap->table_id, batch->secondary_roots[index], key, key_bytes,
+                                       locator);
+    return found == PK_NOT_FOUND ? HEAP_NOT_FOUND : heap_from_pk(batch->heap, found);
+}
+
 heap_status_t heap_batch_configure_secondary(heap_batch_t *batch, const heap_secondary_spec_t *specs,
                                              size_t count)
 {

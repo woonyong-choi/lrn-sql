@@ -102,3 +102,25 @@ def test_returning_after_failed_statement_leaves_rows(tmp_path: Path) -> None:
         db.execute("DELETE FROM jobs WHERE id = 3 RETURNING id / 0")
     assert db.execute("SELECT COUNT(*) FROM jobs").rows == ((JOBS,),)
     db.close()
+
+
+def test_concurrent_upserts_lose_nothing(tmp_path: Path) -> None:
+    db = Database(tmp_path / "upsert.lrdb", busy_timeout_s=10.0)
+    db.execute("CREATE TABLE counters (k INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
+    rounds = 30
+
+    def worker(index: int) -> None:
+        for r in range(rounds):
+            key = r % 5
+            rows = db.execute(
+                "INSERT INTO counters VALUES (?, 1) ON CONFLICT (k) DO UPDATE SET n = counters.n + 1 RETURNING n",
+                (key,),
+            ).rows
+            assert len(rows) == 1 and rows[0][0] >= 1
+            db.execute("INSERT INTO counters VALUES (?, 0) ON CONFLICT DO NOTHING", (100 + index,))
+
+    run_workers(worker)
+    rows = db.execute("SELECT k, n FROM counters ORDER BY k").rows
+    assert list(rows[:5]) == [(k, WORKERS * rounds // 5) for k in range(5)]
+    assert [row[0] for row in rows[5:]] == [100 + i for i in range(WORKERS)]
+    db.close()
