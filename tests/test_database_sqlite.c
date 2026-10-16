@@ -323,16 +323,161 @@ static void add_step(step_kind_t kind, const char *format, ...)
 {
     char *sql = NULL;
     if (format != NULL) {
-        sql = malloc(160);
-        assert(sql != NULL);
         va_list args;
         va_start(args, format);
-        vsnprintf(sql, 160, format, args);
+        int n = vsnprintf(NULL, 0, format, args);
+        va_end(args);
+        assert(n >= 0);
+        sql = malloc((size_t)n + 1);
+        assert(sql != NULL);
+        va_start(args, format);
+        vsnprintf(sql, (size_t)n + 1, format, args);
         va_end(args);
     }
     g_steps = realloc(g_steps, (g_step_count + 1) * sizeof(*g_steps));
     assert(g_steps != NULL);
     g_steps[g_step_count++] = (step_t){kind, sql};
+}
+
+/* 정해진 내용의 ASCII 글자 size개. tail이 있으면 그 뒤에 붙인다(멀티바이트 글자를 경계에 걸치게 할 때) */
+static char *text_of(size_t size, unsigned seed, const char *tail)
+{
+    size_t extra = tail != NULL ? strlen(tail) : 0;
+    char *text = malloc(size + extra + 1);
+    assert(text != NULL);
+    for (size_t i = 0; i < size; i++) text[i] = (char)('a' + (i * 7 + seed) % 26);
+    if (extra > 0) memcpy(text + size, tail, extra);
+    text[size + extra] = '\0';
+    return text;
+}
+
+static char *hex_of(size_t size, unsigned seed)
+{
+    char *hex = malloc(size * 2 + 1);
+    assert(hex != NULL);
+    for (size_t i = 0; i < size; i++) snprintf(hex + 2 * i, 3, "%02x", (unsigned)((i * 31 + seed) & 0xffu));
+    return hex;
+}
+
+/*
+ * #81 저장 경계. overflow 페이지 한 장은 8132바이트를 담고(본문 8160 - 머리 28), 행 인코딩이 4000바이트를 넘으면
+ * 16바이트 이상인 가장 큰 열부터 overflow로 뺀다. 경계 앞뒤 크기를 SQLite와 같은 SQL로 넣고 읽고, 다시 연 뒤에도 읽는다.
+ */
+#define CHUNK 8132u
+
+static void add_boundary_steps(void)
+{
+    add_step(STEP_OK, "CREATE TABLE edge (id INTEGER PRIMARY KEY, t TEXT)");
+    for (size_t size = 3970; size <= 4010; size++) {
+        char *text = text_of(size, (unsigned)size, NULL);
+        add_step(STEP_OK, "INSERT INTO edge VALUES (%zu, '%s')", size, text);
+        free(text);
+    }
+    size_t sizes[] = {CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK - 1, 2 * CHUNK, 2 * CHUNK + 1, 3 * CHUNK};
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        char *text = text_of(sizes[i], (unsigned)i, NULL);
+        add_step(STEP_OK, "INSERT INTO edge VALUES (%zu, '%s')", sizes[i], text);
+        free(text);
+    }
+    /* 2·3·4바이트 글자가 overflow 페이지 경계에 걸친다 */
+    const char *tails[] = {"\xc3\xa9tail", "\xea\xb0\x80\xeb\x82\x98tail", "\xf0\x9f\x98\x80tail"};
+    for (size_t i = 0; i < 3; i++) {
+        for (size_t before = CHUNK - 3; before <= CHUNK; before++) {
+            char *text = text_of(before, (unsigned)i, tails[i]);
+            add_step(STEP_OK, "INSERT INTO edge VALUES (%zu, '%s')", 100000 + i * 10 + (before - (CHUNK - 3)), text);
+            free(text);
+        }
+    }
+    add_step(STEP_SELECT, "SELECT id, length(t), t FROM edge");
+    add_step(STEP_REOPEN, NULL);
+    add_step(STEP_SELECT, "SELECT id, length(t), t FROM edge");
+
+    /* 행이 4000바이트를 조금 넘을 때 15·16·17바이트 열과 큰 열 중 무엇을 빼도 값은 같아야 한다 */
+    add_step(STEP_OK, "CREATE TABLE cols (id INTEGER PRIMARY KEY, a TEXT, b TEXT, c TEXT)");
+    int next_id = 1;
+    for (size_t b = 15; b <= 17; b++) {
+        for (size_t a = 3960; a <= 4000; a += 8) {
+            char *ta = text_of(a, 1, NULL), *tb = text_of(b, 2, NULL), *tc = text_of(b, 3, NULL);
+            add_step(STEP_OK, "INSERT INTO cols VALUES (%d, '%s', '%s', '%s')", next_id++, ta, tb, tc);
+            free(ta);
+            free(tb);
+            free(tc);
+        }
+    }
+    add_step(STEP_SELECT, "SELECT * FROM cols");
+
+    /* 큰 BLOB */
+    add_step(STEP_OK, "CREATE TABLE blobs (id INTEGER PRIMARY KEY, b BLOB)");
+    size_t blob_sizes[] = {15, 16, 17, 4000, CHUNK, CHUNK + 1, 20000};
+    for (size_t i = 0; i < sizeof(blob_sizes) / sizeof(blob_sizes[0]); i++) {
+        char *hex = hex_of(blob_sizes[i], (unsigned)i);
+        add_step(STEP_OK, "INSERT INTO blobs VALUES (%zu, X'%s')", i, hex);
+        free(hex);
+    }
+    add_step(STEP_REOPEN, NULL);
+    add_step(STEP_SELECT, "SELECT id, length(b), b FROM blobs");
+
+    /* inline -> overflow -> inline, 큰 값 삭제 뒤 재열기와 빈 페이지 재사용 */
+    char *grown = text_of(30000, 5, NULL), *edge = text_of(4005, 6, NULL);
+    add_step(STEP_OK, "UPDATE edge SET t = '%s' WHERE id = 3970", grown);
+    add_step(STEP_SELECT, "SELECT id, length(t), t FROM edge WHERE id = 3970");
+    add_step(STEP_OK, "UPDATE edge SET t = 'small' WHERE id = 3970");
+    add_step(STEP_OK, "UPDATE edge SET t = '%s' WHERE id = 3980", edge);
+    add_step(STEP_OK, "UPDATE edge SET t = 'tiny' WHERE id = %u", 2 * CHUNK);
+    add_step(STEP_OK, "DELETE FROM edge WHERE id >= %u AND id < 100000", CHUNK);
+    add_step(STEP_OK, "DELETE FROM blobs WHERE id >= 4");
+    add_step(STEP_REOPEN, NULL);
+    add_step(STEP_SELECT, "SELECT id, length(t), t FROM edge");
+    add_step(STEP_SELECT, "SELECT id, length(b), b FROM blobs");
+    add_step(STEP_OK, "INSERT INTO edge VALUES (1, '%s')", grown);
+    add_step(STEP_REOPEN, NULL);
+    add_step(STEP_SELECT, "SELECT id, length(t), t FROM edge WHERE id <= 3975");
+    free(grown);
+    free(edge);
+}
+
+/*
+ * #81 보조 색인 세 종류(정수 기본 키 표의 순서 색인, 유일 색인, 기본 키 없는 표의 색인). 같은 행의 큰 열이
+ * 커지거나 overflow로 가 행 위치가 바뀌고, 색인 값 갱신·삭제·재열기 뒤에도 색인 조회가 SQLite와 같아야 한다.
+ */
+static void add_secondary_steps(void)
+{
+    add_step(STEP_OK, "CREATE TABLE si (id INTEGER PRIMARY KEY, tag TEXT, u TEXT, body TEXT)");
+    add_step(STEP_OK, "CREATE TABLE sn (tag TEXT, u TEXT, body TEXT)");
+    add_step(STEP_OK, "CREATE INDEX si_tag ON si (tag)");
+    add_step(STEP_OK, "CREATE UNIQUE INDEX si_u ON si (u)");
+    add_step(STEP_OK, "CREATE INDEX sn_tag ON sn (tag)");
+    for (int i = 1; i <= 120; i++) {
+        size_t size = i % 3 == 0 ? 9000 + (size_t)i : (size_t)i * 3;
+        char *body = text_of(size, (unsigned)i, NULL);
+        add_step(STEP_OK, "INSERT INTO si VALUES (%d, 'g%d', 'u%d', '%s')", i, i % 7, i, body);
+        add_step(STEP_OK, "INSERT INTO sn VALUES ('g%d', 'u%d', '%s')", i % 7, i, body);
+        free(body);
+    }
+    add_step(STEP_ERROR, "INSERT INTO si VALUES (500, 'g1', 'u5', 'dup')");
+    for (int i = 1; i <= 120; i += 5) {
+        /* 작은 행을 inline 상한 가까이 키워 페이지를 옮기게 하거나 overflow로 보낸다 */
+        char *body = text_of(i % 2 == 0 ? 12000 : 3900, (unsigned)i + 50, NULL);
+        add_step(STEP_OK, "UPDATE si SET body = '%s' WHERE id = %d", body, i);
+        add_step(STEP_OK, "UPDATE sn SET body = '%s' WHERE u = 'u%d'", body, i);
+        free(body);
+    }
+    add_step(STEP_OK, "UPDATE si SET tag = 'moved' WHERE id %% 11 = 0");
+    add_step(STEP_OK, "UPDATE sn SET tag = 'moved' WHERE length(body) > 9000");
+    add_step(STEP_OK, "UPDATE si SET u = 'renamed' || id WHERE id %% 13 = 0");
+    add_step(STEP_OK, "DELETE FROM si WHERE id %% 4 = 0");
+    add_step(STEP_OK, "DELETE FROM sn WHERE tag = 'g3'");
+    for (int pass = 0; pass < 2; pass++) {
+        for (int g = 0; g < 7; g++) {
+            add_step(STEP_SELECT, "SELECT id, u, length(body) FROM si WHERE tag = 'g%d'", g);
+            add_step(STEP_SELECT, "SELECT u, length(body), body FROM sn WHERE tag = 'g%d'", g);
+        }
+        add_step(STEP_SELECT, "SELECT id, length(body) FROM si WHERE tag = 'moved'");
+        add_step(STEP_SELECT, "SELECT u, length(body) FROM sn WHERE tag = 'moved'");
+        for (int i = 1; i <= 120; i += 9) add_step(STEP_SELECT, "SELECT id, tag, body FROM si WHERE u = 'u%d'", i);
+        add_step(STEP_SELECT, "SELECT id FROM si WHERE u = 'renamed26'");
+        add_step(STEP_REOPEN, NULL);
+    }
 }
 
 static void build_steps(void)
@@ -423,6 +568,8 @@ static void build_steps(void)
     add_step(STEP_SELECT, "SELECT id FROM indexed WHERE email IS NULL");
     add_step(STEP_OK, "DROP TABLE indexed");
     add_step(STEP_ERROR, "SELECT * FROM indexed");
+    add_boundary_steps();
+    add_secondary_steps();
 }
 
 int main(void)
@@ -512,7 +659,7 @@ int main(void)
         if (g_steps[i].kind == STEP_SELECT && !ours_error) {
             selects++;
             char *mine = ours_rows(result);
-            CHECK(strcmp(mine, rows[i]) == 0, "단계 %zu: %s\n--- 이쪽\n%.600s\n--- sqlite\n%.600s", i, sql, mine, rows[i]);
+            CHECK(strcmp(mine, rows[i]) == 0, "단계 %zu: %.200s\n--- 이쪽\n%.600s\n--- sqlite\n%.600s", i, sql, mine, rows[i]);
             compared_rows += (size_t)atoi(mine + 1);
             free(mine);
         }
