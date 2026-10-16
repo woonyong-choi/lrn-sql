@@ -5,9 +5,8 @@
   persist-queue   persist-queue 1.1.0 SQLiteAckQueue(Markchain 설정: multithreading, auto_resume, JSON).
                   기본 SQLite 보증은 journal_mode=WAL, synchronous=FULL(실제 값을 읽어 결과에 남긴다).
   sqlite-lease    이 스크립트의 표준 라이브러리 sqlite3 기준군. lease·fence·상태 index를 갖고 WAL + synchronous=FULL.
-  lrn-durable     lrn_ackq(이 이슈의 큐). WAL durable commit.
-  lrn-volatile    lrn_ackq. WAL 없이 데이터 파일에만 게시(재시작 복구를 약속하지 않는다).
-같은 payload(결정적 합성 JSON 객체), 같은 내구성 수준(FULL/durable끼리 비교, volatile은 따로 표시), 같은 스레드 수, 같은
+  lrn             lrn_ackq(이 이슈의 큐). COW 게시 commit(fsync 뒤 응답, DURABLE).
+같은 payload(결정적 합성 JSON 객체), 같은 내구성 수준(FULL/DURABLE끼리 비교), 같은 스레드 수, 같은
 보존 정책(ack된 작업을 끝에서 모두 지움)을 쓴다. 한 측정은 따로 띄운 프로세스에서 하고 `ru_maxrss`의 증가분을 메모리로
 보고한다(이전 최고치를 넘은 만큼만 잡히므로 작은 작업은 0일 수 있다). 시간은 벽시계(perf_counter)다.
 
@@ -16,7 +15,7 @@
 그 비용을 그대로 드러내며 성능 우위를 주장하지 않는다. 결과는 이 호스트·이 빌드·이 입력에서의 관측이다.
 
 사용법:
-  worker  python3 bench/ack_queue_compare.py worker --system lrn-durable --n 200 --payload-bytes 256 --threads 1
+  worker  python3 bench/ack_queue_compare.py worker --system lrn --n 200 --payload-bytes 256 --threads 1
   비교    python3 bench/ack_queue_compare.py compare --sizes 200,1000 --payloads 256,16384 --threads 1,4 --repeats 3
   대기열  python3 bench/ack_queue_compare.py pending --n 500 --payload-bytes 65536
 필요한 것: LRN_ACKQ_LIB(공유 라이브러리), PYTHONPATH=python, persist-queue 1.1.0이 import되는 파이썬.
@@ -42,7 +41,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-SYSTEMS = ("persist-queue", "sqlite-lease", "lrn-durable", "lrn-volatile")
+SYSTEMS = ("persist-queue", "sqlite-lease", "lrn")
 LEASE_MS = 600_000
 
 
@@ -185,14 +184,13 @@ class SqliteLease:
 
 
 class Lrn:
-    def __init__(self, directory: Path, *, durable: bool) -> None:
+    def __init__(self, directory: Path) -> None:
         from lrn_ackq import AckQueue, Database  # noqa: PLC0415
 
-        self.name = "lrn-durable" if durable else "lrn-volatile"
-        wal = directory / "db.wal" if durable else None
-        self.db = Database(directory / "db.lrdb", wal, busy_timeout_s=120.0)
-        self.queue = AckQueue(self.db, "jobs", durable=durable)
-        self.synchronous = "durable-wal" if durable else "synced-no-wal"
+        self.name = "lrn"
+        self.db = Database(directory / "db.lrdb", busy_timeout_s=120.0)
+        self.queue = AckQueue(self.db, "jobs")
+        self.synchronous = "cow-fsync"
 
     def put(self, item: dict[str, Any]) -> int:
         return self.queue.put(json.dumps(item).encode()).id
@@ -228,7 +226,7 @@ def make_adapter(system: str, directory: Path) -> Any:
         return PersistQueue(directory)
     if system == "sqlite-lease":
         return SqliteLease(directory)
-    return Lrn(directory, durable=system == "lrn-durable")
+    return Lrn(directory)
 
 
 # ── 한 측정(worker) ──

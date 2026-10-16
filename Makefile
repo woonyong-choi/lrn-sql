@@ -338,8 +338,7 @@ ifeq ($(SANITIZE),thread)
 	$(PYTHON) -c 'from pathlib import Path; import sys; text = Path(sys.argv[1]).read_text(); sys.exit(0 if "WARNING: ThreadSanitizer: lock-order-inversion" in text else 1)' $(BUILD_DIR)/fault/test_order_detector.json.stderr
 endif
 
-DATABASE_OBJS = $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store.o $(BUILD_DIR)/storage/wal.o \
-                $(BUILD_DIR)/storage/durable_pair.o $(BUILD_DIR)/storage/transaction.o \
+DATABASE_OBJS = $(STORAGE_OBJS) $(BUILD_DIR)/storage/heap_store.o $(BUILD_DIR)/storage/transaction.o \
                 $(BUILD_DIR)/sql/database.o $(BUILD_DIR)/sql/database_txn.o \
                 $(BUILD_DIR)/sql/sql_statement.o $(BUILD_DIR)/sql/lexer.o $(BUILD_DIR)/sql/result.o
 DATABASE_TESTS = test_sql_statement test_heap_store test_database test_database_sqlite test_database_fault test_database_bounded_open test_primary_index
@@ -432,23 +431,15 @@ $(BUILD_DIR)/test_transaction: $(BUILD_DIR)/tests/test_transaction.o $(BUILD_DIR
 $(BUILD_DIR)/test_transaction_fault: $(BUILD_DIR)/tests/test_transaction_fault.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD_DIR)/test_page_file_durable: $(BUILD_DIR)/tests/test_page_file_durable.o $(STORAGE_OBJS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
-
-$(BUILD_DIR)/test_durable_pair: $(BUILD_DIR)/tests/test_durable_pair.o $(BUILD_DIR)/storage/durable_pair.o $(BUILD_DIR)/storage/page_file.o $(BUILD_DIR)/storage/page_cache.o $(BUILD_DIR)/storage/wal.o
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
-
 $(BUILD_DIR)/test_database_txn: $(BUILD_DIR)/tests/test_database_txn.o $(DATABASE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD_DIR)/test_session_txn: $(BUILD_DIR)/tests/test_session_txn.o $(BUILD_DIR)/sql/session.o $(DATABASE_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-test-transaction: $(BUILD_DIR)/test_transaction $(BUILD_DIR)/test_transaction_fault $(BUILD_DIR)/test_page_file_durable $(BUILD_DIR)/test_durable_pair $(BUILD_DIR)/test_database_txn $(BUILD_DIR)/test_session_txn
+test-transaction: $(BUILD_DIR)/test_transaction $(BUILD_DIR)/test_transaction_fault $(BUILD_DIR)/test_database_txn $(BUILD_DIR)/test_session_txn
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_transaction.json -- ./$(BUILD_DIR)/test_transaction
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_transaction_fault.json -- ./$(BUILD_DIR)/test_transaction_fault
-	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_page_file_durable.json -- ./$(BUILD_DIR)/test_page_file_durable
-	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_durable_pair.json -- ./$(BUILD_DIR)/test_durable_pair
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_database_txn.json -- ./$(BUILD_DIR)/test_database_txn
 	$(TEST_RUNNER) --report $(BUILD_DIR)/fault/test_session_txn.json -- ./$(BUILD_DIR)/test_session_txn
 
@@ -464,21 +455,7 @@ test-sqlite-session-diff-harness:
 test-sqlite-session-diff: $(BUILD_DIR)/session_probe test-sqlite-session-diff-harness
 	$(PYTHON) tests/sqlite_session_diff.py --probe ./$(BUILD_DIR)/session_probe --workdir $(SQLITE_DIFF_DIR)
 
-$(BUILD_DIR)/test_wal: $(BUILD_DIR)/tests/test_wal.o $(BUILD_DIR)/storage/wal.o
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
-
-$(BUILD_DIR)/test_wal_crash: $(BUILD_DIR)/tests/test_wal_crash.o $(BUILD_DIR)/storage/wal.o
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
-
-$(BUILD_DIR)/test_wal_alloc: $(BUILD_DIR)/tests/test_wal_alloc.o
-	$(CC) $^ -o $@ $(LDFLAGS)
-
-test-wal: $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_wal_crash $(BUILD_DIR)/test_wal_alloc
-	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED) --report fault/test_wal.json -- ./test_wal
-	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout $(TEST_TIMEOUT) --seed $(FAULT_SEED) --report fault/test_wal_alloc.json -- ./test_wal_alloc
-	cd $(BUILD_DIR) && $(PYTHON) $(abspath tests/fault_runner.py) --timeout 180 --seed $(FAULT_SEED) --report fault/test_wal_crash.json -- ./test_wal_crash
-
-test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters test-ack-queue test-ack-queue-python
+test-all: test test-prop test-step0 test-step1 test-step2 test-step3 test-legacy-adopt test-overflow-file test-value-sqlite test-value-varchar test-repl-boundary test-io-cli test-http-boundary-cli test-database test-corrupt-open test-transaction test-session test-lock-waiters test-ack-queue test-ack-queue-python
 
 clean:
 	rm -rf $(BUILD_DIR) build-o2 *.db __test__*.db __test_step3_*.db
@@ -494,9 +471,8 @@ clean:
 -include $(DATABASE_AUDIT_OBJS:.o=.d)
 
 -include $(BUILD_DIR)/storage/transaction.d
--include $(BUILD_DIR)/storage/wal.d
 
-.PHONY: test-database test-corrupt-open test-transaction test-wal test-session test-lock-waiters
+.PHONY: test-database test-corrupt-open test-transaction test-session test-lock-waiters
 
 .PHONY: all test test-prop test-step0 test-step1 test-step2 test-step3 test-all run run-server gen bench bench-1m bench-http stress clean
 

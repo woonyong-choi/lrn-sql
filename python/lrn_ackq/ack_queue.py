@@ -90,7 +90,6 @@ class AckQueue:
         name: str,
         *,
         install: bool = True,
-        durable: bool = True,
         max_attempts: int = 0,
         clock: Callable[[], int] | None = None,
     ) -> None:
@@ -103,7 +102,6 @@ class AckQueue:
             db.handle,
             name.encode("utf-8"),
             1 if install else 0,
-            1 if durable else 0,
             max_attempts,
             self._clock_callback,
             None,

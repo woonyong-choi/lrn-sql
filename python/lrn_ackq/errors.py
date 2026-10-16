@@ -65,7 +65,7 @@ class ConflictError(LrnAckqError):
 
 
 class UnsupportedError(LrnAckqError):
-    """WAL 없는 DB에서 durable을 요청했거나 읽기 전용 DB에 썼다."""
+    """트랜잭션 계층 없이 연 DB에 쓰기를 요청했다."""
 
 
 class StorageError(LrnAckqError):

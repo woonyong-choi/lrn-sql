@@ -8,7 +8,7 @@
 
 /*
  * 트랜잭션 상태 코어. 저장 방식을 모르는 backend 위에서 가시성(snapshot), commit 결과(성공·실패·불확실),
- * writer 경합·timeout·취소, 자원 회수 시점을 한 곳에서 정한다. 큐·SQL·WAL에 의존하지 않는다.
+ * writer 경합·timeout·취소, 자원 회수 시점을 한 곳에서 정한다. 큐·SQL·저장 형식에 의존하지 않는다.
  *
  * 모델: writer는 한 번에 하나, 읽기 snapshot은 여러 개다. 읽기는 writer를 막지 않는다. 선언 격리는
  * SNAPSHOT 하나다(commit 전 변경은 다른 snapshot에 보이지 않고 rollback 뒤 사라진다). 이 모듈은 가시성
@@ -49,8 +49,9 @@ typedef enum {
 /*
  * commit이 약속하는 보증. 0은 가장 약한 단계라 기본값이 된다.
  * VISIBLE: 게시만 하고 재시작 뒤 보존을 주장하지 않는다.
- * SYNCED:  데이터와 제어 정보를 장치에 동기화했지만 로그가 없어 부분 쓰기·lost write를 복구하지 않는다.
- * DURABLE: WAL 같은 복구 가능한 로그가 동기화된 뒤다. WAL 없는 backend는 선언하면 안 된다.
+ * SYNCED:  변경을 장치에 동기화했지만 동기화 도중 멈추면 재시작 뒤 상태를 약속하지 않는다.
+ * DURABLE: 성공 응답 뒤에는 프로세스·OS 종료 뒤에도 남고, 응답 전에 멈추면 재시작 뒤 이전 또는 새 상태 중 하나다
+ *          (부분 반영 없음). 동기화가 원자적인 게시(COW 제어 페이지 교체)나 동기화된 로그로 얻는다.
  * backend가 선언한 max_guarantee보다 높은 요청은 begin에서 TXN_UNSUPPORTED이며 낮춰 처리하지 않는다.
  */
 typedef enum { TXN_GUARANTEE_VISIBLE, TXN_GUARANTEE_SYNCED, TXN_GUARANTEE_DURABLE } txn_guarantee_t;
@@ -214,7 +215,7 @@ uint64_t txn_snapshot_seq(const txn_t *txn);
  * 응답을 잃은 호출자가 txn_id의 commit 결과를 조회한다. 최근 commit_ring개의 writer 트랜잭션(rollback 포함)을
  * 기억한다. 진행 중이면 BUSY, 링에서 밀려났거나 읽기 전용이면 NOT_FOUND, 이 세대가 아직 발급하지 않은 번호는
  * NOT_FOUND, 다른 세대의 id(같은 프로세스에서 이전에 발급)는 UNSUPPORTED다. 재시작 전 id를 구분하려면 호출자가 영속 세대 번호를
- * 줘야 하고, 재시작 뒤 commit 결과 조회는 WAL이 필요하므로 capability에 없다.
+ * 줘야 하고, 재시작 뒤 commit 결과 조회는 영속 기록이 필요하므로 capability에 없다.
  */
 txn_status_t txn_query_commit(txn_manager_t *manager, uint64_t txn_id, txn_commit_info_t *info);
 

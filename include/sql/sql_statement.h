@@ -26,7 +26,7 @@
  *   UPDATE name SET column_name = value {, column_name = value} [where]
  *   DELETE FROM name [where]
  *   DROP TABLE name
- *   BEGIN [TRANSACTION] [DURABLE | VOLATILE] | START TRANSACTION [DURABLE | VOLATILE]
+ *   BEGIN [TRANSACTION] | START TRANSACTION
  *   COMMIT [TRANSACTION] | ROLLBACK [TRANSACTION]
  *   where      = WHERE column_name ( = | != | <> | < | <= | > | >= ) value
  *              | WHERE column_name IS [NOT] NULL
@@ -122,12 +122,6 @@ typedef enum {
     SQLSTMT_ROLLBACK
 } sqlstmt_kind_t;
 
-/* BEGIN의 보증 선택. DEFAULT는 연결이 정한다(WAL이 있으면 durable, 없으면 volatile) */
-typedef enum { SQLSTMT_TXN_DEFAULT, SQLSTMT_TXN_DURABLE, SQLSTMT_TXN_VOLATILE } sqlstmt_txn_mode_t;
-
-typedef struct {
-    sqlstmt_txn_mode_t mode;     /* BEGIN만 의미가 있다 */
-} sqlstmt_txn_t;
 
 /* 소유한 이름 바이트. NUL 종료가 아니며 길이는 size다. */
 typedef struct {
@@ -224,7 +218,6 @@ typedef struct {
         sqlstmt_update_t update;
         sqlstmt_delete_t del;
         sqlstmt_drop_t drop;
-        sqlstmt_txn_t txn;
     };
 } sqlstmt_t;
 

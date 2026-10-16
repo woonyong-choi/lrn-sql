@@ -345,7 +345,7 @@ def test_shipped_cases_are_valid_and_each_case_names_its_basis() -> None:
 
 # #103 완료 조건 2: BEGIN은 SQLite에서 쓰기 잠금을 즉시 잡는 BEGIN IMMEDIATE로 맞춘다
 def test_sqlite_statement_maps_transaction_start_but_keeps_other_sql() -> None:
-    assert diff.sqlite_statement({"sql": "begin  durable"}) == "BEGIN IMMEDIATE"
+    assert diff.sqlite_statement({"sql": "start  transaction"}) == "BEGIN IMMEDIATE"
     assert diff.sqlite_statement({"sql": "COMMIT"}) == "COMMIT"
     assert diff.sqlite_statement({"sql": "BEGIN", "sql_sqlite": "BEGIN DEFERRED"}) == "BEGIN DEFERRED"
 
@@ -394,7 +394,7 @@ QUITTING_ADAPTER = (
 
 def fake_session(exit_code: int, tmp_path: Path) -> EngineSession:
     argv = [sys.executable, "-c", f"CODE = {exit_code}\n" + QUITTING_ADAPTER]
-    return EngineSession("subject", argv, tmp_path / "db", wal=False, timeout_s=10.0)
+    return EngineSession("subject", argv, tmp_path / "db", timeout_s=10.0)
 
 
 # #103 완료 조건 3: sanitizer 보고처럼 종료 코드가 0이 아니면 종료 시점 실패로 남긴다

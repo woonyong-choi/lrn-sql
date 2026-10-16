@@ -430,18 +430,15 @@ static bool reject_if_exists(parser_t *p)
     return true;
 }
 
-/* BEGIN [TRANSACTION] [DURABLE | VOLATILE], START TRANSACTION [...] */
+/* BEGIN [TRANSACTION], START TRANSACTION */
 static bool parse_begin(parser_t *p, sqlstmt_t *statement, bool start)
 {
     statement->kind = SQLSTMT_BEGIN;
-    statement->txn.mode = SQLSTMT_TXN_DEFAULT;
     if (start) {
         if (!expect_word(p, "TRANSACTION")) return false;
     } else {
         take_word(p, "TRANSACTION");
     }
-    if (take_word(p, "DURABLE")) statement->txn.mode = SQLSTMT_TXN_DURABLE;
-    else if (take_word(p, "VOLATILE")) statement->txn.mode = SQLSTMT_TXN_VOLATILE;
     return parse_end(p);
 }
 

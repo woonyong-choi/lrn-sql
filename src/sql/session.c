@@ -352,7 +352,7 @@ session_status_t session_pool_create_database(session_pool_t *pool, const char *
 
 session_status_t session_pool_open_transactional(session_pool_t *pool, const char *path,
                                                  const database_txn_options_t *options, session_db_t **out,
-                                                 database_status_t *database_status, database_txn_info_t *info)
+                                                 database_status_t *database_status)
 {
     if (pool == NULL || path == NULL || out == NULL) return SESSION_INVALID;
     *out = NULL;
@@ -365,7 +365,7 @@ session_status_t session_pool_open_transactional(session_pool_t *pool, const cha
     database_txn_options_t opened = options != NULL ? *options : (database_txn_options_t){0};
     opened.resident = &ledger;
     database_t *db = NULL;
-    database_status_t status = database_open_transactional(path, &opened, &db, info);
+    database_status_t status = database_open_transactional(path, &opened, &db);
     return finish_open(wrapper, db, status, database_status, out);
 }
 

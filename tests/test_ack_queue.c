@@ -26,7 +26,7 @@ static void test_optional_install(void)
 {
     printf("\n[선택 설치: 큐 없이 DB 단독 사용]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     assert(db != NULL);
     CHECK(exec_ok(db, "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)"), "CRUD 준비");
     CHECK(exec_ok(db, "INSERT INTO notes (body) VALUES ('a')") && exec_ok(db, "UPDATE notes SET body = 'b' WHERE id = 1"),
@@ -40,7 +40,7 @@ static void test_optional_install(void)
     CHECK(exec_ok(db, "DELETE FROM notes WHERE id = 1"), "DB 단독 DELETE");
     database_close(db);
 
-    db = open_db(true);
+    db = open_db();
     CHECK(database_table_count(db) == tables, "재시작 뒤에도 큐 테이블이 없다");
     CHECK(ackq_install(db, &o, &q) == ACKQ_OK && q != NULL, "install");
     CHECK(database_table_count(db) == tables + 1, "설치가 테이블 하나를 만든다");
@@ -65,7 +65,7 @@ static void test_enqueue_claim(void)
 {
     printf("\n[enqueue와 bounded claim]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -112,7 +112,7 @@ static void test_payload_and_idempotency(void)
 {
     printf("\n[payload 경계와 idempotency key]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -199,7 +199,7 @@ static void test_concurrent_claim(void)
 {
     printf("\n[동시 claim]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     o.begin_timeout_ms = TXN_WAIT_FOREVER;
     ackq_t *q;
@@ -263,7 +263,7 @@ static void test_lease_and_fencing(void)
 {
     printf("\n[lease 만료와 stale ACK 거절]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -328,7 +328,7 @@ static void test_nack_retry_terminal(void)
 {
     printf("\n[nack·재시도·terminal failure]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 3);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -412,7 +412,7 @@ static void test_update_release_cursor(void)
 {
     printf("\n[update·release·purge·bounded cursor]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -478,7 +478,7 @@ static void test_same_transaction(void)
 {
     printf("\n[업무 갱신과 ack를 같은 트랜잭션으로]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -543,7 +543,7 @@ static void test_restart_recovery(void)
 {
     printf("\n[재시작 복구: 작업 상태 보존과 lease 의미]\n");
     make_db();
-    database_t *db = open_db(true);
+    database_t *db = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *q;
     assert(ackq_install(db, &o, &q) == ACKQ_OK);
@@ -563,7 +563,7 @@ static void test_restart_recovery(void)
     ackq_close(&q);
     database_close(db);
 
-    db = open_db(true);
+    db = open_db();
     assert(ackq_open(db, &o, &q) == ACKQ_OK);
     ackq_stats_t stats;
     CHECK(ackq_stats(q, NULL, &stats) == ACKQ_OK && stats.acked == 1 && stats.leased == 1 && stats.ready == 3,
@@ -587,7 +587,7 @@ static void test_restart_recovery(void)
     database_close(db);
 
     /* worker가 죽은 채 lease가 만료되면 새 worker가 새 fence로 가져가고 옛 worker의 ack는 거절된다 */
-    db = open_db(true);
+    db = open_db();
     assert(ackq_open(db, &o, &q) == ACKQ_OK);
     g_now = 1300 + 5000;
     n = claim_n(q, 10, 1000);
@@ -604,35 +604,13 @@ static void test_restart_recovery(void)
     database_close(db);
 }
 
-/* ── 10. 보증 선택: WAL 없는 DB의 DURABLE 요청 ── */
-
-static void test_durability_modes(void)
-{
-    printf("\n[내구성 모드: WAL 없는 DB는 DURABLE을 거절하고 VOLATILE만 받는다]\n");
-    make_db();
-    database_t *db = open_db(false);
-    ackq_options_t durable = qopts("jobs", 0);
-    ackq_t *q = NULL;
-    CHECK(ackq_install(db, &durable, &q) == ACKQ_UNSUPPORTED && q == NULL, "DURABLE 설치는 숨기지 않고 UNSUPPORTED");
-    ackq_options_t vol = qopts("jobs", 0);
-    vol.durability = ACKQ_VOLATILE;
-    CHECK(ackq_install(db, &vol, &q) == ACKQ_OK, "VOLATILE 설치");
-    uint64_t id;
-    g_now = 5;
-    CHECK(enq(q, NULL, "v", NULL, &id, NULL) == ACKQ_OK, "VOLATILE enqueue");
-    CHECK(claim_n(q, 1, 100) == 1, "VOLATILE claim");
-    ackq_claims_release(g_items, 1);
-    ackq_close(&q);
-    database_close(db);
-}
-
-/* ── 11. 다른 database의 트랜잭션과 읽기 전용 database ── */
+/* ── 10. 다른 database의 트랜잭션과 읽기 전용 database ── */
 
 static void test_wrong_database_and_read_only(void)
 {
     printf("\n[다른 database의 트랜잭션 거절과 읽기 전용 database]\n");
     make_db();
-    database_t *a = open_db(true);
+    database_t *a = open_db();
     ackq_options_t o = qopts("jobs", 0);
     ackq_t *qa;
     assert(ackq_install(a, &o, &qa) == ACKQ_OK);
@@ -644,16 +622,11 @@ static void test_wrong_database_and_read_only(void)
     ackq_claims_release(g_items, 1);
 
     /* 두 번째 database: 같은 이름의 큐 테이블은 없고 업무 테이블만 있다 */
-    char path_b[192], wal_b[192];
+    char path_b[192];
     snprintf(path_b, sizeof(path_b), "%s/other.lrdb", g_dir);
-    snprintf(wal_b, sizeof(wal_b), "%s/other.wal", g_dir);
     database_t *b = NULL;
     assert(database_create(path_b, &b) == DATABASE_OK && database_close(b) == DATABASE_OK);
-    database_txn_options_t bo = {0};
-    bo.wal_path = wal_b;
-    bo.convert = true;
-    database_txn_info_t info;
-    assert(database_open_transactional(path_b, &bo, &b, &info) == DATABASE_OK);
+    assert(database_open_transactional(path_b, NULL, &b) == DATABASE_OK);
     assert(exec_ok(b, "CREATE TABLE ackq_jobs (id INTEGER PRIMARY KEY, marker TEXT NOT NULL)"));
     assert(exec_ok(b, "INSERT INTO ackq_jobs VALUES (1, 'other-db')"));
 
@@ -719,7 +692,6 @@ int main(void)
     test_update_release_cursor();
     test_same_transaction();
     test_restart_recovery();
-    test_durability_modes();
     test_wrong_database_and_read_only();
     printf("\ntest_ack_queue: %d checks, %d failed\n", g_run, g_fail);
     if (g_fail == 0) remove_dir();

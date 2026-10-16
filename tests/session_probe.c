@@ -2,7 +2,7 @@
  * session_probe.c -- #103 차등 검사의 이 DB 쪽 어댑터. 표준 입력의 한 줄 명령을 받아 연결(session)을 유지한 채
  * 실행하고 결과를 줄 단위로 돌려준다. 프로토콜은 tests/sqlite_session_protocol.py와 같다.
  *
- * 명령: HELLO | OPEN 경로hex wal|nowal new|existing | SESSION 이름 | EXEC 이름 SQLhex 개수 값... | DROP 이름
+ * 명령: HELLO | OPEN 경로hex new|existing | SESSION 이름 | EXEC 이름 SQLhex 개수 값... | DROP 이름
  *       | CLOSE | QUIT. 값은 N, I10진수, R실수비트hex16, T바이트hex, B바이트hex.
  * 응답은 END 줄로 끝난다. SQL 오류 결과는 ERR, 프로브 자체의 실패는 FAULT다. 합성 데이터만 다룬다.
  *
@@ -245,7 +245,6 @@ static void command_exec(char *cursor)
 static void command_open(char *cursor)
 {
     char *path_hex = strtok_r(NULL, " ", &cursor);
-    char *wal = strtok_r(NULL, " ", &cursor);
     char *fresh = strtok_r(NULL, " ", &cursor);
     uint8_t *path_bytes = NULL;
     size_t path_size = 0;
@@ -254,9 +253,7 @@ static void command_open(char *cursor)
         return;
     }
     char *path = strndup((const char *)path_bytes, path_size);
-    char *wal_path = NULL;
-    bool use_wal = strcmp(wal, "wal") == 0, is_new = strcmp(fresh, "new") == 0;
-    if (use_wal && asprintf(&wal_path, "%s.wal", path) < 0) wal_path = NULL;
+    bool is_new = strcmp(fresh, "new") == 0;
     database_status_t db_status = DATABASE_OK;
     if (is_new) {
         database_t *created = NULL;
@@ -266,10 +263,7 @@ static void command_open(char *cursor)
     session_limits_t limits = {POOL_BYTES, POOL_BYTES, POOL_BYTES, MAX_SESSIONS, 0};
     session_status_t status = db_status == DATABASE_OK ? session_pool_open(&limits, &g_pool) : SESSION_INVALID;
     if (status == SESSION_OK) {
-        database_txn_options_t options = {0};
-        options.wal_path = wal_path;
-        options.convert = use_wal && is_new;
-        status = session_pool_open_transactional(g_pool, path, &options, &g_db, &db_status, NULL);
+        status = session_pool_open_transactional(g_pool, path, NULL, &g_db, &db_status);
         if (status != SESSION_OK) {
             session_pool_close(g_pool);
             g_pool = NULL;
@@ -277,7 +271,6 @@ static void command_open(char *cursor)
     }
     if (status == SESSION_OK) printf("OK\nEND\n");
     else reply_fault("open", (int)status, (int)db_status);
-    free(wal_path);
     free(path);
     free(path_bytes);
 }

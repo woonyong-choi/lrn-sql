@@ -59,14 +59,10 @@ struct database {
     pending_error_t pending;
     /* 쓰기 작업과 transaction 계층 */
     work_state_t work;
-    bool replaying;
     bool read_only_call;
     database_control_t *control_sink;
     const database_layer_t *layer;
     void *layer_ctx;
-    const uint8_t *cur_sql;
-    size_t cur_size;
-    const lexer_binding_t *cur_binding;
     heap_stats_t stats;   /* 문장이 연 heap들이 올리는 누적 계수기 */
 };
 
@@ -837,15 +833,6 @@ static database_exec_status_t stage_adopt(database_t *db, work_t *work, heap_bat
                                           const heap_batch_result_t *finished, const uint32_t *drop_pages,
                                           size_t drop_count, result_t *success, result_t **out)
 {
-    if (!db->replaying && db->layer != NULL && db->layer->log_statement != NULL) {
-        bool limit = false;
-        if (!db->layer->log_statement(db->layer_ctx, db->cur_sql, db->cur_size, db->cur_binding, &limit)) {
-            int code = 27;
-            publish_discard(db, work, batch, &success);
-            return limit ? fail_result(db, RESULT_E_LIMIT, code, "트랜잭션 로그 한도를 넘습니다. 이 문장은 반영되지 않았습니다")
-                         : fail_result(db, RESULT_E_IO, code, "트랜잭션 로그에 기록하지 못했습니다. 이 문장은 반영되지 않았습니다");
-        }
-    }
     size_t old_total = finished->old_count + drop_count;
     if (!list_reserve(&db->work.fresh, finished->new_count) || !list_reserve(&db->work.superseded, old_total) ||
         !list_reserve(&db->work.old_committed, old_total)) {
@@ -2297,9 +2284,6 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
         db->control_sink->kind = statement->kind == SQLSTMT_BEGIN ? DATABASE_CONTROL_BEGIN
                                  : statement->kind == SQLSTMT_COMMIT ? DATABASE_CONTROL_COMMIT
                                                                      : DATABASE_CONTROL_ROLLBACK;
-        db->control_sink->mode = statement->txn.mode == SQLSTMT_TXN_DURABLE ? DATABASE_CONTROL_DURABLE
-                                 : statement->txn.mode == SQLSTMT_TXN_VOLATILE ? DATABASE_CONTROL_VOLATILE
-                                                                              : DATABASE_CONTROL_DEFAULT;
         status = DATABASE_EXEC_CONTROL;
         goto done;
     }
@@ -2317,9 +2301,6 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
         status = fail_result(db, RESULT_E_SEMANTIC, 22, "읽기 전용으로 연 데이터베이스입니다");
         goto done;
     }
-    db->cur_sql = text;
-    db->cur_size = size;
-    db->cur_binding = bound;
     switch (statement->kind) {
         case SQLSTMT_CREATE_TABLE: status = exec_create(db, &statement->create, out); break;
         case SQLSTMT_CREATE_INDEX: status = exec_create_index(db, &statement->index, out); break;
@@ -2331,9 +2312,6 @@ static database_exec_status_t exec_statement(database_t *db, const database_exec
         default: status = fail_result(db, RESULT_E_INTERNAL, 21, "문장을 실행하지 못했습니다"); break;
     }
 done:
-    db->cur_sql = NULL;
-    db->cur_size = 0;
-    db->cur_binding = NULL;
     sqlstmt_free(statement);
     q_release(db, parse_peak);
     lexer_free(lexed);
@@ -2382,7 +2360,7 @@ void database_set_control_sink(database_t *db, database_control_t *sink)
 {
     if (db == NULL) return;
     db->control_sink = sink;
-    if (sink != NULL) *sink = (database_control_t){DATABASE_CONTROL_NONE, DATABASE_CONTROL_DEFAULT};
+    if (sink != NULL) *sink = (database_control_t){DATABASE_CONTROL_NONE};
 }
 
 database_exec_status_t database_command_result(database_t *db, const database_exec_options_t *opts, const char *tag,
@@ -2419,13 +2397,11 @@ void database_poison(database_t *db)
 
 database_exec_status_t database_exec_in_work(database_t *db, const database_exec_options_t *opts,
                                              const uint8_t *sql, size_t size,
-                                             const lexer_binding_t *binding, bool replay, result_t **out)
+                                             const lexer_binding_t *binding, result_t **out)
 {
     if (db == NULL || out == NULL || (size > 0 && sql == NULL) || !db->work.active) return DATABASE_EXEC_INVALID;
     db->work.inside = true;
-    db->replaying = replay;
     database_exec_status_t status = run_statement(db, opts, sql, size, binding, out);
-    db->replaying = false;
     db->work.inside = false;
     bool failed = (status != DATABASE_EXEC_OK && status != DATABASE_EXEC_CONTROL) ||
                   (*out != NULL && result_kind(*out) == RESULT_KIND_ERROR);
@@ -2449,24 +2425,6 @@ database_status_t database_set_layer(database_t *db, const database_layer_t *lay
     return DATABASE_OK;
 }
 
-database_status_t database_adopt_file(page_file_t *file, bool writable, database_t **out)
-{
-    if (file == NULL || out == NULL) return DATABASE_INVALID;
-    database_t *db = calloc(1, sizeof(*db));
-    if (db == NULL) return DATABASE_NOMEM;
-    db->writable = writable;
-    db->file = file;
-    catalog_store_status_t loaded = catalog_store_load(file, &db->catalog);
-    if (loaded != CATALOG_STORE_OK) {
-        int saved = errno;
-        free(db);
-        errno = saved;
-        return loaded == CATALOG_STORE_EMPTY ? DATABASE_CORRUPT : from_store(loaded);
-    }
-    *out = db;
-    return DATABASE_OK;
-}
-
 page_file_t *database_page_file(database_t *db) { return db != NULL ? db->file : NULL; }
 
 database_status_t database_work_begin(database_t *db)
@@ -2482,7 +2440,7 @@ bool database_work_active(const database_t *db) { return db != NULL && db->work.
 bool database_work_failed(const database_t *db) { return db != NULL && db->work.failed; }
 bool database_work_dirty(const database_t *db) { return db != NULL && db->work.cat != NULL; }
 
-database_work_result_t database_work_commit(database_t *db, const uint64_t *applied_lsn)
+database_work_result_t database_work_commit(database_t *db)
 {
     database_work_result_t result = {DATABASE_WORK_NOT_APPLIED, false, EINVAL};
     if (db == NULL || !db->work.active || db->work.failed) return result;
@@ -2504,8 +2462,7 @@ database_work_result_t database_work_commit(database_t *db, const uint64_t *appl
         result.saved_errno = ENOMEM;
         return result;
     }
-    catalog_store_status_t saved = applied_lsn != NULL ? catalog_store_save_applied(db->file, db->work.cat, *applied_lsn)
-                                                       : catalog_store_save(db->file, db->work.cat);
+    catalog_store_status_t saved = catalog_store_save(db->file, db->work.cat);
     result.saved_errno = errno;
     mem_release(&db->resident, MEM_SCOPE_RESIDENT, save_peak);
     if (saved == CATALOG_STORE_OK || saved == CATALOG_STORE_UNRECLAIMED) {

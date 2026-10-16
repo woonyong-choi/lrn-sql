@@ -236,7 +236,6 @@ static ackq_status_t make_queue(database_t *db, const ackq_options_t *options, a
 {
     *out = NULL;
     if (db == NULL || options == NULL || !valid_name(options->name)) return ACKQ_INVALID;
-    if (options->durability != ACKQ_DURABLE && options->durability != ACKQ_VOLATILE) return ACKQ_INVALID;
     ackq_t *queue = calloc(1, sizeof(*queue));
     if (queue == NULL) return ACKQ_NOMEM;
     queue->db = db;
@@ -244,7 +243,6 @@ static ackq_status_t make_queue(database_t *db, const ackq_options_t *options, a
     snprintf(queue->table, sizeof(queue->table), "ackq_%s", options->name);
     queue->max_attempts = options->max_attempts;
     queue->begin_timeout_ms = options->begin_timeout_ms;
-    queue->guarantee = options->durability == ACKQ_DURABLE ? TXN_GUARANTEE_DURABLE : TXN_GUARANTEE_SYNCED;
     queue->now_ms = options->now_ms;
     queue->clock_ctx = options->clock_ctx;
     if (options->ledger != NULL) {

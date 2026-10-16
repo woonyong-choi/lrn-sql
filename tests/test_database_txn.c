@@ -1,13 +1,13 @@
 /*
  * test_database_txn.c -- database의 트랜잭션 경계(#8): 여러 문장의 commit·rollback, 미확정 변경 비노출, writer 직렬화,
- * durable commit 전후의 종료·I/O 실패와 재시작 복구, 영속 epoch를 실제 database·page_file·WAL 파일로 검사한다.
+ * commit 전후의 종료·I/O 실패와 재시작 뒤 상태를 실제 database·page_file 파일로 검사한다.
  *
  * 합성 데이터만 쓴다. 호출은 공개 API(database, database_txn, transaction)로 한다. 다루지 않는 것: 전원 장애,
  * lost write, 여러 스레드가 같은 database를 직접 호출하는 직렬화(session 계층의 몫), 큐 ACK(#140).
  *
  * 빌드(저장소 루트): tests/test_database_txn.c src/sql/{database,database_txn,sql_statement,lexer,result}.c
- *   src/storage/{heap_store,record,record_page,overflow,value,catalog,page_file,catalog_store,legacy_migrate,
- *   durable_pair,wal,transaction}.c -lpthread -lm
+ *   src/storage/{heap_store,record,record_page,overflow,value,catalog,page_file,page_cache,catalog_store,
+ *   legacy_migrate,transaction}.c -lpthread -lm
  */
 
 #define _GNU_SOURCE
@@ -31,7 +31,6 @@
 
 #define DIR_NAME "__test__database_txn"
 #define DB DIR_NAME "/db.lrdb"
-#define WAL DIR_NAME "/db.wal"
 
 static int g_run, g_fail;
 
@@ -97,30 +96,19 @@ static void write_all(const char *path, const uint8_t *buf, size_t len)
 }
 
 typedef struct {
-    uint8_t *db, *wal;
-    size_t db_len, wal_len;
-    bool has_wal;
+    uint8_t *db;
+    size_t db_len;
 } snap_t;
 
 static void snap_take(snap_t *s)
 {
     memset(s, 0, sizeof(*s));
     read_all(DB, &s->db, &s->db_len);
-    s->has_wal = read_all(WAL, &s->wal, &s->wal_len);
 }
 
-static void snap_restore(const snap_t *s)
-{
-    write_all(DB, s->db, s->db_len);
-    if (s->has_wal) write_all(WAL, s->wal, s->wal_len);
-    else unlink(WAL);
-}
+static void snap_restore(const snap_t *s) { write_all(DB, s->db, s->db_len); }
 
-static void snap_free(snap_t *s)
-{
-    free(s->db);
-    free(s->wal);
-}
+static void snap_free(snap_t *s) { free(s->db); }
 
 static off_t file_size(const char *path)
 {
@@ -279,13 +267,10 @@ static void make_db(void)
     assert(database_close(db) == DATABASE_OK);
 }
 
-static database_t *open_tx(bool with_wal, bool convert, database_txn_info_t *info)
+static database_t *open_tx(void)
 {
-    database_txn_options_t o = {0};
-    o.wal_path = with_wal ? WAL : NULL;
-    o.convert = convert;
     database_t *db = NULL;
-    database_status_t st = database_open_transactional(DB, &o, &db, info);
+    database_status_t st = database_open_transactional(DB, NULL, &db);
     if (st != DATABASE_OK) {
         printf("  open 실패 status=%d\n", (int)st);
         return NULL;
@@ -311,7 +296,7 @@ static void test_commit_and_rollback(void)
 {
     printf("\n[여러 문장의 commit·rollback과 미확정 변경 비노출]\n");
     make_db();
-    database_t *db = open_tx(false, false, NULL);
+    database_t *db = open_tx();
     assert(db != NULL);
     seed_schema(db);
     exec_ok(db, NULL, "INSERT INTO t (v) VALUES ('a')");
@@ -347,7 +332,7 @@ static void test_commit_and_rollback(void)
 
     /* 닫고 다시 열어도 같다 */
     CHECK(database_close(db) == DATABASE_OK, "close");
-    db = open_tx(false, false, NULL);
+    db = open_tx();
     after = state_of(db);
     CHECK(strcmp(after, "[2] 1|'A'/ 3|'c' ## [2] 1|'one'/ 2|'two'") == 0, "재시작 뒤 상태: %s", after);
     free(after);
@@ -388,7 +373,7 @@ static void test_index_transaction(void)
 {
     printf("\n[보조 인덱스의 commit·rollback과 writer 직렬화]\n");
     make_db();
-    database_t *db = open_tx(false, false, NULL);
+    database_t *db = open_tx();
     assert(db != NULL);
     exec_ok(db, NULL, "CREATE TABLE indexed (id INTEGER PRIMARY KEY, email TEXT)");
     exec_ok(db, NULL, "CREATE UNIQUE INDEX by_email ON indexed (email)");
@@ -405,7 +390,7 @@ static void test_index_transaction(void)
     CHECK(database_txn_release(&txn) == TXN_OK, "인덱스 writer 해제");
     expect(db, NULL, "SELECT id FROM indexed WHERE email = 'a@x'", "[1] 1");
     CHECK(database_close(db) == DATABASE_OK, "인덱스 재열기 전 종료");
-    db = open_tx(false, false, NULL);
+    db = open_tx();
     assert(db != NULL);
     expect(db, NULL, "SELECT id FROM indexed WHERE email = 'a@x'", "[1] 1");
     CHECK(database_txn_begin(db, &options, &txn) == TXN_OK, "rollback writer 시작");
@@ -423,7 +408,7 @@ static void test_statement_error_requires_rollback(void)
 {
     printf("\n[문장 오류 뒤 명시적 rollback]\n");
     make_db();
-    database_t *db = open_tx(false, false, NULL);
+    database_t *db = open_tx();
     seed_schema(db);
     exec_ok(db, NULL, "INSERT INTO u VALUES (1, 'one')");
     txn_begin_options_t o = rw(TXN_GUARANTEE_SYNCED, 0);
@@ -448,14 +433,18 @@ static void test_statement_error_requires_rollback(void)
     database_txn_release(&txn);
     expect(db, NULL, "SELECT * FROM u", "[2] 1|'one'/ 2|'two'");
 
-    /* 읽기 전용·다른 격리·WAL 없는 DURABLE은 지원하지 않는다 */
+    /* 읽기 전용·다른 격리는 지원하지 않는다. 어떤 보증을 요청해도 commit은 DURABLE이다 */
     txn_begin_options_t ro = {TXN_ACCESS_READ_ONLY, TXN_ISOLATION_SNAPSHOT, TXN_GUARANTEE_VISIBLE, 0, NULL};
     CHECK(database_txn_begin(db, &ro, &txn) == TXN_UNSUPPORTED, "읽기 전용 handle은 미지원");
     txn_begin_options_t rc = {TXN_ACCESS_READ_WRITE, TXN_ISOLATION_READ_COMMITTED, TXN_GUARANTEE_VISIBLE, 0, NULL};
     CHECK(database_txn_begin(db, &rc, &txn) == TXN_UNSUPPORTED, "READ_COMMITTED 미지원");
-    txn_begin_options_t du = rw(TXN_GUARANTEE_DURABLE, 0);
-    CHECK(database_txn_begin(db, &du, &txn) == TXN_UNSUPPORTED, "WAL 없이 DURABLE 거절");
     CHECK(txn == NULL, "실패하면 NULL");
+    txn_begin_options_t du = rw(TXN_GUARANTEE_DURABLE, 0);
+    txn_commit_info_t info;
+    CHECK(database_txn_begin(db, &du, &txn) == TXN_OK, "DURABLE 요청");
+    exec_ok(db, txn, "INSERT INTO u VALUES (3, 'three')");
+    CHECK(database_txn_commit(txn, &info) == TXN_OK && info.guarantee == TXN_GUARANTEE_DURABLE, "달성 보증은 DURABLE");
+    database_txn_release(&txn);
     database_close(db);
 }
 
@@ -479,7 +468,7 @@ static void test_waiting_writer(void)
 {
     printf("\n[writer 대기와 다음 writer 실행]\n");
     make_db();
-    database_t *db = open_tx(false, false, NULL);
+    database_t *db = open_tx();
     seed_schema(db);
     txn_begin_options_t o = rw(TXN_GUARANTEE_SYNCED, 0);
     database_txn_t *first = NULL;
@@ -516,7 +505,7 @@ static void test_rollback_space(void)
 {
     printf("\n[rollback 반복의 공간 회수]\n");
     make_db();
-    database_t *db = open_tx(false, false, NULL);
+    database_t *db = open_tx();
     seed_schema(db);
     exec_ok(db, NULL, "INSERT INTO t (v) VALUES ('seed')");
     exec_ok(db, NULL, "INSERT INTO u VALUES (1, 'seed')");
@@ -538,7 +527,7 @@ static void test_rollback_space(void)
     database_close(db);
 }
 
-/* ── 5. durable commit, 재시작, 복구 ── */
+/* ── 5. commit과 재시작 ── */
 
 static const char *WRITE_STATEMENTS[] = {
     "INSERT INTO t (v) VALUES ('durable-1')",
@@ -585,59 +574,50 @@ static const char *OLD_U = "[1] 1|'one'";
 static void prepare_base(void)
 {
     make_db();
-    database_txn_info_t info;
-    database_t *db = open_tx(true, true, &info);
-    assert(db != NULL && info.wal_present);
+    database_t *db = open_tx();
+    assert(db != NULL);
     seed_schema(db);
     exec_ok(db, NULL, "INSERT INTO t (v) VALUES ('base')");
     exec_ok(db, NULL, "INSERT INTO u VALUES (1, 'one')");
     assert(database_close(db) == DATABASE_OK);
 }
 
-static void test_durable_basic(void)
+static void test_commit_restart(void)
 {
-    printf("\n[durable commit과 재시작]\n");
+    printf("\n[commit과 재시작]\n");
     prepare_base();
-    database_txn_info_t info;
-    database_t *db = open_tx(true, false, &info);
-    CHECK(db != NULL && info.replayed_txns == 0, "자동 commit 3건은 적용된 채 닫혔다");
+    database_t *db = open_tx();
+    CHECK(db != NULL, "자동 commit 4건은 적용된 채 닫혔다");
     if (db == NULL) return;
     char *old = state_of(db);
     CHECK(strcmp(old, "[1] 1|'base' ## [1] 1|'one'") == 0, "기준 상태: %s", old);
     free(old);
-    uint32_t epoch = database_txn_epoch(db);
-    CHECK(epoch > 0 && info.epoch == epoch, "열 때 영속한 epoch");
     bool committed = false;
     txn_status_t cs = TXN_OK;
-    CHECK(run_write_txn(db, TXN_GUARANTEE_DURABLE, &committed, &cs) && committed, "durable commit %d", (int)cs);
+    CHECK(run_write_txn(db, TXN_GUARANTEE_DURABLE, &committed, &cs) && committed, "commit %d", (int)cs);
     char *neu = state_of(db);
-    CHECK(strcmp(neu, "[2] 1|'durable-0'/ 2|'durable-1'... ") != 0, "상태가 바뀌었다");
     CHECK(database_close(db) == DATABASE_OK, "close");
 
-    db = open_tx(true, false, &info);
+    db = open_tx();
     char *after = db != NULL ? state_of(db) : strdup("open-fail");
     CHECK(strcmp(after, neu) == 0, "재시작 뒤 같은 상태\n      전: %s\n      후: %s", neu, after);
-    CHECK(info.replayed_txns == 0, "게시된 거래는 다시 실행하지 않는다 (%llu)", (unsigned long long)info.replayed_txns);
-    CHECK(info.epoch > epoch, "재시작마다 epoch가 올라간다 %u -> %u", epoch, info.epoch);
     free(neu);
     free(after);
 
-    /* rollback한 durable 거래와 끝나지 않은 거래는 재시작 뒤 보이지 않는다 */
-    char *kept = state_of(db);
+    /* rollback한 거래는 재시작 뒤 보이지 않는다 */
     txn_begin_options_t o = rw(TXN_GUARANTEE_DURABLE, 0);
     database_txn_t *txn = NULL;
     CHECK(database_txn_begin(db, &o, &txn) == TXN_OK, "begin");
     exec_ok(db, txn, "INSERT INTO u VALUES (77, 'rolled')");
     CHECK(database_txn_rollback(txn) == TXN_OK, "rollback");
     database_txn_release(&txn);
-    exec_ok(db, NULL, "INSERT INTO u VALUES (78, 'auto')");  /* 뒤이은 승인된 거래의 commit이 앞선 abort를 flush한다 */
+    exec_ok(db, NULL, "INSERT INTO u VALUES (78, 'auto')");
     CHECK(database_close(db) == DATABASE_OK, "close");
-    db = open_tx(true, false, &info);
+    db = open_tx();
     char *final_state = state_of(db);
     CHECK(strstr(final_state, "rolled") == NULL && strstr(final_state, "78|'auto'") != NULL,
           "rollback한 거래는 없고 뒤이은 거래는 있다: %s", final_state);
     free(final_state);
-    free(kept);
     database_close(db);
 }
 
@@ -676,17 +656,6 @@ static int h_fsync(int fd)
     return r;
 }
 
-static int h_ftruncate(int fd, off_t len)
-{
-    if (point()) {
-        errno = EIO;
-        return -1;
-    }
-    int r = ftruncate(fd, len);
-    point();
-    return r;
-}
-
 static int h_link(const char *a, const char *b)
 {
     point();
@@ -703,37 +672,21 @@ static void hooks_on(void)
 {
     page_file_io_t pio = {pread, h_pwrite, h_fsync, h_link, h_unlink};
     page_file_set_default_io(&pio);
-    wal_io_t wio = {pread, h_pwrite, h_fsync, h_ftruncate};
-    wal_set_default_io(&wio);
 }
 
 static void hooks_off(void)
 {
     page_file_set_default_io(NULL);
-    wal_set_default_io(NULL);
-}
-
-/* WAL에 COMMIT이 fsync된 거래 수. WAL이 없으면 0 */
-static uint64_t wal_committed_count(void)
-{
-    wal_t *w = NULL;
-    wal_open_info_t info;
-    if (wal_open(WAL, false, &w, &info) != WAL_OK) return 0;
-    uint64_t n = info.committed;
-    wal_close(w);
-    return n;
 }
 
 /* 열려 있는 재시작 뒤 상태가 old 또는 new와 같은지, 그리고 이어서 쓸 수 있는지 */
 typedef enum { STATE_OLD, STATE_NEW, STATE_OTHER, STATE_OPEN_FAILED } state_kind_t;
 
-static state_kind_t classify(const char *old_state, const char *new_state, uint64_t *replayed, char **text)
+static state_kind_t classify(const char *old_state, const char *new_state, char **text)
 {
-    database_txn_info_t info;
-    database_t *db = open_tx(true, false, &info);
+    database_t *db = open_tx();
     if (db == NULL) return STATE_OPEN_FAILED;
     char *s = state_of(db);
-    if (replayed != NULL) *replayed = info.replayed_txns;
     state_kind_t kind = strcmp(s, old_state) == 0 ? STATE_OLD : strcmp(s, new_state) == 0 ? STATE_NEW : STATE_OTHER;
     /* 복구 뒤 이어서 쓰고 다시 읽을 수 있다 */
     char *line = run(db, NULL, "INSERT INTO u VALUES (500, 'after')", NULL, 0);
@@ -741,7 +694,7 @@ static state_kind_t classify(const char *old_state, const char *new_state, uint6
     free(line);
     database_close(db);
     if (!wrote) kind = STATE_OTHER;
-    db = open_tx(true, false, &info);
+    db = open_tx();
     if (db == NULL) {
         kind = STATE_OPEN_FAILED;
     } else {
@@ -755,18 +708,17 @@ static state_kind_t classify(const char *old_state, const char *new_state, uint6
     return kind;
 }
 
-static void test_durable_crash_points(void)
+static void test_crash_points(void)
 {
-    printf("\n[durable commit 전후의 종료 지점]\n");
+    printf("\n[commit 전후의 종료 지점과 I/O 실패]\n");
     prepare_base();
     snap_t base;
     snap_take(&base);
     char *old_state = strdup("[1] 1|'base' ## [1] 1|'one'");
-    uint64_t base_committed = wal_committed_count();
 
     /* 기대하는 새 상태와 지점 수: 처음부터 끝까지 실행 */
     hooks_on();
-    database_t *db = open_tx(true, false, NULL);
+    database_t *db = open_tx();
     g_fail_mode = true;
     g_fail_at = 0;
     g_points_seen = 0;
@@ -780,13 +732,13 @@ static void test_durable_crash_points(void)
     CHECK(total > 8, "지점 수 %ld", total);
     CHECK(strcmp(new_state, old_state) != 0, "새 상태가 다르다");
 
-    int bad = 0, crashed = 0, replayed_cases = 0, acknowledged = 0;
+    int bad = 0, crashed = 0, acknowledged = 0;
     for (long k = 0; k <= total; k++) {
         snap_restore(&base);
         pid_t pid = fork();
         if (pid == 0) {
             hooks_on();
-            database_t *c = open_tx(true, false, NULL);
+            database_t *c = open_tx();
             if (c == NULL) _exit(4);
             g_points_left = k;
             bool ok = false;
@@ -804,23 +756,17 @@ static void test_durable_crash_points(void)
         }
         crashed += died;
         acknowledged += acked;
-        uint64_t logged_commits = wal_committed_count() - base_committed;
-        uint64_t replayed = 0;
         char *text = NULL;
-        state_kind_t kind = classify(old_state, new_state, &replayed, &text);
-        bool good = kind == STATE_OLD || kind == STATE_NEW;
-        if (acked && kind != STATE_NEW) good = false;  /* 승인한 변경은 보존된다 */
-        if (logged_commits > 0 && kind != STATE_NEW) good = false;  /* WAL에 승인된 거래는 응답 여부와 무관하게 보존된다 */
-        if (logged_commits == 0 && kind == STATE_NEW) good = false;  /* 승인되지 않은 거래가 보이면 안 된다 */
+        state_kind_t kind = classify(old_state, new_state, &text);
+        bool good = kind == STATE_OLD || kind == STATE_NEW;  /* 부분 반영은 없다 */
+        if (acked && kind != STATE_NEW) good = false;        /* 승인한 변경은 보존된다 */
         if (!good) {
             printf("  k=%ld %s: 상태 %s\n", k, acked ? "승인 응답" : "종료", text != NULL ? text : "(열기 실패)");
             bad++;
         }
-        if (replayed > 0) replayed_cases++;
         free(text);
     }
     CHECK(bad == 0 && crashed > 0, "종료 지점 %ld곳 어긋남 %d (종료 %d, 승인 %d)", total + 1, bad, crashed, acknowledged);
-    CHECK(replayed_cases > 0, "WAL 승인 뒤 데이터 반영 전 종료를 복구가 다시 반영한 경우가 있다 (%d)", replayed_cases);
 
     /* I/O 실패: 승인 응답이면 새 상태, 확정 실패면 옛 상태, 불확정이면 둘 중 하나 */
     bad = 0;
@@ -829,7 +775,7 @@ static void test_durable_crash_points(void)
     for (long k = 1; k <= total; k++) {
         snap_restore(&base);
         hooks_on();
-        database_t *c = open_tx(true, false, NULL);
+        database_t *c = open_tx();
         g_fail_mode = true;
         g_fail_at = k;
         g_fail_seen = 0;
@@ -841,14 +787,10 @@ static void test_durable_crash_points(void)
         hooks_off();
         bool poisoned = database_txn_layer_poisoned(c);
         database_close(c);
-        uint64_t logged_commits = wal_committed_count() - base_committed;
-        uint64_t replayed = 0;
         char *text = NULL;
-        state_kind_t kind = classify(old_state, new_state, &replayed, &text);
+        state_kind_t kind = classify(old_state, new_state, &text);
         bool good;
-        if (logged_commits > 0 && kind != STATE_NEW) good = false;
-        else if (logged_commits == 0 && kind == STATE_NEW) good = false;
-        else if (ok) good = kind == STATE_NEW;
+        if (ok) good = kind == STATE_NEW;
         else if (cs == TXN_COMMIT_UNCERTAIN) {
             good = kind == STATE_OLD || kind == STATE_NEW;
             uncertain++;
@@ -875,7 +817,7 @@ static void test_unfinished_and_autocommit(void)
     prepare_base();
     pid_t pid = fork();
     if (pid == 0) {
-        database_t *c = open_tx(true, false, NULL);
+        database_t *c = open_tx();
         if (c == NULL) _exit(4);
         txn_begin_options_t o = rw(TXN_GUARANTEE_DURABLE, 0);
         database_txn_t *txn = NULL;
@@ -887,111 +829,37 @@ static void test_unfinished_and_autocommit(void)
     }
     int status;
     waitpid(pid, &status, 0);
-    database_txn_info_t info;
-    database_t *db = open_tx(true, false, &info);
-    CHECK(db != NULL && info.replayed_txns == 0, "끝나지 않은 거래는 복구하지 않는다");
+    database_t *db = open_tx();
+    CHECK(db != NULL, "다시 열린다");
     if (db == NULL) return;
     expect(db, NULL, "SELECT * FROM u", OLD_U);
     expect(db, NULL, "SELECT * FROM t", OLD_STATE);
-    /* 자동 commit도 durable이다: 응답 직후 종료해도 보존된다 */
+    /* 자동 commit도 응답 직후 종료해도 보존된다 */
     database_close(db);
     pid = fork();
     if (pid == 0) {
-        database_t *c = open_tx(true, false, NULL);
+        database_t *c = open_tx();
         char *line = run(c, NULL, "INSERT INTO u VALUES (11, 'auto')", NULL, 0);
         _exit(is_ok(line) ? 0 : 3);
     }
     waitpid(pid, &status, 0);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "자동 commit 응답");
-    db = open_tx(true, false, &info);
+    db = open_tx();
     expect(db, NULL, "SELECT * FROM u", "[2] 11|'auto'/ 1|'one'");
     database_close(db);
 }
 
-/* ── 7. 재시작 뒤 트랜잭션 id는 재사용되지 않는다(영속 epoch) ── */
-
-static void damage_slot(int slot)
-{
-    uint8_t b;
-    int fd = open(DB, O_RDWR);
-    off_t off = (off_t)slot * PAGE_FILE_PAGE_BYTES + 200;
-    if (fd >= 0 && pread(fd, &b, 1, off) == 1) {
-        b ^= 0x5A;
-        if (pwrite(fd, &b, 1, off) != 1) fprintf(stderr, "damage 실패\n");
-    }
-    if (fd >= 0) close(fd);
-}
-
-static int newest_slot(void)
-{
-    uint8_t *all = NULL;
-    size_t len = 0;
-    uint64_t best = 0;
-    int newest = 0;
-    if (read_all(DB, &all, &len) && len >= 2 * PAGE_FILE_PAGE_BYTES) {
-        for (int slot = 0; slot < 2; slot++) {
-            uint64_t gen = 0;
-            for (int i = 7; i >= 0; i--) gen = (gen << 8) | all[(size_t)slot * PAGE_FILE_PAGE_BYTES + 32 + 20 + i];
-            if (gen > best) {
-                best = gen;
-                newest = slot;
-            }
-        }
-    }
-    free(all);
-    return newest;
-}
-
-static void test_epoch_not_reused(void)
-{
-    printf("\n[재시작 뒤 트랜잭션 id 재사용 금지]\n");
-    prepare_base();
-    txn_begin_options_t o = rw(TXN_GUARANTEE_DURABLE, 0);
-    database_t *db = open_tx(true, false, NULL);
-    database_txn_t *txn = NULL;
-    CHECK(database_txn_begin(db, &o, &txn) == TXN_OK, "begin");
-    uint64_t first = database_txn_id(txn);
-    database_txn_rollback(txn);  /* WAL에 기록이 없는 거래 */
-    database_txn_release(&txn);
-    database_close(db);
-
-    /* 최신 제어 슬롯이 손상돼도 floor가 내려가지 않는다 */
-    damage_slot(newest_slot());
-    database_txn_info_t info;
-    db = open_tx(true, false, &info);
-    CHECK(db != NULL, "한 슬롯 손상은 열린다");
-    if (db == NULL) return;
-    CHECK(database_txn_begin(db, &o, &txn) == TXN_OK, "begin");
-    uint64_t second = database_txn_id(txn);
-    CHECK(second > first && (second >> 32) > (first >> 32), "id %llx -> %llx", (unsigned long long)first,
-          (unsigned long long)second);
-    database_txn_release(&txn);
-    /* 응답을 잃은 호출자의 조회: 같은 프로세스의 이전 거래는 기억한다 */
-    txn_commit_info_t ci;
-    CHECK(database_txn_query_commit(db, second, &ci) == TXN_BUSY || database_txn_query_commit(db, second, &ci) == TXN_OK,
-          "조회");
-    database_close(db);
-}
-
-/* ── 8. 지원하지 않는 열기 ── */
+/* ── 7. 지원하지 않는 열기 ── */
 
 static void test_open_rejections(void)
 {
     printf("\n[열기 거절]\n");
     prepare_base();
     /* 같은 파일을 두 번 쓰기로 열 수 없다 */
-    database_t *db = open_tx(true, false, NULL);
-    database_txn_options_t o = {0};
-    o.wal_path = WAL;
+    database_t *db = open_tx();
     database_t *second = NULL;
-    database_txn_info_t info;
-    CHECK(database_open_transactional(DB, &o, &second, &info) == DATABASE_LOCKED && second == NULL, "이중 열기는 LOCKED");
+    CHECK(database_open_transactional(DB, NULL, &second) == DATABASE_LOCKED && second == NULL, "이중 열기는 LOCKED");
     database_close(db);
-    /* WAL이 사라지면 새로 만들지 않고 거절한다 */
-    unlink(WAL);
-    o.convert = true;
-    CHECK(database_open_transactional(DB, &o, &second, &info) == DATABASE_CORRUPT && second == NULL,
-          "WAL 누락은 거절 (pair=%d)", info.pair_status);
 }
 
 int main(void)
@@ -1002,10 +870,9 @@ int main(void)
     test_statement_error_requires_rollback();
     test_waiting_writer();
     test_rollback_space();
-    test_durable_basic();
-    test_durable_crash_points();
+    test_commit_restart();
+    test_crash_points();
     test_unfinished_and_autocommit();
-    test_epoch_not_reused();
     test_open_rejections();
     fresh_dir();
     rmdir(DIR_NAME);

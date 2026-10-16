@@ -45,8 +45,8 @@ CASES_PATH = Path(__file__).with_name("sqlite_session_cases.json")
 ADAPTER_PATH = Path(__file__).with_name("sqlite_session_adapter.py")
 SQLITE_STATEMENT_MAP = {
     "BEGIN": "BEGIN IMMEDIATE",
-    "BEGIN DURABLE": "BEGIN IMMEDIATE",
-    "BEGIN VOLATILE": "BEGIN IMMEDIATE",
+    "BEGIN TRANSACTION": "BEGIN IMMEDIATE",
+    "START TRANSACTION": "BEGIN IMMEDIATE",
 }
 
 
@@ -189,19 +189,16 @@ def not_run_case(case: dict[str, Any], reason: str) -> list[StepVerdict]:
 def run_case(case: dict[str, Any], probe: Path, workdir: Path, timeout_s: float) -> list[StepVerdict]:
     case_dir = workdir / case["id"]
     case_dir.mkdir()
-    wal = bool(case.get("wal", True))
     reference = EngineSession(
         "sqlite",
         [sys.executable, str(ADAPTER_PATH)],
         case_dir / case_database_name("sqlite"),
-        wal=wal,
         timeout_s=timeout_s,
     )
     subject = EngineSession(
         "subject",
         [str(probe)],
         case_dir / case_database_name("subject"),
-        wal=wal,
         timeout_s=timeout_s,
     )
     try:
@@ -220,7 +217,6 @@ def sqlite_version(timeout_s: float) -> str | None:
         "sqlite",
         [sys.executable, str(ADAPTER_PATH)],
         Path("unused"),
-        wal=False,
         timeout_s=timeout_s,
     )
     try:

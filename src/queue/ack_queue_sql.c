@@ -82,7 +82,7 @@ ackq_status_t ackq_scope_open(ackq_t *queue, database_txn_t *given, bool write, 
     if (!write) return ACKQ_OK;
     txn_begin_options_t options = {.access = TXN_ACCESS_READ_WRITE,
                                    .isolation = TXN_ISOLATION_SNAPSHOT,
-                                   .guarantee = queue->guarantee,
+                                   .guarantee = TXN_GUARANTEE_DURABLE,
                                    .timeout_ms = queue->begin_timeout_ms};
     txn_status_t status = database_txn_begin(queue->db, &options, &scope->txn);
     /* 트랜잭션 계층이 없는 database(읽기 전용으로 열었거나 database_open으로 연 것)는 쓰기를 할 수 없다 */

@@ -24,10 +24,8 @@
  * exactly-once나 원자적 commit은 제공하지 않는다. idempotency key가 같고 payload가 같은 enqueue는 기존 작업을
  * 돌려주고(duplicate), payload가 다르면 ACKQ_CONFLICT다.
  *
- * 내구성: ACKQ_DURABLE은 WAL이 있는 database(database_open_transactional의 wal_path)의 DURABLE commit에 따른다. 성공은
- * COMMIT 레코드가 동기화된 뒤에만 돌아온다. ACKQ_VOLATILE은 WAL 없이 데이터 파일에만 게시하므로 재시작 복구를 약속하지
- * 않는다(승인한 작업이 사라질 수 있다). WAL 없는 DB에서 DURABLE을 요청하면 숨기지 않고 ACKQ_UNSUPPORTED다.
- * commit 결과를 알 수 없으면(ACKQ_UNCERTAIN) 성공으로 돌려주지 않는다. 다시 열어 상태를 확인해야 한다.
+ * 내구성: 모든 변경은 database의 commit을 따른다(database_txn.h). 성공은 COW 게시의 fsync가 끝난 뒤에만 돌아오므로
+ * 승인한 작업은 프로세스·OS 종료 뒤에도 남는다. commit 결과를 알 수 없으면(ACKQ_UNCERTAIN) 성공으로 돌려주지 않는다. 다시 열어 상태를 확인해야 한다.
  *
  * 같은 트랜잭션: 모든 변경 함수는 database_txn_t를 받는다. NULL이면 함수가 자기 트랜잭션을 열고 commit한다(자동 commit).
  * 호출자의 txn을 주면 그 안에서 문장만 실행하고 commit은 호출자가 한다. 그래서 업무 갱신(database_txn_exec)과 ack를
@@ -65,7 +63,7 @@ typedef enum {
     ACKQ_NOT_FOUND,      /* id가 없다 */
     ACKQ_STALE,          /* fence가 현재 claim이 아니거나 상태가 맞지 않는다. 아무것도 바꾸지 않았다 */
     ACKQ_CONFLICT,       /* 같은 idempotency key에 payload가 다르다 */
-    ACKQ_UNSUPPORTED,    /* WAL 없는 DB에서 durable 요청 */
+    ACKQ_UNSUPPORTED,    /* 트랜잭션 계층 없이 연 database에 쓰기 요청 */
     ACKQ_IO,             /* 저장소 오류. commit 전이라면 상태는 그대로다 */
     ACKQ_NOT_APPLIED,    /* commit이 확정적으로 적용되지 않았다. 상태는 그대로다 */
     ACKQ_UNCERTAIN,      /* commit 결과를 알 수 없다. 성공으로 취급하면 안 된다. 다시 열어 확인한다 */
@@ -73,8 +71,6 @@ typedef enum {
     ACKQ_TXN_FAILED,     /* 호출자의 트랜잭션이 이미 실패 상태다. rollback 뒤 다시 한다 */
     ACKQ_INTERNAL        /* 이 모듈이 기대하지 못한 database 응답 */
 } ackq_status_t;
-
-typedef enum { ACKQ_DURABLE, ACKQ_VOLATILE } ackq_durability_t;
 
 typedef enum {
     ACKQ_STATE_READY = 0,
@@ -87,7 +83,6 @@ typedef struct ackq ackq_t;
 
 typedef struct {
     const char *name;                /* [A-Za-z0-9_]{1..ACKQ_NAME_MAX}. 테이블은 ackq_<name> */
-    ackq_durability_t durability;    /* 0은 ACKQ_DURABLE */
     /* 0이면 제한 없음. 시도(claim) 횟수가 이 값에 닿은 작업의 nack·만료는 FAILED로 끝난다 */
     uint32_t max_attempts;
     uint32_t begin_timeout_ms;       /* 자기 트랜잭션이 다른 writer를 기다리는 시간. 0이면 기다리지 않고 BUSY */
