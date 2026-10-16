@@ -1243,6 +1243,24 @@ overflow_io_t page_file_overflow_io(page_file_overflow_ctx_t *ctx, page_file_t *
                            adapter_read, adapter_write};
 }
 
+// cost: time O(c), heap O(1), stack O(1), io 0
+// vars: c = 빈 목록 사슬 페이지 수
+// basis: estimate
+page_file_status_t page_file_page_role(const page_file_t *file, uint32_t page_id, page_file_role_t *role)
+{
+    if (file == NULL || role == NULL || !file->writable || file->state == NULL || !data_page_in_range(file, page_id)) {
+        return PAGE_FILE_INVALID;
+    }
+    for (size_t i = 0; i < file->chain.len; i++) {
+        if (file->chain.items[i] != page_id) continue;
+        *role = PAGE_FILE_ROLE_FREE_LIST;
+        return PAGE_FILE_OK;
+    }
+    page_state_t state = (page_state_t)file->state[page_id];
+    *role = state == PS_USED || state == PS_FRESH ? PAGE_FILE_ROLE_IN_USE : PAGE_FILE_ROLE_FREE;
+    return PAGE_FILE_OK;
+}
+
 size_t page_file_handle_bytes(const page_file_t *file)
 {
     if (file == NULL) return 0;

@@ -204,6 +204,13 @@ size_t page_file_pending_release_count(const page_file_t *file);
 size_t page_file_aging_release_count(const page_file_t *file);
 size_t page_file_reusable_count(const page_file_t *file);
 
+/*
+ * 쓰기 핸들에서 데이터 페이지 하나의 자리(무결성 검사용). FREE는 재사용·대기·보류 목록, FREE_LIST는 빈 목록을 담는
+ * 사슬 페이지, IN_USE는 그 밖(게시된 상태나 이번 작업이 쓰는 페이지)이다. 읽기 핸들이거나 범위 밖이면 INVALID다.
+ */
+typedef enum { PAGE_FILE_ROLE_IN_USE, PAGE_FILE_ROLE_FREE, PAGE_FILE_ROLE_FREE_LIST } page_file_role_t;
+page_file_status_t page_file_page_role(const page_file_t *file, uint32_t page_id, page_file_role_t *role);
+
 /* 다음 commit이 제어 페이지에 쓸 카탈로그 참조를 정한다. commit 전까지 디스크에 닿지 않는다. */
 page_file_status_t page_file_stage_catalog(page_file_t *file, uint32_t head, uint32_t size,
                                            uint64_t catalog_generation);

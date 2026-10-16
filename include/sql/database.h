@@ -86,6 +86,24 @@ typedef struct {
 void database_scan_stats(const database_t *db, database_scan_stats_t *out);
 
 /*
+ * 게시된 상태의 페이지 회계(무결성 검사). 데이터 페이지 [2, page_count)를 하나씩 셋 가운데 하나에 넣는다.
+ *   reachable  카탈로그 체인, 테이블의 heap 디렉터리·record·overflow 페이지, 기본 키·보조 색인 노드
+ *   free       빈 목록(재사용·대기)과 빈 목록을 담는 사슬 페이지
+ *   orphaned   어디서도 닿지 않고 빈 목록에도 없는 페이지(새는 공간)
+ * conflicts는 두 번 닿거나 닿으면서 빈 목록에도 있는 페이지 수다(조기 회수나 이중 소유). 정상이면 orphaned와
+ * conflicts가 0이다. 쓰기 핸들에서 열린 작업이 없을 때만 부른다(아니면 DATABASE_INVALID). 검사 메모리는 페이지당
+ * 1바이트이며 문장 예산 밖이다. 호출자가 다른 호출과 직렬화한다.
+ */
+typedef struct {
+    uint64_t data_pages;
+    uint64_t reachable;
+    uint64_t free;
+    uint64_t orphaned;
+    uint64_t conflicts;
+} database_page_check_t;
+database_status_t database_check_pages(database_t *db, database_page_check_t *out);
+
+/*
  * 문장 하나를 실행한다. binding은 NULL이면 매개변수가 없는 SQL이어야 한다. 성공한 *out은 호출자가
  * result_release한다. sql은 (bytes, size)이며 NUL 종료를 가정하지 않는다.
  */
