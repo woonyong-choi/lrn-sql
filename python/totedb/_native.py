@@ -73,7 +73,7 @@ def load_library() -> ctypes.CDLL:
     """공유 라이브러리를 찾아 열고 함수 시그니처를 선언한다.
 
     Raises:
-        OSError: TOTEDB_LIB과 기본 빌드 위치 어디에도 라이브러리가 없을 때.
+        OSError: TOTEDB_LIB, 설치한 패키지 폴더, 저장소 빌드 위치 어디에도 라이브러리가 없을 때.
     """
     tried: list[str] = []
     for path in _candidates():
@@ -87,9 +87,10 @@ def _candidates() -> Iterator[Path]:
     env = os.environ.get("TOTEDB_LIB")
     if env:
         yield Path(env)
-    suffix = "dylib" if sys.platform == "darwin" else "so"
-    root = Path(__file__).resolve().parents[2]
-    yield root / "build" / "lib" / f"libtotedb.{suffix}"
+    name = "libtotedb.dylib" if sys.platform == "darwin" else "libtotedb.so"
+    package_dir = Path(__file__).resolve().parent
+    yield package_dir / name
+    yield package_dir.parents[1] / "build" / "lib" / name
 
 
 _INT_FUNCTIONS = (

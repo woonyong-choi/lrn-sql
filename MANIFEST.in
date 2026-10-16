@@ -1,0 +1,5 @@
+# sdist에서 공유 라이브러리를 다시 빌드할 때 필요한 C 소스와 빌드 규칙
+include Makefile CHANGELOG.md
+recursive-include include *.h
+recursive-include src *.c *.h *.mk
+include tests/package_smoke.py
