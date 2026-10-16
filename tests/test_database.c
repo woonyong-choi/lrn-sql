@@ -864,6 +864,7 @@ static void test_open_rejects_other_files_without_change(void)
     assert(f != NULL && fread(after, 1, sizeof(after), f) == sizeof(after));
     fclose(f);
     CHECK(memcmp(after, legacy, sizeof(legacy)) == 0, "열기 시도가 파일을 바꾸지 않음");
+    CHECK(access(DB_PATH "-lock", F_OK) != 0, "다른 형식 파일 옆에 writer 잠금 파일을 만들지 않음");
     CHECK(database_create(DB_PATH, &db) == DATABASE_EXISTS, "이미 있으면 create는 거절");
     CHECK(database_open(DIR_NAME "/missing.totedb", false, &db) == DATABASE_IO, "없는 파일은 IO");
     clean_dir();
