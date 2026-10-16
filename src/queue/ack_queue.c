@@ -17,6 +17,9 @@
 #define META_CELLS 6u
 #define NOTE_MAX_ATTEMPTS "max attempts exceeded"
 
+/* 상태별 조회(claim·recover·purge)와 idempotency key 조회가 쓰는 보조 색인의 열 */
+static const char *const INDEXED[] = {"state", "idem"};
+
 typedef struct {
     uint64_t id;
     int64_t state;
@@ -160,28 +163,43 @@ static ackq_status_t run_one_row(ackq_t *queue, ackq_scope_t *scope, const char 
     return status;
 }
 
-/* 한 행의 컬럼 하나(note·payload)를 읽어 복사한다. TEXT면 NUL로 끝내 돌려준다. 빈 값은 *bytes가 NULL이다. */
-static ackq_status_t fetch_column(ackq_t *queue, ackq_scope_t *scope, const char *column, uint64_t id,
-                                  uint8_t **bytes, size_t *size)
+/* RETURNING 정수 한 칸을 돌려주는 한 행 변경 문장. 행이 정확히 하나여야 한다. */
+static ackq_status_t run_returning_int(ackq_t *queue, ackq_scope_t *scope, const char *sql, const value_view_t *params,
+                                       size_t count, int64_t *value)
 {
-    char sql[ACKQ_SQL_MAX];
     result_t *result = NULL;
-    snprintf(sql, sizeof(sql), "SELECT %s FROM %s WHERE id = ?", column, queue->table);
-    value_view_t param = ackq_int((int64_t)id);
-    ackq_status_t status = ackq_run(queue, scope, false, sql, &param, 1, &result, NULL);
+    ackq_status_t status = ackq_run(queue, scope, true, sql, params, count, &result, NULL);
     if (status != ACKQ_OK) return status;
-    *bytes = NULL;
-    *size = 0;
-    bool found = false;
+    size_t rows = 0;
     result_row_t row;
     result_next_t next;
     while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {
+        if (row.cell_count < 1 || row.cells[0].type != VALUE_INTEGER) status = ACKQ_INTERNAL;
+        else *value = row.cells[0].integer;
+        rows++;
+    }
+    ackq_status_t finished = ackq_finish_rows(next, result);
+    result_release(&result);
+    if (status == ACKQ_OK) status = finished;
+    return status == ACKQ_OK && rows != 1 ? ACKQ_INTERNAL : status;
+}
+
+/* 결과의 한 행 한 칸(TEXT·BLOB)을 복사해 가져가고 결과를 해제한다. TEXT면 NUL로 끝낸다. 빈 값은 *bytes가 NULL이다. */
+static ackq_status_t take_bytes(result_t *result, uint8_t **bytes, size_t *size)
+{
+    ackq_status_t status = ACKQ_OK;
+    *bytes = NULL;
+    *size = 0;
+    size_t rows = 0;
+    result_row_t row;
+    result_next_t next;
+    while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {
+        rows++;
         const value_view_t *cell = row.cell_count > 0 ? &row.cells[0] : NULL;
-        if (cell == NULL || (cell->type != VALUE_BLOB && cell->type != VALUE_TEXT)) {
+        if (cell == NULL || (cell->type != VALUE_BLOB && cell->type != VALUE_TEXT) || rows > 1) {
             status = ACKQ_INTERNAL;
             continue;
         }
-        found = true;
         if (cell->size_bytes > 0 && status == ACKQ_OK) {
             *bytes = malloc(cell->size_bytes + 1);
             if (*bytes == NULL) {
@@ -196,13 +214,37 @@ static ackq_status_t fetch_column(ackq_t *queue, ackq_scope_t *scope, const char
     ackq_status_t finished = ackq_finish_rows(next, result);
     result_release(&result);
     if (status == ACKQ_OK) status = finished;
-    if (status == ACKQ_OK && !found) status = ACKQ_NOT_FOUND;
+    if (status == ACKQ_OK && rows == 0) status = ACKQ_NOT_FOUND;
     if (status != ACKQ_OK) {
         free(*bytes);
         *bytes = NULL;
         *size = 0;
     }
     return status;
+}
+
+/* 한 행의 컬럼 하나(note·payload)를 읽어 복사한다. */
+static ackq_status_t fetch_column(ackq_t *queue, ackq_scope_t *scope, const char *column, uint64_t id,
+                                  uint8_t **bytes, size_t *size)
+{
+    char sql[ACKQ_SQL_MAX];
+    result_t *result = NULL;
+    snprintf(sql, sizeof(sql), "SELECT %s FROM %s WHERE id = ?", column, queue->table);
+    value_view_t param = ackq_int((int64_t)id);
+    ackq_status_t status = ackq_run(queue, scope, false, sql, &param, 1, &result, NULL);
+    if (status != ACKQ_OK) return status;
+    return take_bytes(result, bytes, size);
+}
+
+/* RETURNING이 TEXT·BLOB 한 칸을 돌려주는 한 행 변경 문장. 행이 없으면 다른 경로가 먼저 바꾼 것이라 내부 오류다. */
+static ackq_status_t run_returning_bytes(ackq_t *queue, ackq_scope_t *scope, const char *sql, const value_view_t *params,
+                                         size_t count, uint8_t **bytes, size_t *size)
+{
+    result_t *result = NULL;
+    ackq_status_t status = ackq_run(queue, scope, true, sql, params, count, &result, NULL);
+    if (status != ACKQ_OK) return status;
+    status = take_bytes(result, bytes, size);
+    return status == ACKQ_NOT_FOUND ? ACKQ_INTERNAL : status;
 }
 
 static ackq_status_t fetch_created(ackq_t *queue, ackq_scope_t *scope, uint64_t id, uint64_t *created)
@@ -302,7 +344,36 @@ static ackq_status_t create_table(ackq_t *queue, session_t *session)
              queue->table);
     status = ackq_run(queue, &scope, true, sql, NULL, 0, &result, NULL);
     if (status == ACKQ_OK) result_release(&result);
+    for (size_t i = 0; status == ACKQ_OK && i < sizeof(INDEXED) / sizeof(INDEXED[0]); i++) {
+        snprintf(sql, sizeof(sql), "CREATE INDEX %s_%s ON %s (%s)", queue->table, INDEXED[i], queue->table, INDEXED[i]);
+        status = ackq_run(queue, &scope, true, sql, NULL, 0, &result, NULL);
+        if (status == ACKQ_OK) result_release(&result);
+    }
     return ackq_scope_close(&scope, status);
+}
+
+/*
+ * 색인 없이 설치된 테이블에 빠진 색인을 만든다. 색인마다 자기 트랜잭션이며 이름이 이미 있으면(의미 오류) 있는 것을
+ * 쓴다. 색인이 없어도 결과는 같고 상태별 조회가 전체 스캔이 될 뿐이다.
+ */
+static ackq_status_t ensure_indexes(ackq_t *queue, session_t *session)
+{
+    char sql[ACKQ_SQL_MAX];
+    ackq_status_t status = ACKQ_OK;
+    for (size_t i = 0; status == ACKQ_OK && i < sizeof(INDEXED) / sizeof(INDEXED[0]); i++) {
+        ackq_scope_t scope;
+        status = ackq_scope_open(queue, session, true, &scope);
+        if (status != ACKQ_OK) return status;
+        result_t *result = NULL;
+        result_error_class_t error_class = RESULT_E_NONE;
+        snprintf(sql, sizeof(sql), "CREATE INDEX %s_%s ON %s (%s)", queue->table, INDEXED[i], queue->table, INDEXED[i]);
+        status = ackq_run(queue, &scope, true, sql, NULL, 0, &result, &error_class);
+        if (status == ACKQ_OK) result_release(&result);
+        bool exists = status != ACKQ_OK && error_class == RESULT_E_SEMANTIC;
+        status = ackq_scope_close(&scope, exists ? ACKQ_INTERNAL : status);
+        if (exists) status = ACKQ_OK;
+    }
+    return status;
 }
 
 ackq_status_t ackq_install(session_t *session, const ackq_options_t *options, ackq_t **out)
@@ -315,7 +386,9 @@ ackq_status_t ackq_install(session_t *session, const ackq_options_t *options, ac
     if (status == ACKQ_NOT_INSTALLED) {
         status = create_table(queue, session);
         /* 다른 설치가 먼저 만들었을 수 있다. 같은 이름의 테이블이 있으면 그것을 쓴다. */
-        if (status != ACKQ_OK) status = probe_table(queue, session) == ACKQ_OK ? ACKQ_OK : status;
+        if (status != ACKQ_OK && probe_table(queue, session) == ACKQ_OK) status = ensure_indexes(queue, session);
+    } else if (status == ACKQ_OK) {
+        status = ensure_indexes(queue, session);
     }
     if (status != ACKQ_OK) {
         free(queue);
@@ -363,34 +436,6 @@ static ackq_status_t find_idem(ackq_t *queue, ackq_scope_t *scope, const char *k
     return *found && !same ? ACKQ_CONFLICT : ACKQ_OK;
 }
 
-/* 방금 넣은 행의 id. identity 카운터는 단조라 새 id가 모든 기존 id보다 크므로 최댓값이다. */
-static ackq_status_t newest_id(ackq_t *queue, ackq_scope_t *scope, uint64_t *id)
-{
-    char sql[ACKQ_SQL_MAX];
-    result_t *result = NULL;
-    snprintf(sql, sizeof(sql), "SELECT id FROM %s", queue->table);
-    ackq_status_t status = ackq_run(queue, scope, false, sql, NULL, 0, &result, NULL);
-    if (status != ACKQ_OK) return status;
-    uint64_t best = 0;
-    result_row_t row;
-    result_next_t next;
-    while ((next = result_next(result, &row)) == RESULT_NEXT_ROW) {
-        if (row.cell_count < 1 || row.cells[0].type != VALUE_INTEGER) {
-            status = ACKQ_INTERNAL;
-            continue;
-        }
-        if ((uint64_t)row.cells[0].integer > best) best = (uint64_t)row.cells[0].integer;
-    }
-    ackq_status_t finished = ackq_finish_rows(next, result);
-    result_release(&result);
-    if (status == ACKQ_OK) status = finished;
-    if (status == ACKQ_OK) {
-        if (best == 0) status = ACKQ_INTERNAL;
-        else *id = best;
-    }
-    return status;
-}
-
 static ackq_status_t enqueue_in(ackq_t *queue, ackq_scope_t *scope, const uint8_t *payload, size_t size,
                                 const char *key, uint64_t *id, bool *duplicate)
 {
@@ -410,15 +455,16 @@ static ackq_status_t enqueue_in(ackq_t *queue, ackq_scope_t *scope, const uint8_
     }
     snprintf(sql, sizeof(sql),
              "INSERT INTO %s (state, ready_at, lease_until, fence, attempts, idem, payload, note, created_at) "
-             "VALUES (0, ?, 0, 0, 0, ?, ?, '', ?)",
+             "VALUES (0, ?, 0, 0, 0, ?, ?, '', ?) RETURNING id",
              queue->table);
     value_view_t params[4] = {ackq_int(now), ackq_text(key != NULL ? key : ""), ackq_blob(payload, size),
                               ackq_int(now)};
-    status = run_one_row(queue, scope, sql, params, 4);
+    int64_t inserted = 0;
+    status = run_returning_int(queue, scope, sql, params, 4, &inserted);
     if (status != ACKQ_OK) return status;
-    status = newest_id(queue, scope, id);
-    if (status == ACKQ_OK && duplicate != NULL) *duplicate = false;
-    return status;
+    *id = (uint64_t)inserted;
+    if (duplicate != NULL) *duplicate = false;
+    return ACKQ_OK;
 }
 
 ackq_status_t ackq_enqueue(ackq_t *queue, session_t *session, const uint8_t *payload, size_t size,
@@ -474,14 +520,13 @@ static ackq_status_t claim_one(ackq_t *queue, ackq_scope_t *scope, const meta_t 
     if (meta->fence == INT64_MAX || meta->attempts == INT64_MAX) return ACKQ_LIMIT;
     int64_t fence = meta->fence + 1;
     int64_t attempts = meta->attempts + 1;
-    snprintf(sql, sizeof(sql), "UPDATE %s SET state = 1, lease_until = ?, fence = ?, attempts = ? WHERE id = ?",
+    snprintf(sql, sizeof(sql),
+             "UPDATE %s SET state = 1, lease_until = ?, fence = ?, attempts = ? WHERE id = ? RETURNING payload",
              queue->table);
     value_view_t params[4] = {ackq_int(lease_until), ackq_int(fence), ackq_int(attempts), ackq_int((int64_t)meta->id)};
-    ackq_status_t status = run_one_row(queue, scope, sql, params, 4);
-    if (status != ACKQ_OK) return status;
     uint8_t *payload = NULL;
     size_t size = 0;
-    status = fetch_column(queue, scope, "payload", meta->id, &payload, &size);
+    ackq_status_t status = run_returning_bytes(queue, scope, sql, params, 4, &payload, &size);
     if (status != ACKQ_OK) return status;
     *item = (ackq_claim_t){meta->id, (uint64_t)fence, (uint32_t)attempts, (uint64_t)lease_until, payload, size};
     return ACKQ_OK;
