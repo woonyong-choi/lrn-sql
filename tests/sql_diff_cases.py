@@ -248,6 +248,32 @@ CASES = [
         ],
     },
     {
+        # #42: 빈 입력·NULL 키·중복 키·HAVING·중간 넘침
+        "name": "aggregate-bounds",
+        "setup": [
+            "CREATE TABLE g (id INTEGER PRIMARY KEY, k TEXT, v INTEGER, r REAL)",
+            "CREATE TABLE empty (id INTEGER PRIMARY KEY, k TEXT, v INTEGER)",
+            "INSERT INTO g VALUES (1, 'a', 9223372036854775807, 1e308), (2, 'a', 1, 1e308), (3, 'a', -1, 1e308), "
+            "(4, NULL, 5, 1.5), (5, NULL, 5, NULL), (6, 'b', NULL, 2.5), (7, 'b', 7, 2.5), (8, 'c', 1, 0.5)",
+        ],
+        "queries": [
+            "SELECT k, COUNT(*), COUNT(v), COUNT(DISTINCT v), MIN(v), MAX(v) FROM g GROUP BY k",
+            "SELECT k, SUM(v) FROM g WHERE id > 3 GROUP BY k HAVING COUNT(*) > 1",
+            "SELECT k, AVG(r), SUM(DISTINCT r) FROM g WHERE id > 3 GROUP BY k",
+            "SELECT k, COUNT(*) FROM g GROUP BY k HAVING k IS NULL",
+            "SELECT k, SUM(v + 0) FROM g WHERE id > 3 GROUP BY k ORDER BY k NULLS LAST",
+            "SELECT k, COUNT(*) FROM empty GROUP BY k",
+            "SELECT COUNT(*), SUM(v), MAX(k) FROM empty",
+            "SELECT COUNT(*) FROM empty HAVING COUNT(*) = 0",
+            "SELECT COUNT(*) FROM g HAVING COUNT(*) > 100",
+            "SELECT v, COUNT(*) FROM g WHERE id > 3 GROUP BY v",
+            "SELECT COUNT(DISTINCT k), COUNT(DISTINCT r) FROM g",
+            {"sql": "SELECT SUM(v) FROM g WHERE id <= 3", "differs": {"like": "postgres", "reason": "중간 합만 넘치고 최종 합이 범위 안이면 성공(SQLite는 중간 넘침도 오류)"}},
+            {"sql": "SELECT SUM(DISTINCT v) FROM g WHERE id <= 3", "differs": {"like": "postgres", "reason": "중간 합만 넘치면 성공"}},
+            {"sql": "SELECT SUM(r) FROM g WHERE id <= 3", "differs": {"like": "postgres", "reason": "실수 합계가 무한대로 넘치면 오류(SQLite는 Inf)"}},
+        ],
+    },
+    {
         "name": "joins",
         "setup": PEOPLE + [
             "CREATE TABLE orders (oid INTEGER PRIMARY KEY, person INTEGER, item TEXT NOT NULL, qty INTEGER NOT NULL)",
