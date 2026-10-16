@@ -446,7 +446,7 @@ static legacy_status_t build_and_commit(page_file_t *file, const legacy_export_t
     catalog_column_spec_t columns[MAX_COLUMNS];
     for (uint16_t i = 0; i < data->column_count; i++) {
         columns[i] = (catalog_column_spec_t){data->columns[i].name, strlen(data->columns[i].name),
-                                             new_type(data->columns[i].type), i == 0};
+                                             new_type(data->columns[i].type), i == 0, NULL};
     }
     uint32_t heap_page;
     page_file_status_t allocated = page_file_alloc(file, &heap_page);

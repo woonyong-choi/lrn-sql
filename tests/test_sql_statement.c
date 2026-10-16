@@ -457,6 +457,21 @@ static void set_operation_forms(void)
     free_clean(statement);
 }
 
+static void default_forms(void)
+{
+    sqlstmt_t *statement = parse_ok("CREATE TABLE t (a INTEGER DEFAULT -5 NOT NULL, b TEXT DEFAULT 'x', c REAL DEFAULT (1.5 * 2), "
+                                    "d BLOB DEFAULT NULL, e INTEGER)");
+    const sqlstmt_create_t *c = &statement->create;
+    assert(c->columns[0].not_null && is_integer(c->columns[0].default_value, -5));
+    assert(c->columns[1].default_value->kind == SQLEXPR_LITERAL && c->columns[2].default_value->kind == SQLEXPR_BINARY);
+    assert(c->columns[3].default_value->value.view.type == VALUE_NULL && c->columns[4].default_value == NULL);
+    free_clean(statement);
+    statement = parse_ok("INSERT INTO t DEFAULT VALUES RETURNING a");
+    assert(statement->insert.has_columns && statement->insert.column_count == 0 && statement->insert.row_count == 1 &&
+           statement->insert.value_count == 0 && statement->insert.returning.count == 1);
+    free_clean(statement);
+}
+
 static void returning_forms(void)
 {
     sqlstmt_t *statement = parse_ok("INSERT INTO t (a) VALUES (1), (2) RETURNING *, a + 1 AS b, t.*");
@@ -691,7 +706,9 @@ static void create_errors(void)
     expect_unsupported("CREATE TABLE t (a INTEGER, b INTEGER, PRIMARY KEY (a, b))",
                        SQLSTMT_REASON_UNSUPPORTED_CONSTRAINT, 52);
     expect_unsupported("CREATE TABLE t (a INTEGER UNIQUE)", SQLSTMT_REASON_UNSUPPORTED_CONSTRAINT, 26);
-    expect_unsupported("CREATE TABLE t (a INTEGER DEFAULT 1)", SQLSTMT_REASON_UNSUPPORTED_CONSTRAINT, 26);
+    expect_syntax("CREATE TABLE t (a INTEGER DEFAULT)", SQLSTMT_REASON_EXPECTED_VALUE, 33);
+    expect_syntax("CREATE TABLE t (a INTEGER DEFAULT 1 + 2)", SQLSTMT_REASON_EXPECTED_KEYWORD, 36);
+    expect_syntax("CREATE TABLE t (a INTEGER DEFAULT 1 DEFAULT 2)", SQLSTMT_REASON_EXPECTED_KEYWORD, 36);
     expect_unsupported("CREATE TABLE t (a INTEGER CHECK (a > 0))", SQLSTMT_REASON_UNSUPPORTED_CONSTRAINT, 26);
     expect_unsupported("CREATE TABLE t (a INTEGER REFERENCES u (b))", SQLSTMT_REASON_UNSUPPORTED_CONSTRAINT, 26);
     expect_unsupported("CREATE TABLE t (a INTEGER, UNIQUE (a))", SQLSTMT_REASON_UNSUPPORTED_CONSTRAINT, 27);
@@ -724,7 +741,8 @@ static void insert_errors(void)
     expect_syntax("INSERT t VALUES (1)", SQLSTMT_REASON_EXPECTED_KEYWORD, 7);
     expect_syntax("INSERT INTO", SQLSTMT_REASON_UNEXPECTED_END, 11);
     expect_syntax("INSERT INTO t", SQLSTMT_REASON_UNEXPECTED_END, 13);
-    expect_syntax("INSERT INTO t DEFAULT VALUES", SQLSTMT_REASON_EXPECTED_KEYWORD, 14);
+    expect_syntax("INSERT INTO t DEFAULT", SQLSTMT_REASON_UNEXPECTED_END, 21);
+    expect_syntax("INSERT INTO t (a) DEFAULT VALUES", SQLSTMT_REASON_EXPECTED_KEYWORD, 18);
     expect_unsupported("INSERT INTO t SELECT 1", SQLSTMT_REASON_UNSUPPORTED_CLAUSE, 14);
     expect_syntax("INSERT INTO t VALUES ()", SQLSTMT_REASON_EXPECTED_VALUE, 22);
     expect_syntax("INSERT INTO t VALUES (1", SQLSTMT_REASON_UNEXPECTED_END, 23);
@@ -991,6 +1009,7 @@ int main(void)
     select_forms();
     join_forms();
     returning_forms();
+    default_forms();
     set_operation_forms();
     subquery_forms();
     update_delete_drop();

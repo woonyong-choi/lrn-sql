@@ -369,6 +369,39 @@ CASES = [
         ],
     },
     {
+        "name": "defaults",
+        "setup": [
+            "CREATE TABLE jobs (id INTEGER PRIMARY KEY, state TEXT NOT NULL DEFAULT 'ready', tries INTEGER DEFAULT 0, "
+            "weight REAL DEFAULT (1.5 * 2), note TEXT DEFAULT NULL, neg INTEGER DEFAULT -3, label TEXT DEFAULT (UPPER('ab') || 'c'))",
+        ],
+        "queries": [
+            "INSERT INTO jobs (id) VALUES (1)",
+            "INSERT INTO jobs (id, tries) VALUES (2, 5)",
+            "INSERT INTO jobs (id, state, note) VALUES (3, 'held', 'x')",
+            "INSERT INTO jobs (id, tries) VALUES (4, NULL)",
+            "INSERT INTO jobs (id) VALUES (5), (6) RETURNING id, state, weight",
+            "SELECT * FROM jobs ORDER BY id",
+            "UPDATE jobs SET tries = tries + 1 WHERE state = 'ready' RETURNING id, tries",
+            {"sql": "INSERT INTO jobs (id, state) VALUES (7, NULL)", "error": True},
+            {"sql": "CREATE TABLE bad1 (a INTEGER DEFAULT 'abc')", "differs": {"like": "postgres", "reason": "컬럼 형식으로 바꿀 수 없는 기본값은 오류(SQLite는 그대로 저장)"}},
+            {"sql": "CREATE TABLE bad2 (a INTEGER DEFAULT (SELECT 1))", "error": True},
+            {"sql": "INSERT INTO jobs (state) VALUES ('nokey')", "differs": {"like": "postgres", "reason": "기본 키는 NOT NULL(SQLite는 INTEGER 키에 번호를 매김)"}},
+            {"sql": "CREATE TABLE bad3 (a INTEGER DEFAULT b)", "differs": {"like": "postgres", "reason": "DEFAULT의 이름은 열 참조라 오류(SQLite는 문자열로 받음)"}},
+        ],
+    },
+    {
+        "name": "default-values",
+        "setup": [
+            "CREATE TABLE ev (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT DEFAULT 'tick', n INTEGER DEFAULT 1)",
+        ],
+        "queries": [
+            "INSERT INTO ev DEFAULT VALUES",
+            "INSERT INTO ev DEFAULT VALUES RETURNING id, kind, n",
+            "INSERT INTO ev (kind) VALUES ('tock') RETURNING *",
+            "SELECT * FROM ev ORDER BY id",
+        ],
+    },
+    {
         "name": "dml",
         "setup": [
             "CREATE TABLE stock (id INTEGER PRIMARY KEY, item TEXT NOT NULL, qty INTEGER NOT NULL, price REAL)",

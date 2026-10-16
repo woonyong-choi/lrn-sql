@@ -128,7 +128,7 @@ static void build_committed(size_t rows)
     base_t b = {0};
     assert(page_file_create(DB_PATH, &b.file) == PAGE_FILE_OK);
     assert(catalog_open_empty(&b.catalog) == CATALOG_OK);
-    catalog_column_spec_t cols[COLUMNS] = {{"id", 2, VALUE_INTEGER, false}, {"t", 1, VALUE_TEXT, false}, {"b", 1, VALUE_BLOB, false}};
+    catalog_column_spec_t cols[COLUMNS] = {{"id", 2, VALUE_INTEGER, false, NULL}, {"t", 1, VALUE_TEXT, false, NULL}, {"b", 1, VALUE_BLOB, false, NULL}};
     catalog_table_spec_t spec = {"items", 5, cols, COLUMNS, CATALOG_NO_COLUMN, false};
     assert(catalog_create_table(b.catalog, &spec, &b.tid) == CATALOG_OK);
     assert(catalog_store_save(b.file, b.catalog) == CATALOG_STORE_OK);

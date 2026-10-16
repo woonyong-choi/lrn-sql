@@ -33,7 +33,7 @@ void catalog_test_free(void *memory)
 
 static catalog_column_spec_t column(const char *name, value_type_t type)
 {
-    return (catalog_column_spec_t){name, strlen(name), type, false};
+    return (catalog_column_spec_t){name, strlen(name), type, false, NULL};
 }
 
 static catalog_table_id_t add(catalog_t *catalog, const char *name)

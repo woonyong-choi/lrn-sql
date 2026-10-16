@@ -28,7 +28,7 @@ static void assert_same(const catalog_t *catalog, const snapshot_t *before)
 
 static catalog_column_spec_t column(const char *name, value_type_t type, bool not_null)
 {
-    return (catalog_column_spec_t){name, strlen(name), type, not_null};
+    return (catalog_column_spec_t){name, strlen(name), type, not_null, NULL};
 }
 
 static catalog_status_t create(catalog_t *catalog, const char *name,
@@ -156,12 +156,12 @@ static void invalid_specs_keep_catalog(void)
     catalog_column_spec_t bad_type[] = {column("id", (value_type_t)9, false)};
     catalog_column_spec_t dup[] = {column("a", VALUE_INTEGER, false), column("a", VALUE_TEXT, false)};
     catalog_column_spec_t real_key[] = {column("k", VALUE_REAL, false)};
-    catalog_column_spec_t empty_name[] = {{"", 0, VALUE_INTEGER, false}};
-    catalog_column_spec_t nul_name[] = {{"a\0b", 3, VALUE_INTEGER, false}};
+    catalog_column_spec_t empty_name[] = {{"", 0, VALUE_INTEGER, false, NULL}};
+    catalog_column_spec_t nul_name[] = {{"a\0b", 3, VALUE_INTEGER, false, NULL}};
     char long_name[257];
     memset(long_name, 'n', 256);
     long_name[256] = '\0';
-    catalog_column_spec_t long_column[] = {{long_name, 256, VALUE_INTEGER, false}};
+    catalog_column_spec_t long_column[] = {{long_name, 256, VALUE_INTEGER, false, NULL}};
     catalog_column_spec_t too_many[1025];
     for (size_t i = 0; i < 1025; i++) {
         static char names[1025][8];
@@ -451,7 +451,7 @@ static void semantic_corruption_is_rejected(void)
     snapshot_t shot = snapshot(catalog);
     assert(shot.size == 79);
     const tamper_t cases[] = {
-        {4, 2, 2, CATALOG_CORRUPT}, {4, 2, 3, CATALOG_UNSUPPORTED},
+        {4, 2, 2, CATALOG_CORRUPT}, {4, 2, 3, CATALOG_OK}, {4, 2, 4, CATALOG_UNSUPPORTED},
         {4, 2, 0, CATALOG_UNSUPPORTED}, {6, 2, 1, CATALOG_CORRUPT},
         {0, 1, 'X', CATALOG_CORRUPT}, {8, 4, 78, CATALOG_CORRUPT}, {8, 4, 80, CATALOG_CORRUPT},
         {20, 4, 0, CATALOG_CORRUPT}, {20, 4, 1, CATALOG_CORRUPT},
@@ -523,7 +523,7 @@ static void encoded_size_cap_is_enforced(void)
         memset(names[i], 'x', 255);
         snprintf(names[i], 8, "c%04zu", i);
         names[i][strlen(names[i])] = 'x';
-        columns[i] = (catalog_column_spec_t){names[i], 255, VALUE_TEXT, false};
+        columns[i] = (catalog_column_spec_t){names[i], 255, VALUE_TEXT, false, NULL};
     }
     size_t created = 0;
     catalog_status_t status = CATALOG_OK;
@@ -593,8 +593,66 @@ static void index_metadata_survives_restart(void)
     catalog_close(upgraded);
 }
 
+/* 기본값은 형식 버전 3으로 저장되고 그대로 돌아오며, 잘림·비트 뒤집힘은 거절된다 */
+static void defaults_round_trip(void)
+{
+    catalog_t *catalog;
+    assert(catalog_open_empty(&catalog) == CATALOG_OK);
+    value_view_t int_default = {.type = VALUE_INTEGER, .integer = -7};
+    value_view_t real_default = {.type = VALUE_REAL, .real = 2.5};
+    value_view_t text_default = {.type = VALUE_TEXT, .bytes = (const uint8_t *)"ready", .size_bytes = 5};
+    value_view_t blob_default = {.type = VALUE_BLOB, .bytes = NULL, .size_bytes = 0};
+    value_view_t wrong_type = {.type = VALUE_TEXT, .bytes = (const uint8_t *)"1", .size_bytes = 1};
+    catalog_column_spec_t columns[] = {
+        {"i", 1, VALUE_INTEGER, true, &int_default}, {"r", 1, VALUE_REAL, false, &real_default},
+        {"t", 1, VALUE_TEXT, false, &text_default},  {"b", 1, VALUE_BLOB, false, &blob_default},
+        {"n", 1, VALUE_TEXT, false, NULL},
+    };
+    catalog_table_spec_t spec = {"jobs", 4, columns, 5, CATALOG_NO_COLUMN, false};
+    catalog_table_id_t id;
+    catalog_column_spec_t bad[] = {{"x", 1, VALUE_INTEGER, false, &wrong_type}};
+    catalog_table_spec_t bad_spec = {"bad", 3, bad, 1, CATALOG_NO_COLUMN, false};
+    assert(catalog_create_table(catalog, &bad_spec, &id) == CATALOG_INVALID);
+    assert(catalog_create_table(catalog, &spec, &id) == CATALOG_OK);
+    snapshot_t shot = snapshot(catalog);
+    assert(shot.bytes[4] == 3 && shot.bytes[5] == 0);
+    catalog_t *decoded;
+    assert(catalog_decode(shot.bytes, shot.size, &decoded) == CATALOG_OK);
+    catalog_table_view_t view;
+    assert(catalog_describe(decoded, id, &view) == CATALOG_OK && view.column_count == 5);
+    assert(view.columns[0].has_default && view.columns[0].default_value.integer == -7 && view.columns[0].not_null);
+    assert(view.columns[1].has_default && view.columns[1].default_value.real == 2.5);
+    assert(view.columns[2].has_default && view.columns[2].default_value.size_bytes == 5 &&
+           memcmp(view.columns[2].default_value.bytes, "ready", 5) == 0);
+    assert(view.columns[3].has_default && view.columns[3].default_value.size_bytes == 0);
+    assert(!view.columns[4].has_default);
+    snapshot_t again = snapshot(decoded);
+    assert(again.size == shot.size && memcmp(again.bytes, shot.bytes, shot.size) == 0);
+    for (size_t length = 0; length < shot.size; length++) assert(decode_marker(shot.bytes, length) == CATALOG_CORRUPT);
+    uint8_t *copy = malloc(shot.size);
+    for (size_t offset = 0; offset < shot.size; offset++) {
+        for (unsigned bit = 0; bit < 8; bit++) {
+            memcpy(copy, shot.bytes, shot.size);
+            copy[offset] ^= (uint8_t)(1u << bit);
+            catalog_status_t status = decode_marker(copy, shot.size);
+            assert(status == CATALOG_CORRUPT || status == CATALOG_UNSUPPORTED);
+        }
+    }
+    /* 기본값 플래그는 버전 1·2에서 쓸 수 없다 */
+    memcpy(copy, shot.bytes, shot.size);
+    copy[4] = 1;
+    seal(copy, shot.size);
+    assert(decode_marker(copy, shot.size) == CATALOG_CORRUPT);
+    free(copy);
+    free(again.bytes);
+    free(shot.bytes);
+    catalog_close(decoded);
+    catalog_close(catalog);
+}
+
 int main(void)
 {
+    defaults_round_trip();
     tables_are_independent();
     duplicate_and_missing_keep_catalog();
     invalid_specs_keep_catalog();

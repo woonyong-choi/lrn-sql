@@ -811,7 +811,7 @@ static database_exec_status_t relation_build(database_t *db, const void *key, co
             length = cte->columns[c].size;
         }
         if (length > 0) memcpy(rel->names + used, name, length);
-        rel->columns[c] = (catalog_column_t){rel->names + used, length, meta->type, !meta->is_nullable};
+        rel->columns[c] = (catalog_column_t){rel->names + used, length, meta->type, !meta->is_nullable, false, {0}};
         used += length;
     }
     result_row_t row;
@@ -1345,20 +1345,66 @@ static result_status_t open_command(database_t *db, const char *tag, uint64_t af
 
 /* ── CREATE · DROP ── */
 
+static bool eval_constant(database_t *db, const sqlexpr_t *expr, value_t *out, database_exec_status_t *status);
+
+static bool has_subquery(const sqlexpr_t *expr)
+{
+    if (expr->subquery != NULL) return true;
+    for (size_t i = 0; i < expr->arg_count; i++) {
+        if (has_subquery(expr->args[i])) return true;
+    }
+    return false;
+}
+
+/* DEFAULT 식을 계산해 컬럼 형식으로 바꾼다. 우리 함수는 모두 결정적이라 CREATE 때 한 번 계산해도 같다 */
+static bool column_default(database_t *db, const sqlstmt_column_def_t *def, value_t *out,
+                           database_exec_status_t *status)
+{
+    if (has_subquery(def->default_value)) {
+        *status = fail_result(db, RESULT_E_SEMANTIC, DATABASE_CODE_NOT_CONSTANT, "DEFAULT에는 서브쿼리를 쓸 수 없습니다");
+        return false;
+    }
+    value_t computed = {0};
+    if (!eval_constant(db, def->default_value, &computed, status)) return false;
+    catalog_column_t column = {(const char *)def->name.bytes, def->name.size, def->type, def->not_null, false, {0}};
+    bool cast = cast_for_column(db, &computed.view, &column, out, status);
+    value_clear(&computed);
+    if (cast && (out->view.type == VALUE_TEXT || out->view.type == VALUE_BLOB) &&
+        out->view.size_bytes > CATALOG_DEFAULT_MAX_BYTES) {
+        *status = fail_result(db, RESULT_E_LIMIT, 5, "DEFAULT 값이 %u바이트를 넘습니다", CATALOG_DEFAULT_MAX_BYTES);
+        return false;
+    }
+    return cast;
+}
+
 static database_exec_status_t exec_create(database_t *db, const sqlstmt_create_t *create, result_t **out)
 {
     database_exec_status_t status = DATABASE_EXEC_OK;
     work_t work = {NULL, 0};
     result_t *success = NULL;
     size_t columns_bytes = create->column_count * sizeof(catalog_column_spec_t);
+    size_t defaults_bytes = create->column_count * sizeof(value_t);
     catalog_column_spec_t *columns = q_malloc(db, columns_bytes);
-    if (columns == NULL) return DATABASE_EXEC_NOMEM;
+    value_t *defaults = q_calloc(db, create->column_count, sizeof(value_t));
+    if (columns == NULL || defaults == NULL) {
+        q_free(db, columns, columns_bytes);
+        q_free(db, defaults, defaults_bytes);
+        return DATABASE_EXEC_NOMEM;
+    }
     size_t names_bytes = create->table.size;
     for (size_t i = 0; i < create->column_count; i++) {
         const sqlstmt_column_def_t *def = &create->columns[i];
+        /* 기본 키는 NOT NULL이다(PostgreSQL과 같음. SQLite는 INTEGER 키에 번호를 매겨 서로 다르다) */
+        bool is_key = i == create->primary_key_column && !create->has_identity;
         columns[i] = (catalog_column_spec_t){(const char *)def->name.bytes, def->name.size, def->type,
-                                             def->not_null};
+                                             def->not_null || is_key, NULL};
         names_bytes += def->name.size;
+        if (def->default_value == NULL) continue;
+        if (!column_default(db, def, &defaults[i], &status)) goto done;
+        /* DEFAULT NULL은 기본값이 없는 것과 같다 */
+        if (defaults[i].view.type != VALUE_NULL) columns[i].default_value = &defaults[i].view;
+        names_bytes += defaults[i].view.type == VALUE_TEXT || defaults[i].view.type == VALUE_BLOB
+                           ? defaults[i].view.size_bytes : 0;
     }
     catalog_table_spec_t spec = {(const char *)create->table.bytes, create->table.size, columns,
                                  create->column_count, create->primary_key_column, create->has_identity};
@@ -1401,6 +1447,8 @@ done:
     work_close(db, &work);
     result_release(&success);
     q_free(db, columns, columns_bytes);
+    owned_clear(db, defaults, create->column_count);
+    q_free(db, defaults, defaults_bytes);
     return status;
 }
 
@@ -1704,7 +1752,14 @@ static database_exec_status_t exec_insert(database_t *db, const sqlstmt_insert_t
         }
         owned_clear(db, cells, n);
         for (size_t i = 0; i < n; i++) {
-            if (source[i] == SIZE_MAX) continue;
+            if (source[i] == SIZE_MAX) {
+                /* 목록에 없는 컬럼은 기본값(없으면 NULL) */
+                if (view.columns[i].has_default && q_clone(db, &view.columns[i].default_value, &cells[i]) != VALUE_OK) {
+                    status = DATABASE_EXEC_NOMEM;
+                    goto done;
+                }
+                continue;
+            }
             value_t computed = {0};
             if (!eval_constant(db, insert->values[r * insert->value_count + source[i]], &computed, &status)) goto done;
             bool cast = cast_for_column(db, &computed.view, &view.columns[i], &cells[i], &status);
