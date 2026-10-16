@@ -10,6 +10,8 @@
 #define HAVE_ARM_CRC 1
 #endif
 
+/* arm64 하드웨어 CRC는 실행 중 판별 없이 항상 쓰므로 표 기반 구현을 빌드하지 않는다 */
+#ifndef HAVE_ARM_CRC
 static const uint32_t TABLE[256] = {
     0x00000000u, 0xf26b8303u, 0xe13b70f7u, 0x1350f3f4u, 0xc79a971fu, 0x35f1141cu,
     0x26a1e7e8u, 0xd4ca64ebu, 0x8ad958cfu, 0x78b2dbccu, 0x6be22838u, 0x9989ab3bu,
@@ -61,6 +63,7 @@ static uint32_t crc_table(uint32_t crc, const uint8_t *p, size_t n)
     while (n-- > 0) crc = TABLE[(crc ^ *p++) & 0xffu] ^ (crc >> 8);
     return crc;
 }
+#endif
 
 #ifdef HAVE_X86_CRC
 __attribute__((target("sse4.2"))) static uint32_t crc_x86(uint32_t crc, const uint8_t *p, size_t n)
