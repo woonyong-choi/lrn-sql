@@ -1019,8 +1019,8 @@ static void test_order_and_distinct_respect_budget(void)
                              "UPDATE sorted SET grp = grp RETURNING id, body",
                              "SELECT body FROM sorted UNION ALL SELECT body FROM sorted WHERE grp = 1 ORDER BY 1 LIMIT 100",
                              "SELECT body, grp FROM sorted UNION SELECT body, grp FROM sorted EXCEPT SELECT body, 0 FROM sorted",
-                             "WITH b AS (SELECT body, id FROM sorted WHERE grp >= 0) SELECT x.body FROM b x JOIN b y ON y.id = x.id "
-                             "WHERE x.id IN (SELECT id FROM sorted WHERE grp <> 3)",
+                             ("WITH b AS (SELECT body, id FROM sorted WHERE grp >= 0) SELECT x.body FROM b x JOIN b y ON y.id = x.id "
+                              "WHERE x.id IN (SELECT id FROM sorted WHERE grp <> 3)"),
                              "UPDATE sorted SET grp = grp WHERE id IN (SELECT id FROM sorted WHERE grp = 1) RETURNING body"};
     const size_t expected_rows[] = {300, 40, 40, 1, 300, 300, 100, 72, 206, 52};
     char *before = query(db, "SELECT COUNT(*), SUM(grp), SUM(LENGTH(body)) FROM sorted");
