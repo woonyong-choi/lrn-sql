@@ -130,47 +130,90 @@ def test_forked_child_cannot_use_the_parent_handle(tmp_path: Path) -> None:
     db.close()
 
 
-def _write_forever(path: str, ready: multiprocessing.Event) -> None:
+def _write_forever(path: str) -> None:
     db = Database(path, create=False, busy_timeout_s=60)
     n = 0
     while True:
         with db.begin() as txn:
-            txn.execute("INSERT INTO log (worker, n, pad) VALUES (?, ?, ?)", (os.getpid(), n, b"x" * 20000))
+            txn.execute(
+                "INSERT INTO log (worker, n, pad) VALUES (?, ?, ?)",
+                (os.getpid(), n, b"x" * 20000),
+            )
             txn.execute("UPDATE total SET n = n + 1 WHERE id = 1")
         n += 1
-        ready.set()
+
+
+def _wait_for_writer_progress(
+    db: Database, writer: multiprocessing.Process, before: int = 0
+) -> None:
+    deadline = time.monotonic() + 60
+    while True:
+        assert writer.is_alive(), (
+            f"writer {writer.pid}가 종료됨(exitcode={writer.exitcode})"
+        )
+        after = db.execute(
+            "SELECT COUNT(*) FROM log WHERE worker = ?", (writer.pid,)
+        ).rows[0][0]
+        if after > before:
+            return
+        assert time.monotonic() < deadline, (
+            f"writer {writer.pid}가 60초 안에 쓰지 못함(before={before}, after={after})"
+        )
+        time.sleep(0.01)
 
 
 def test_killed_writer_leaves_no_half_applied_transaction(tmp_path: Path) -> None:
     path = tmp_path / "kill.totedb"
     db = Database(path)
-    db.execute("CREATE TABLE log (id INTEGER PRIMARY KEY AUTOINCREMENT, worker INTEGER, n INTEGER, pad BLOB)")
+    db.execute(
+        "CREATE TABLE log (id INTEGER PRIMARY KEY AUTOINCREMENT, worker INTEGER, n INTEGER, pad BLOB)"
+    )
     db.execute("CREATE TABLE total (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)")
     db.execute("INSERT INTO total VALUES (1, 0)")
     db.close()
-    ready = SPAWN.Event()
-    writers = [SPAWN.Process(target=_write_forever, args=(str(path), ready)) for _ in range(3)]
-    for writer in writers:
-        writer.start()
-    assert ready.wait(timeout=60)
-    # 쓰는 도중의 writer를 차례로 강제 종료한다. 남은 writer는 계속 쓴다
-    for writer in writers[:2]:
-        time.sleep(0.2)
-        os.kill(writer.pid, signal.SIGKILL)
-        writer.join()
-    survivor = Database(path, create=False, busy_timeout_s=60)
-    before = survivor.execute("SELECT n FROM total").rows[0][0]
-    time.sleep(0.3)
-    after = survivor.execute("SELECT n FROM total").rows[0][0]
-    assert after > before, "남은 writer가 계속 쓴다"
-    os.kill(writers[2].pid, signal.SIGKILL)
-    writers[2].join()
-    # 모든 거래는 log 한 행과 total 1 증가를 함께 확정했다. 반만 적용된 거래가 있으면 두 값이 다르다
-    rows = survivor.execute("SELECT COUNT(*) FROM log").rows[0][0]
-    total = survivor.execute("SELECT n FROM total").rows[0][0]
-    assert rows == total
-    survivor.execute("INSERT INTO log (worker, n, pad) VALUES (0, 0, X'00')")
-    survivor.close()
+    observer = Database(path, create=False, busy_timeout_s=60)
+    writers = [
+        SPAWN.Process(target=_write_forever, args=(str(path),)) for _ in range(3)
+    ]
+    try:
+        for writer in writers:
+            writer.start()
+        for writer in writers:
+            _wait_for_writer_progress(observer, writer)
+        for writer in writers[:2]:
+            time.sleep(0.2)
+            writer.kill()
+            writer.join(timeout=60)
+            assert not writer.is_alive(), (
+                f"writer {writer.pid}가 강제 종료 뒤 끝나지 않음"
+            )
+            assert writer.exitcode == -signal.SIGKILL
+        survivor = writers[2]
+        before = observer.execute(
+            "SELECT COUNT(*) FROM log WHERE worker = ?", (survivor.pid,)
+        ).rows[0][0]
+        _wait_for_writer_progress(observer, survivor, before)
+        survivor.kill()
+        survivor.join(timeout=60)
+        assert not survivor.is_alive(), (
+            f"writer {survivor.pid}가 강제 종료 뒤 끝나지 않음"
+        )
+        assert survivor.exitcode == -signal.SIGKILL
+        rows = observer.execute("SELECT COUNT(*) FROM log").rows[0][0]
+        total = observer.execute("SELECT n FROM total").rows[0][0]
+        assert rows == total
+        observer.execute("INSERT INTO log (worker, n, pad) VALUES (0, 0, X'00')")
+    finally:
+        for writer in writers:
+            if writer.pid is not None and writer.is_alive():
+                writer.kill()
+        for writer in writers:
+            if writer.pid is not None:
+                writer.join(timeout=60)
+        observer.close()
+        assert all(not writer.is_alive() for writer in writers), (
+            "강제 종료 뒤 writer가 남음"
+        )
 
 
 def _hold_big_transaction(path: str, started: multiprocessing.Event, release: multiprocessing.Event) -> None:
