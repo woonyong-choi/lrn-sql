@@ -14,7 +14,7 @@ README의 빠른 시작에 담지 않은 빌드 변수, 시험 대상, 외부 �
 
 `make all`은 DB와 큐를 묶은 공유 라이브러리 `build/lib/libtotedb.so`(macOS에서는 `.dylib`)를 `-O2`로 만든다. 이 라이브러리는 sanitizer를 켜지 않는다. Python 바인딩은 환경 변수 `TOTEDB_LIB`가 가리키는 파일을 먼저 찾고, 없으면 `build/lib/`를 찾는다.
 
-시험 바이너리는 `SANITIZE` 변수로 sanitizer를 고른다. 기본값은 `address,undefined`다. `BUILD_DIR`를 바꾸면 sanitizer 설정이 다른 빌드를 따로 둘 수 있다.
+시험 바이너리는 `SANITIZE` 변수로 sanitizer를 고른다. 기본값은 `address,undefined`이고 Darwin 25 이상에서는 `undefined`다. `BUILD_DIR`를 바꾸면 sanitizer 설정이 다른 빌드를 따로 둘 수 있다.
 
 ```sh
 make test-all
@@ -63,14 +63,7 @@ make SANITIZE= BUILD_DIR=build-sqlite test-sqlite-session-diff
 
 `bench/sqlite_workload.py`는 같은 SQL을 이 엔진과 시스템 SQLite에 주고, 문장마다 결과를 대조하면서 시간과 메모리를 잰다.
 
-- 측정 항목
-  - 자동 commit 삽입
-  - 기본 키·구간·조건·전체 스캔 조회
-  - 혼합 부하
-  - 강제 종료 뒤 다시 열기
-- 측정 조건(seed, 행 수, 반복 수, 내구성 설정)은 `bench/sqlite_workload.json`에 있다
-- 결과가 하나라도 다르면 실패로 끝난다
-- 시간 수치는 통과/실패 판정에 쓰지 않는다
+측정 항목은 자동 commit 삽입, 기본 키·구간·조건·전체 스캔 조회, 혼합 부하, 강제 종료 뒤 다시 열기다. 측정 조건(seed, 행 수, 반복 수, 내구성 설정)은 `bench/sqlite_workload.json`에 있다. 결과가 하나라도 다르면 실패로 끝난다. 시간 수치는 통과·실패 판정에 쓰지 않는다.
 
 ```sh
 python3 bench/sqlite_workload.py --smoke
@@ -98,9 +91,9 @@ Python 패키지 `totedb`는 PyPI에 올린다. 공유 라이브러리를 ctypes
 | 파일 | 역할 |
 |---|---|
 | `pyproject.toml` | 패키지 정보, 버전 출처(`python/totedb/__init__.py`), cibuildwheel 설정 |
-| `setup.py` | `make SANITIZE= all`로 만든 `libtotedb`를 패키지 폴더에 넣고 wheel 태그를 정함 |
+| `setup.py` | `make SANITIZE= all`로 만든 `libtotedb`를 패키지 폴더에 넣고 wheel 태그 결정 |
 | `MANIFEST.in` | sdist에 C 소스와 `Makefile`을 넣어 설치 때 다시 빌드 |
-| `tests/package_smoke.py` | 설치한 패키지가 자기 안의 라이브러리로 DB·큐를 쓰는지 저장소 밖에서 확인 |
+| `tests/package_smoke.py` | 별도 설치 환경에서 패키지 안의 라이브러리로 DB·큐 사용 확인 |
 
 Python 바인딩은 `TOTEDB_LIB`, 설치한 패키지 폴더, 저장소의 `build/lib/` 순서로 라이브러리를 찾는다.
 
@@ -108,16 +101,20 @@ Python 바인딩은 `TOTEDB_LIB`, 설치한 패키지 폴더, 저장소의 `buil
 
 ```sh
 python3 -m build
-python3 -m venv /tmp/totedb-env && /tmp/totedb-env/bin/pip install dist/*.whl
-cd /tmp && /tmp/totedb-env/bin/python ~/totedb/tests/package_smoke.py
+python3 -m venv build/package-env
+build/package-env/bin/pip install dist/*.whl
+TOTEDB_ROOT="$PWD"
+cd build
+package-env/bin/python "$TOTEDB_ROOT/tests/package_smoke.py"
+cd "$TOTEDB_ROOT"
 ```
 
 ### 릴리스 순서
 
-1. `python/totedb/__init__.py`의 `__version__`, `include/totedb.h`의 `TOTE_VERSION`, `CHANGELOG.md`의 `## {버전} - {날짜}` 절을 같은 버전으로 맞춘다
-2. 기본 브랜치에 머지한 뒤 `v{버전}` 태그를 push한다
-3. `.github/workflows/release.yml`이 버전 일치를 검사하고 sdist와 wheel(Linux x86_64·aarch64 manylinux_2_28, macOS arm64 11.0 이상)을 빌드·설치·검사한다
-4. PyPI Trusted Publishing(`pypi` 환경)으로 게시한 뒤 변경 기록 절을 본문으로 GitHub Release를 만들고 배포 파일을 첨부한다
+1. `python/totedb/__init__.py`의 `__version__`, `include/totedb.h`의 `TOTE_VERSION`, `CHANGELOG.md`의 `## {버전} - {날짜}` 절을 같은 버전으로 맞춘다.
+2. 기본 브랜치에 머지한 뒤 `v{버전}` 태그를 push한다.
+3. `.github/workflows/release.yml`이 버전 일치를 검사하고 sdist와 wheel(Linux x86_64·aarch64 manylinux_2_28, macOS arm64 11.0 이상)을 빌드·설치·검사한다.
+4. PyPI Trusted Publishing(`pypi` 환경)으로 게시한 뒤 변경 기록 절을 본문으로 GitHub Release를 만들고 배포 파일을 첨부한다.
 
 패키징 파일을 바꾼 PR에서는 같은 워크플로가 3단계까지만 실행한다. Windows와 macOS x86_64 wheel은 만들지 않는다. macOS x86_64는 sdist로 설치한다.
 
