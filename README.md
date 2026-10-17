@@ -14,17 +14,6 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT 라이선스"></a>
 </p>
 
-## 목차
-
-- [빠른 시작](#빠른-시작)
-  - [여러 프로세스·언어에서 같은 큐 쓰기](#여러-프로세스언어에서-같은-큐-쓰기)
-- [해결하는 문제](#해결하는-문제)
-- [작동 방식](#작동-방식)
-- [상태](#상태)
-- [문서](#문서)
-- [개발](#개발)
-- [라이선스](#라이선스)
-
 ## 빠른 시작
 
 Python 3.9 이상이 필요합니다. 가상 환경에서 설치하세요.
@@ -118,14 +107,15 @@ SQL 차등 시험은 SQLite와 대조하며, PostgreSQL 비교는 연결 설정�
 
 ## 문서
 
-- [아키텍처](docs/architecture.md): 구성 요소, 처리 흐름, 지켜야 할 규칙
-- [빌드와 시험](docs/build-and-test.md): 빌드 변수, 시험 대상, 다른 엔진과 비교, 패키지 배포
-- [안전성 시험 결과](docs/safety.md): 강제 종료·I/O 실패·여러 프로세스 시험과 결과, 확인하지 않은 범위
-- [C 코딩 규칙](docs/convention/c-style.md): C 코드 작성 기준
-- [Python 코딩 규칙](docs/convention/python-style.md): Python 코드 작성 기준
-- [폴더 구조 규칙](docs/convention/project-structure.md): 파일과 폴더를 두는 자리
-- [기여 안내](.github/CONTRIBUTING.md): 검사, 커밋·PR 형식
-- [전체 문서](docs/README.md)
+- [아키텍처](docs/architecture.md)
+  - [빌드와 시험](docs/build-and-test.md)
+  - [안전성 시험 결과](docs/safety.md)
+  - [C 코딩 규칙](docs/convention/c-style.md)
+  - [Python 코딩 규칙](docs/convention/python-style.md)
+  - [폴더 구조 규칙](docs/convention/project-structure.md)
+  - [기여 안내](.github/CONTRIBUTING.md)
+
+[전체 문서](docs/README.md)
 
 ## 개발
 
