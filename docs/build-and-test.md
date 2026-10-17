@@ -82,6 +82,8 @@ python3 bench/sqlite_workload.py --output build/bench/sqlite_workload.json --ana
 | `pg-compat` | PostgreSQL 18 서비스에 `make test-sql-diff`를 실행한 뒤 `make test-sqlite-session-diff` |
 | `actionlint` | 워크플로 파일 검사 |
 
+CI의 SQL 비교·워크플로 검사와 릴리스의 Linux 보조 job은 Ubuntu 24.04로 고정한다. sanitizer 시험은 Ubuntu 22.04를 유지한다. 결과 파일 업로드·다운로드 액션은 Node.js 24 런타임을 사용한다.
+
 태그 push와 패키징 파일을 바꾼 PR에서는 `.github/workflows/release.yml`이 실행된다([패키지 배포](#패키지-배포)).
 
 ## 패키지 배포
@@ -116,7 +118,7 @@ cd "$TOTEDB_ROOT"
 3. `.github/workflows/release.yml`이 버전 일치를 검사하고 sdist와 wheel(Linux x86_64·aarch64 manylinux_2_28, macOS arm64 11.0 이상)을 빌드·설치·검사한다.
 4. PyPI Trusted Publishing(`pypi` 환경)으로 게시한 뒤 변경 기록 절을 본문으로 GitHub Release를 만들고 배포 파일을 첨부한다.
 
-패키징 파일을 바꾼 PR에서는 같은 워크플로가 3단계까지만 실행한다. Windows와 macOS x86_64 wheel은 만들지 않는다. macOS x86_64는 sdist로 설치한다.
+패키징 파일을 바꾼 PR에서는 같은 워크플로가 3단계까지만 실행한다. 업로드한 배포 파일을 다시 내려받아 `twine check`로 검사한 뒤에만 게시 job을 시작한다. Windows와 macOS x86_64 wheel은 만들지 않는다. macOS x86_64는 sdist로 설치한다.
 
 ## macOS에서 ASan 바이너리가 멈추는 문제
 

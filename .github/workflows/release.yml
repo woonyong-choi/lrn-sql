@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   verify-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Compare tag, Python and C header versions
@@ -43,7 +43,7 @@ jobs:
 
   sdist:
     needs: verify-version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -57,10 +57,11 @@ jobs:
           python -m venv /tmp/sdist-env
           /tmp/sdist-env/bin/pip install dist/*.tar.gz
           cd /tmp && /tmp/sdist-env/bin/python "$GITHUB_WORKSPACE/tests/package_smoke.py"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-sdist
           path: dist/*.tar.gz
+          if-no-files-found: error
 
   wheels:
     needs: verify-version
@@ -79,22 +80,40 @@ jobs:
           python -m pip install "cibuildwheel>=3,<4" twine
           python -m cibuildwheel --output-dir wheelhouse
           python -m twine check wheelhouse/*.whl
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  verify-artifacts:
+    needs: [sdist, wheels]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Check downloaded distributions
+        run: |
+          python -m pip install twine
+          python -m twine check dist/*
 
   publish-pypi:
-    needs: [sdist, wheels]
+    needs: verify-artifacts
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/project/totedb/
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true
@@ -103,12 +122,12 @@ jobs:
 
   github-release:
     needs: publish-pypi
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true
