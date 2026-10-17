@@ -7,7 +7,7 @@ __pycache__/
 build*/
 __test__*/
 
-# AI 작업 중간 산출물·임시 파일·작업 로그
+# 비공개 작업 파일과 임시 산출물
 .local/
 *handoff*.md
 scratch*
