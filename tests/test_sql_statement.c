@@ -977,8 +977,8 @@ static void allocation_failures(void)
         "INSERT INTO t VALUES (1, -2, 'long text value', NULL, X'ff')",
         "SELECT a, b, c, d, e FROM t WHERE a >= 'x'",
         "SELECT * FROM t WHERE a IS NOT NULL",
-        "SELECT DISTINCT a + 1 AS x, CASE WHEN b IN (1, 2) THEN 'y' ELSE lower(c) END FROM t u "
-        "WHERE a BETWEEN 1 AND 9 AND c LIKE 'a%' OR NOT d IS NULL ORDER BY 1 DESC, x LIMIT 3 OFFSET 1",
+        ("SELECT DISTINCT a + 1 AS x, CASE WHEN b IN (1, 2) THEN 'y' ELSE lower(c) END FROM t u "
+         "WHERE a BETWEEN 1 AND 9 AND c LIKE 'a%' OR NOT d IS NULL ORDER BY 1 DESC, x LIMIT 3 OFFSET 1"),
         "INSERT INTO t VALUES (1, 'a' || 'b'), (2, CAST(?1 AS BLOB))",
         "UPDATE t SET a = 1, b = ?1, c = X'01', d = -1.5 WHERE e <> ?2",
         "DELETE FROM t WHERE \"column name\" = 'v'",
