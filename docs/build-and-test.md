@@ -123,3 +123,14 @@ cd "$TOTEDB_ROOT"
 macOS 26(Darwin 25)과 Apple clang 17에서는 ASan 바이너리가 `main()`에 닿기 전에 멈춘다. ASan 런타임 초기화가 자기 자신을 다시 부르는 문제이며 빈 `main()`을 `cc -fsanitize=address`로 빌드해도 같은 증상이 나온다. 스택은 `AsanInitInternal`, `InitializeShadowMemory`, `get_dyld_hdr`, `dyld_shared_cache_iterate_text_swift`, `malloc`, `__sanitizer_mz_malloc`를 거쳐 다시 `AsanInitFromRtl`로 들어가 spin lock에서 멈춘다. UBSan만 켠 빌드는 정상 동작한다.
 
 `Makefile`은 Darwin 25 이상에서 `SANITIZE` 기본값을 `undefined`로 낮춘다. ASan을 켠 시험은 Linux나 저장소의 Dev Container(`.devcontainer/`)에서 실행한다.
+
+## README 그림
+
+[업무 데이터와 작업 큐 원본](assets/transaction-queue.torso)을 Torso로 변환한다. 검증한 도구는 [Torso `14e57b7`](https://github.com/woonyong-choi/torso/tree/14e57b7b274ac791f46d6c7827acf17686a983ed)과 Node.js 26.9.0이다(2026-10-18 확인). Torso 소스 작업본에 의존성을 설치한 뒤, ToteDB 루트에서 그 작업본의 CLI 경로를 지정한다.
+
+```sh
+node "$TORSO_DIR/src/cli.js" check docs/assets/transaction-queue.torso --strict
+node "$TORSO_DIR/src/cli.js" render docs/assets/transaction-queue.torso --strict --static
+```
+
+생성된 SVG와 원본을 함께 커밋한다. README는 SVG를 읽으므로 원본만 바꾸면 그림에 반영되지 않는다.

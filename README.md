@@ -1,13 +1,17 @@
 <p align="center">
-  <img src="docs/assets/totedb-icon.png" alt="ToteDB 아이콘: 짙은 남색 토트백" width="160">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/totedb-icon.png">
+    <img src="docs/assets/totedb-icon.png" alt="ToteDB 로고" width="96">
+  </picture>
 </p>
 
 <h1 align="center">ToteDB</h1>
 
 <p align="center">
   앱 안에 넣는 SQL 데이터베이스와, 같은 트랜잭션에 들어가는 작업 큐<br>
-  <a href="https://github.com/woonyong-choi/totedb/actions/workflows/ci.yml"><img src="https://github.com/woonyong-choi/totedb/actions/workflows/ci.yml/badge.svg" alt="CI"></a><br>
-  <a href="#빠른-시작">빠른 시작</a> · <a href="#작동-방식">작동 방식</a> · <a href="#상태">상태</a>
+  <a href="https://github.com/woonyong-choi/totedb/actions/workflows/ci.yml"><img src="https://github.com/woonyong-choi/totedb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/totedb/"><img src="https://img.shields.io/pypi/v/totedb" alt="PyPI 버전"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT 라이선스"></a>
 </p>
 
 ## 목차
@@ -23,27 +27,33 @@
 
 ## 빠른 시작
 
-Python 3.9 이상에서 설치하세요. Linux(x86_64·aarch64)와 macOS(arm64)는 빌드된 wheel을 받고, 그 밖의 POSIX 환경은 GCC와 GNU Make로 소스를 빌드해 설치합니다.
+Python 3.9 이상이 필요합니다. 가상 환경에서 설치하세요.
 
 ```sh
+python3 -m venv .venv
+. .venv/bin/activate
 pip install totedb
 ```
 
-아래 내용을 `demo.py`로 저장하세요. 테이블을 만들고, 행 갱신과 큐 작업 추가를 한 트랜잭션으로 확정한 뒤 작업을 꺼내 처리합니다.
+Linux(x86_64·aarch64)와 macOS(arm64)용 wheel을 제공합니다. 그 밖의 POSIX 환경에서는 C 컴파일러와 GNU Make가 필요합니다.
+
+아래 내용을 `demo.py`로 저장하세요. 주문 저장과 작업 등록을 한 트랜잭션으로 확정한 뒤, 작업을 꺼내 처리합니다. 예제는 임시 DB를 쓰고 실행이 끝나면 지웁니다.
 
 ```python
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from totedb import Database, Queue
 
-with Database("demo.db") as db:
-    db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)")
-    db.execute("INSERT INTO users VALUES (?, ?, ?), (?, ?, ?)", [1, "Alice", 25, 2, "Bob", 31])
-    print(db.execute("SELECT name, age FROM users WHERE age > ? ORDER BY age", [20]).rows)
-
-    queue = Queue(db, "jobs")
+with TemporaryDirectory() as directory, Database(Path(directory) / "demo.db") as db:
+    db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT)")
+    queue = Queue(db, "shipping")
     with db.begin() as txn:
-        txn.execute("UPDATE users SET age = age + 1 WHERE name = ?", ["Alice"])
-        queue.put(b"send-welcome-mail", txn=txn)
+        txn.execute("INSERT INTO orders VALUES (?, ?)", [1, "paid"])
+        queue.put(b"ship-order-1", txn=txn)
+
     claim = queue.get(lease_ms=30_000)
+    print(db.execute("SELECT * FROM orders").rows)
     print(claim.payload)
     queue.ack(claim)
     print(queue.stats())
@@ -54,59 +64,57 @@ python3 demo.py
 ```
 
 ```text
-(('Alice', 25), ('Bob', 31))
-b'send-welcome-mail'
+((1, 'paid'),)
+b'ship-order-1'
 QueueStats(ready=0, leased=0, acked=1, failed=0)
 ```
 
+실제 데이터를 남기려면 `Database("orders.db")`처럼 파일 경로를 지정하세요. 큐 없이 SQL 데이터베이스로만 쓸 수도 있습니다.
+
 ### 여러 프로세스·언어에서 같은 큐 쓰기
 
-큐의 lease, fence, 멱등 키 규칙은 C 코어에 있어 어느 언어로 붙어도 같게 동작합니다. 아래 예제는 Python 프로세스가 주문 저장과 출고 작업 등록을 한 트랜잭션으로 확정하고, C worker 프로세스 셋이 같은 파일의 같은 큐를 나눠 처리합니다. 작업 하나를 claim한 worker를 강제 종료해도 lease가 끝나면 다른 worker가 그 작업을 받아 처리합니다. 코드는 [`examples/outbox/`](examples/outbox/)에 있습니다.
+Python에서 주문과 작업을 저장하고 C worker 셋이 같은 파일의 큐를 나눠 처리하는 [outbox 예제](examples/outbox/)가 있습니다. 작업을 받은 worker를 강제 종료한 뒤 다른 worker가 작업을 다시 받아 처리하는 과정도 확인합니다.
 
 ```sh
 make example-outbox
 ```
 
-```text
-[python] 주문 30건과 출고 작업 30건을 같은 트랜잭션으로 넣음
-[c-hung] 주문 1을 claim한 뒤 SIGKILL로 강제 종료됨
-[c-1] 10건 처리
-[c-2] 10건 처리
-[c-3] 10건 처리
-[검증] 출고 30건, 중복 0, 누락 0, 큐 acked 30, 강제 종료된 worker의 주문 1은 worker c-2에 재전달되어 처리됨
-검증 통과
-```
-
-어느 worker가 몇 건을 처리하는지는 실행마다 다릅니다.
-
 ## 해결하는 문제
 
-로컬 프로그램이 업무 데이터와 작업 큐를 따로 저장하면 한쪽만 commit되어 작업이 사라지거나 두 번 실행될 수 있습니다. ToteDB는 큐를 같은 DB 파일의 테이블로 두어 업무 갱신과 큐 변경을 한 트랜잭션으로 확정합니다. 큐를 설치하지 않으면 큐 테이블이나 객체가 생기지 않고 SQL DB로만 동작합니다. 한 부모 프로세스가 띄운 여러 worker 프로세스가 같은 파일과 같은 큐를 함께 씁니다. 쓰기는 파일 전체에서 한 번에 하나씩 확정합니다. 더 넓은 SQL 기능이 필요하면 SQLite를, 여러 writer의 동시 실행과 서버 운영 기능이 필요하면 PostgreSQL을 검토하세요.
+로컬 프로그램이 주문과 출고 작업을 따로 저장하면, 주문만 저장하고 작업 등록 전에 멈출 수 있습니다. ToteDB는 SQL 테이블과 작업 큐를 같은 DB 파일에 두어 둘을 한 트랜잭션으로 확정합니다. 별도 DB 서버나 큐 서버를 띄우지 않고 앱 안에서 사용합니다.
+
+작업은 처리 확인(ACK)을 받기 전까지 다시 전달될 수 있습니다. 메일 발송이나 외부 API 호출처럼 DB 밖에서 하는 일은 중복 실행을 견디도록 작성해야 합니다.
+
+더 넓은 SQL 기능이 필요하면 SQLite를, 여러 writer의 동시 실행과 서버 운영 기능이 필요하면 PostgreSQL을 검토하세요.
 
 ## 작동 방식
 
-1. 응용 프로그램이 C API `database_exec`나 Python `Database.execute`로 SQL과 매개변수를 넘깁니다.
-2. lexer와 parser가 문장 하나를 AST로 바꾸고, 실행기가 기본 키·색인 조회나 테이블 스캔으로 행을 읽습니다.
-3. 변경 문장은 바뀐 페이지를 새 자리에 쓰고, 제어 페이지 한 장으로 새 세대를 게시한 뒤 `fsync`합니다. 제어 페이지에 적은 페이지 체크섬 목록으로 끝나지 않은 commit을 알아보고 이전 세대로 엽니다.
-4. 쓰기 트랜잭션은 같은 파일을 연 모든 프로세스에서 한 번에 하나이고, 트랜잭션은 시작 때 게시된 상태와 자기 변경만 봅니다. 다른 프로세스가 commit하면 다음 문장이 새 상태를 다시 읽습니다. 이미 열린 핸들의 조회는 다른 프로세스가 쓰는 동안에도 마지막으로 게시된 상태를 읽습니다. 새 세대를 게시하는 동안에는 파일 잠금을 기다립니다. 다른 writer가 있으면 Python 바인딩의 문장 실행과 쓰기 트랜잭션 시작은 `busy_timeout_s`까지 다시 시도합니다.
+1. 앱이 Python `Database.execute`나 C `tote_exec`로 SQL을 실행합니다.
+2. 같은 트랜잭션 안에서 업무 행을 바꾸고 큐에 작업을 넣습니다.
+3. 엔진이 바뀐 페이지를 새 자리에 쓰고, 새 세대를 게시한 뒤 `fsync`를 마쳐 commit을 응답합니다.
+4. worker가 작업을 받아 처리하고 ACK합니다. 처리 기한(lease)이 끝나면 다른 worker가 다시 받을 수 있습니다.
 
-   새 핸들을 여는 `Database(...)`에는 `busy_timeout_s` 재시도가 적용되지 않습니다. 다른 writer와 열기 잠금이 겹치면 `DatabaseOpenError`가 날 수 있습니다.
+![업무 테이블과 큐 테이블은 같은 DB에 저장되고 worker는 그 큐에서 작업을 받아 처리한다](docs/assets/transaction-queue.svg)
 
-5. ACK 큐는 공개 SQL과 트랜잭션 API만 써서 작업을 READY, LEASED, ACKED, FAILED 상태로 옮기고 fence 값으로 오래된 처리 결과를 거절합니다.
+여러 프로세스가 같은 파일을 열 수 있지만 쓰기 트랜잭션은 한 번에 하나입니다. 이미 열린 핸들의 조회는 writer가 작업하는 동안 마지막으로 게시된 상태를 읽고, 새 세대를 게시할 때는 잠금을 기다립니다.
 
-전체 구조는 [아키텍처](docs/architecture.md)에 있습니다.
+Python의 `busy_timeout_s`는 문장 실행과 쓰기 트랜잭션 시작에 적용합니다. 새 핸들을 여는 `Database(...)`는 재시도하지 않으므로 writer와 열기 잠금이 겹치면 `DatabaseOpenError`가 날 수 있습니다.
+
+저장 방식과 잠금 규칙은 [아키텍처](docs/architecture.md)에 있습니다.
 
 ## 상태
 
+[0.1.0 릴리스](https://github.com/woonyong-choi/totedb/releases/tag/v0.1.0)와 Python 패키지를 배포했습니다. 1.0 전에는 파일 형식과 API가 예고 없이 바뀔 수 있습니다.
+
 | 있는 것 | 아직 없는 것 | 다음 |
 |---|---|---|
-| CREATE TABLE·INDEX, INSERT·UPDATE·DELETE, DEFAULT, ON CONFLICT, RETURNING | ALTER TABLE, `INSERT ... SELECT`, 복합 색인, 창 함수, WITH RECURSIVE | 없음 |
-| SELECT의 WHERE·ORDER BY·LIMIT, JOIN(INNER·LEFT·첫 RIGHT), GROUP BY·HAVING, 상관 서브쿼리, UNION·EXCEPT·INTERSECT, WITH, 정수 기본 키 범위 조회 | FULL JOIN, USING, 보조 색인 범위 조회, 보조 색인 순서 정렬 | 없음 |
-| 여러 프로세스가 같은 파일 공유(쓰기는 한 번에 하나, 쓰기 작업 중 조회 가능, 게시 때 잠금 대기), snapshot 격리, COW 게시와 `fsync` 뒤 commit 응답, fork한 자식의 부모 핸들 사용 거절 | 여러 writer 동시 commit, 네트워크 파일 시스템, 저장 장치가 버린 쓰기 탐지 | 없음 |
-| at-least-once ACK 큐, lease와 fence, lease 연장, 업무 갱신과 같은 commit, purge 뒤에도 보존 기간(기본 7일) 동안 유지되는 idempotency 키, 큐별 payload 상한(기본 1 MiB), 여러 프로세스·언어(Python, C)가 같은 큐 사용 | Python·C 밖의 언어 바인딩 | 없음 |
-| SQL 차등 시험에서 SQLite와 결과 대조, PostgreSQL 비교는 연결 설정 시 실행, commit 중 모든 쓰기 지점의 종료·I/O 실패 시험([안전성 시험 결과](docs/safety.md)), SQLite와 같은 입력의 CRUD·혼합 부하·강제 종료 뒤 복구 측정 | 전원 차단 검증, 페이지 재사용 뒤 파일 크기 비교의 추가 검증 | 없음 |
+| SQL 조회·갱신, JOIN·집계·서브쿼리, 정수 기본 키·TEXT 색인 | ALTER TABLE, 복합 색인, 창 함수 | [기본 키 조회 성능 측정 마무리 #158](https://github.com/woonyong-choi/totedb/issues/158) |
+| 단일 writer, 여러 프로세스의 파일 공유, commit 후 복구 | 여러 writer 동시 commit, 네트워크 파일 시스템 지원 | 없음 |
+| ACK 큐, 처리 기한·연장, 중복 등록 키, C·Python 바인딩 | C·Python 외 언어 바인딩 | 없음 |
 
-1.0 전에는 파일 형식과 API가 예고 없이 바뀔 수 있습니다. 바뀐 내용은 [변경 기록](CHANGELOG.md)에 있습니다.
+SQL 차등 시험은 SQLite와 대조하며, PostgreSQL 비교는 연결 설정이 있을 때 실행합니다. 강제 종료와 I/O 실패 시험의 결과·조건은 [안전성 시험 결과](docs/safety.md)에 있습니다. 실제 전원 차단은 검증하지 않았습니다.
+
+변경 내용은 [변경 기록](CHANGELOG.md)에 있습니다.
 
 ## 문서
 
@@ -121,7 +129,7 @@ make example-outbox
 
 ## 개발
 
-저장소에서 직접 쓰려면 공유 라이브러리를 빌드하고 `PYTHONPATH=python`을 지정하세요.
+GCC 또는 Clang, GNU Make, Python 3, pytest가 필요합니다. SQL 차등 시험에는 SQLite 개발 라이브러리도 필요합니다.
 
 ```sh
 git clone https://github.com/woonyong-choi/totedb.git
@@ -131,6 +139,8 @@ make test-all test-runner test-fault test-result
 make SANITIZE=thread BUILD_DIR=build-tsan test-transaction test-session test-ack-queue
 make test-sql-diff
 ```
+
+소스의 Python 바인딩을 쓰려면 `PYTHONPATH=python`을 지정하세요. 검사 범위와 변경 제출 방법은 [기여 안내](.github/CONTRIBUTING.md)에 있습니다.
 
 ## 라이선스
 
