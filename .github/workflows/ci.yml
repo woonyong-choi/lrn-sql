@@ -38,14 +38,14 @@ jobs:
           fi
       - name: Preserve test outcomes, seeds and raw output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fault-evidence-${{ matrix.sanitizer }}
           path: build/fault/
           if-no-files-found: warn
 
   pg-compat:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:18
@@ -74,7 +74,7 @@ jobs:
         run: make SANITIZE= BUILD_DIR=build-sqlite test-sqlite-session-diff
 
   actionlint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Lint workflow files
