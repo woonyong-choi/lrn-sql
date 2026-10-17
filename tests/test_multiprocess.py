@@ -14,7 +14,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from totedb import Database, ForkedHandleError, Queue
 
 SPAWN = multiprocessing.get_context("spawn")
@@ -180,8 +179,29 @@ def _hold_big_transaction(path: str, started: multiprocessing.Event, release: mu
         for i in range(200):
             txn.execute("INSERT INTO big (id, pad) VALUES (?, ?)", (1000 + i, b"y" * 20000))
         started.set()
-        release.wait(timeout=60)
+        assert release.wait(timeout=60), "writer의 거래 해제 신호가 오지 않음"
     db.close()
+
+
+def _read_before_commit(path: str, ready: multiprocessing.Event, started: multiprocessing.Event) -> None:
+    db = Database(path, create=False)
+    try:
+        ready.set()
+        assert started.wait(timeout=60), "writer의 거래 시작 신호가 오지 않음"
+        for _ in range(50):
+            assert db.execute("SELECT COUNT(*) FROM big").rows == ((1,),)
+    finally:
+        db.close()
+
+
+def _finish_processes(processes: list[multiprocessing.Process]) -> None:
+    for process in processes:
+        if process.pid is None:
+            continue
+        process.join(timeout=60)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=60)
 
 
 def test_reads_do_not_wait_for_another_process_writing(tmp_path: Path) -> None:
@@ -189,38 +209,51 @@ def test_reads_do_not_wait_for_another_process_writing(tmp_path: Path) -> None:
     db = Database(path)
     db.execute("CREATE TABLE big (id INTEGER PRIMARY KEY, pad BLOB)")
     db.execute("INSERT INTO big VALUES (1, X'00')")
-    started, release = SPAWN.Event(), SPAWN.Event()
+    ready, started, release = SPAWN.Event(), SPAWN.Event(), SPAWN.Event()
     writer = SPAWN.Process(target=_hold_big_transaction, args=(str(path), started, release))
-    writer.start()
+    reader = SPAWN.Process(target=_read_before_commit, args=(str(path), ready, started))
     try:
+        reader.start()
+        assert ready.wait(timeout=60), "reader가 데이터베이스를 열지 못함"
+        writer.start()
         assert started.wait(timeout=60)
-        # writer가 4MB를 쓴 거래를 쥐고 있는 동안 조회는 기다리지 않고 commit 전 상태를 읽는다
-        slowest = 0.0
-        for _ in range(50):
-            began = time.perf_counter()
-            assert db.execute("SELECT COUNT(*) FROM big").rows == ((1,),)
-            slowest = max(slowest, time.perf_counter() - began)
-        assert slowest < 0.5, f"가장 느린 조회 {slowest:.3f}s"
-    finally:
+        reader.join(timeout=60)
+        assert not reader.is_alive(), "writer의 거래 해제 전에 reader가 끝나지 않음"
+        assert reader.exitcode == 0
+        assert writer.is_alive(), "거래 해제 신호 전에 writer가 종료됨"
         release.set()
         writer.join(timeout=60)
-    assert writer.exitcode == 0
-    assert db.execute("SELECT COUNT(*) FROM big").rows == ((201,),)
-    db.close()
+        assert not writer.is_alive(), "거래 해제 뒤 writer가 끝나지 않음"
+        assert writer.exitcode == 0
+        assert db.execute("SELECT COUNT(*) FROM big").rows == ((201,),)
+    finally:
+        release.set()
+        _finish_processes([writer, reader])
+        db.close()
 
 
-def _read_until(path: str, stop: multiprocessing.Event) -> None:
+def _read_until(path: str, ready: multiprocessing.Event, stop: multiprocessing.Event) -> None:
     db = Database(path, create=False)
-    while not stop.is_set():
+    try:
         db.execute("SELECT COUNT(*) FROM t")
-    db.close()
+        ready.set()
+        while not stop.is_set():
+            db.execute("SELECT COUNT(*) FROM t")
+    finally:
+        db.close()
 
 
-def _commit_many(db: Database, start: int, count: int) -> float:
-    began = time.perf_counter()
+def _commit_many(db: Database, start: int, count: int) -> None:
     for i in range(start, start + count):
         db.execute("INSERT INTO t VALUES (?, ?)", (i, b"z" * 200))
-    return time.perf_counter() - began
+
+
+def _commit_in_process(path: str, start: int, count: int) -> None:
+    db = Database(path, create=False, busy_timeout_s=60)
+    try:
+        _commit_many(db, start, count)
+    finally:
+        db.close()
 
 
 def test_writer_keeps_committing_while_readers_read_continuously(tmp_path: Path) -> None:
@@ -230,20 +263,28 @@ def test_writer_keeps_committing_while_readers_read_continuously(tmp_path: Path)
     with db.begin() as txn:
         for i in range(3000):
             txn.execute("INSERT INTO t VALUES (?, ?)", (-i - 1, b"z" * 200))
-    alone = _commit_many(db, 0, 40)
+    _commit_many(db, 0, 40)
     stop = SPAWN.Event()
-    readers = [SPAWN.Process(target=_read_until, args=(str(path), stop)) for _ in range(4)]
-    for reader in readers:
-        reader.start()
+    ready = [SPAWN.Event() for _ in range(4)]
+    readers = [SPAWN.Process(target=_read_until, args=(str(path), event, stop)) for event in ready]
+    writer = SPAWN.Process(target=_commit_in_process, args=(str(path), 40, 40))
     try:
-        time.sleep(0.5)
-        shared = _commit_many(db, 40, 40)
-    finally:
+        for reader in readers:
+            reader.start()
+        for event in ready:
+            assert event.wait(timeout=60), "reader의 첫 조회가 끝나지 않음"
+        writer.start()
+        writer.join(timeout=60)
+        assert not writer.is_alive(), "reader가 읽는 동안 writer가 끝나지 않음"
+        assert writer.exitcode == 0
+        assert all(reader.is_alive() for reader in readers), "중지 신호 전에 reader가 종료됨"
         stop.set()
         for reader in readers:
             reader.join(timeout=60)
-    assert [reader.exitcode for reader in readers] == [0, 0, 0, 0]
-    assert db.execute("SELECT COUNT(*) FROM t WHERE x >= 0").rows == ((80,),)
-    # 게시 대기 표시가 새 reader를 멈춰 writer가 틈을 얻는다. 표시가 없으면 쉬지 않고 읽는 reader 사이에서 굶는다
-    assert shared < alone * 6 + 1.0, f"혼자 {alone:.2f}s, reader 4개와 함께 {shared:.2f}s"
-    db.close()
+        assert all(not reader.is_alive() for reader in readers), "중지 신호 뒤 reader가 끝나지 않음"
+        assert [reader.exitcode for reader in readers] == [0, 0, 0, 0]
+        assert db.execute("SELECT COUNT(*) FROM t WHERE x >= 0").rows == ((80,),)
+    finally:
+        stop.set()
+        _finish_processes([writer, *readers])
+        db.close()
