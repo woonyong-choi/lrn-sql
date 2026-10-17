@@ -1,12 +1,12 @@
 # 아키텍처
 
-ToteDB는 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데이터베이스다. 응용 프로그램은 C API(`session`·`database`)나 공유 라이브러리 `libtotedb`를 거친 Python 패키지 `totedb`로 부르며, 선택형 ACK 큐는 같은 DB 위에 테이블 하나로 설치된다.
+ToteDB는 파일 하나에 SQL 테이블을 저장하는 C11 임베디드 데이터베이스다. 응용 프로그램은 공개 C API(`tote_*`)나 공유 라이브러리 `libtotedb`를 거친 Python 패키지 `totedb`로 부르며, 선택형 ACK 큐는 같은 DB 위에 테이블 하나로 설치된다.
 
 ## 외부 연결
 
 | 외부 요소 | 종류 | 주고받는 것 |
 |---|---|---|
-| 응용 프로그램(C) | 외부 프로그램 | `database_exec`·`database_txn_*` 호출과 결과 버퍼 |
+| 응용 프로그램(C) | 외부 프로그램 | `tote_exec`·`tote_begin`·`tote_commit` 호출과 결과 버퍼 |
 | 응용 프로그램(Python) | 외부 프로그램 | `totedb.Database`·`Queue` 호출, ctypes로 `libtotedb`의 `tote_*`·`tote_queue_*` 함수 |
 | DB 파일 | 파일 | 8192바이트 페이지. 여러 프로세스가 연다. 읽는 문장은 `flock` 공유, writer는 게시하는 순간만 배타로 쥔다 |
 | writer 잠금 파일 | 파일 | DB 파일 옆 `<db>-lock`. 쓰기 트랜잭션 동안 `flock` 배타. 첫 바이트는 게시 대기 표시다. 지우지 않는다 |

@@ -1,0 +1,13 @@
+torso
+title "업무 데이터와 작업 큐"
+width wide
+
+box app "앱" "C · Python" badge="APP"
+store db "같은 DB" badge="DATA" tone=blue appearance=filled {
+  text "업무 테이블 + 큐 테이블"
+}
+box worker "worker" "C · Python" badge="ASYNC"
+
+app -> db "한 트랜잭션"
+db -> worker "작업 전달"
+worker -> db "ACK" dashed
