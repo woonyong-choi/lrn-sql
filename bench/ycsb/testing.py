@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
-from analysis import analyze, verify
-from runner import CollectionOptions, collect, process, write_json
+from analysis import analyze, read_records, verify
+from runner import process, write_json
 
-from build import BUILD, SOURCE, build, java_command
+from build import BUILD, ROOT, SOURCE, build, java_command
 
 
 def test(output: Path) -> None:
@@ -40,9 +42,42 @@ def test(output: Path) -> None:
         ):
             raise RuntimeError("JNI checker warning: " + engine)
     run_id = "checks-" + str(__import__("os").getpid())
-    trials = collect(
-        output, run_id, CollectionOptions([30], list("ABCDEF"), [1, 4], 1, 40, 60)
+    command = [
+        sys.executable,
+        str(SOURCE / "run.py"),
+        "collect",
+        "--output",
+        str(output.resolve()),
+        "--run-id",
+        run_id,
+        "--sizes",
+        "30",
+        "--workloads",
+        "A,B,C,D,E,F",
+        "--threads",
+        "1,4",
+        "--repetitions",
+        "1",
+        "--operations",
+        "40",
+        "--timeout",
+        "60",
+    ]
+    directory = ROOT / "docs" / "experiments" / "ycsb-sqlite"
+    with (
+        (checks / "collect-stdout.txt").open("w") as stdout,
+        (checks / "collect-stderr.txt").open("w") as stderr,
+    ):
+        execution = subprocess.run(
+            command, cwd=directory, stdout=stdout, stderr=stderr, check=False
+        )
+    write_json(
+        checks / "collect-process.json",
+        {"command": command, "cwd": str(directory), "exit_code": execution.returncode},
     )
+    if execution.returncode != 0:
+        raise RuntimeError("official client CLI failed: " + str(checks))
+    trials, _ = read_records(output / "data" / "raw")
     summary = analyze(output)
     verify(output)
     if any(trial["problems"] for trial in trials):
