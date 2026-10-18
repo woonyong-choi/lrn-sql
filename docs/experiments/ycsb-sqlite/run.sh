@@ -28,6 +28,7 @@ case "${1:-}" in
     process) log process run analyze ;;
     analyze) log analyze run analyze ;;
     verify) log verify run verify ;;
+    profile) log profile run profile --run-id "$id" --sizes 10000 --workloads C,E --threads 1 --repetitions 1 --operations 1000 --timeout 180 ;;
     all) log all all ;;
-    *) echo 'usage: ./run.sh collect|process|analyze|verify|all' >&2; exit 2 ;;
+    *) echo 'usage: ./run.sh collect|process|analyze|verify|profile|all' >&2; exit 2 ;;
 esac

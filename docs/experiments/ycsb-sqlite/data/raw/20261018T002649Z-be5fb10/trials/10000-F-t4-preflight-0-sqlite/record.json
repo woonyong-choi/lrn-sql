@@ -1,0 +1,192 @@
+{
+  "audit_after": {
+    "added_rows": 0,
+    "changed_fields": 0,
+    "field_bytes": 100,
+    "field_count": 10,
+    "keys_sha256": "cecad843bb0e2c76965d9457a92c466ab87639d21ddf15298a797aab56137a96",
+    "missing_rows": 0,
+    "payload_bytes": 10000000,
+    "rows": 10000,
+    "sha256": "2ffed83b0e3bdf2356ac4dbf883f712e35ba185ce85b81846c8f30d567d64a77"
+  },
+  "audit_before": {
+    "added_rows": 0,
+    "changed_fields": 0,
+    "field_bytes": 100,
+    "field_count": 10,
+    "keys_sha256": "cecad843bb0e2c76965d9457a92c466ab87639d21ddf15298a797aab56137a96",
+    "missing_rows": 0,
+    "payload_bytes": 10000000,
+    "rows": 10000,
+    "sha256": "2ffed83b0e3bdf2356ac4dbf883f712e35ba185ce85b81846c8f30d567d64a77"
+  },
+  "condition": {
+    "engine": "sqlite",
+    "operations": 1000,
+    "records": 10000,
+    "threads": 4,
+    "workload": "F"
+  },
+  "database_size_bytes": 12091392,
+  "git_sha": "be5fb10c8fd5102929e088af41026bd2e125cf21",
+  "input_identifier": "2ffed83b0e3bdf2356ac4dbf883f712e35ba185ce85b81846c8f30d567d64a77",
+  "metrics": {
+    "binding": {
+      "attempts": 1567,
+      "exhausted": 0,
+      "input_bytes": 92488,
+      "open_retries": 0,
+      "output_bytes": 1000000,
+      "result_rows": 1000,
+      "retries": 78,
+      "setup_attempts": 28,
+      "setup_retries": 0,
+      "sql_bytes": 134144
+    },
+    "binding_errors": 0,
+    "logical_operations": 1000.0,
+    "non_ok": 0,
+    "sql_calls": 1489.0,
+    "workers": 4,
+    "ycsb": {
+      "CLEANUP": {
+        "50thPercentileLatency(us)": 270.0,
+        "95thPercentileLatency(us)": 6215.0,
+        "99thPercentileLatency(us)": 6215.0,
+        "AverageLatency(us)": 1759.25,
+        "MaxLatency(us)": 6215.0,
+        "MinLatency(us)": 238.0,
+        "Operations": 4.0
+      },
+      "OVERALL": {
+        "RunTime(ms)": 58.0,
+        "Throughput(ops/sec)": 17241.379310344826
+      },
+      "READ": {
+        "50thPercentileLatency(us)": 22.0,
+        "95thPercentileLatency(us)": 66.0,
+        "99thPercentileLatency(us)": 146.0,
+        "AverageLatency(us)": 41.189,
+        "MaxLatency(us)": 2955.0,
+        "MinLatency(us)": 16.0,
+        "Operations": 1000.0,
+        "Return=OK": 1000.0
+      },
+      "READ-MODIFY-WRITE": {
+        "50thPercentileLatency(us)": 39.0,
+        "95thPercentileLatency(us)": 909.0,
+        "99thPercentileLatency(us)": 5263.0,
+        "AverageLatency(us)": 269.72597137014316,
+        "MaxLatency(us)": 11895.0,
+        "MinLatency(us)": 30.0,
+        "Operations": 489.0
+      },
+      "TOTAL_GCS_G1_Concurrent_GC": {
+        "Count": 0.0
+      },
+      "TOTAL_GCS_G1_Old_Generation": {
+        "Count": 0.0
+      },
+      "TOTAL_GCS_G1_Young_Generation": {
+        "Count": 1.0
+      },
+      "TOTAL_GC_TIME": {
+        "Time(ms)": 0.0
+      },
+      "TOTAL_GC_TIME_%": {
+        "Time(%)": 0.0
+      },
+      "TOTAL_GC_TIME_%_G1_Concurrent_GC": {
+        "Time(%)": 0.0
+      },
+      "TOTAL_GC_TIME_%_G1_Old_Generation": {
+        "Time(%)": 0.0
+      },
+      "TOTAL_GC_TIME_%_G1_Young_Generation": {
+        "Time(%)": 0.0
+      },
+      "TOTAL_GC_TIME_G1_Concurrent_GC": {
+        "Time(ms)": 0.0
+      },
+      "TOTAL_GC_TIME_G1_Old_Generation": {
+        "Time(ms)": 0.0
+      },
+      "TOTAL_GC_TIME_G1_Young_Generation": {
+        "Time(ms)": 0.0
+      },
+      "TOTAL_GCs": {
+        "Count": 1.0
+      },
+      "UPDATE": {
+        "50thPercentileLatency(us)": 16.0,
+        "95thPercentileLatency(us)": 870.0,
+        "99thPercentileLatency(us)": 4967.0,
+        "AverageLatency(us)": 219.31288343558282,
+        "MaxLatency(us)": 11455.0,
+        "MinLatency(us)": 13.0,
+        "Operations": 489.0,
+        "Return=OK": 489.0
+      },
+      "VERIFY": {
+        "50thPercentileLatency(us)": 7.0,
+        "95thPercentileLatency(us)": 64.0,
+        "99thPercentileLatency(us)": 150.0,
+        "AverageLatency(us)": 17.091,
+        "MaxLatency(us)": 1046.0,
+        "MinLatency(us)": 3.0,
+        "Operations": 1000.0,
+        "Return=OK": 1000.0
+      }
+    }
+  },
+  "phase": "preflight",
+  "problems": [],
+  "process": {
+    "command": [
+      "/Users/woonyong/Library/Java/JavaVirtualMachines/ms-21.0.8/Contents/Home/bin/java",
+      "-Xms256m",
+      "-Xmx1g",
+      "-Dycsb.native=/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/libycsb.dylib",
+      "-cp",
+      "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/classes:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/HdrHistogram-2.1.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/core-0.17.0.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/htrace-core4-4.1.0-incubating.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-core-asl-1.9.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-mapper-asl-1.9.4.jar",
+      "site.ycsb.Client",
+      "-t",
+      "-db",
+      "org.totedb.ycsb.SqlBinding",
+      "-P",
+      "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/bench/ycsb/workloads/workloadf",
+      "-P",
+      "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/docs/experiments/ycsb-sqlite/data/raw/20261018T002649Z-be5fb10/trials/10000-F-t4-preflight-0-sqlite/run.properties",
+      "-threads",
+      "4"
+    ],
+    "cpu_system_seconds": 0.035153,
+    "cpu_user_seconds": 0.29051499999999997,
+    "elapsed_seconds": 0.15418795900001214,
+    "exit_code": 0,
+    "load_after": [
+      4.07275390625,
+      4.37158203125,
+      4.65673828125
+    ],
+    "load_before": [
+      4.07275390625,
+      4.37158203125,
+      4.65673828125
+    ],
+    "major_faults": 0,
+    "max_rss_bytes": 92438528,
+    "minor_faults": 7268,
+    "profiler_wait_seconds": 9.28750000070977e-05,
+    "sample_available": false,
+    "sample_exit_code": null,
+    "timeout": false,
+    "ts_utc": "2026-10-18T00:34:23.637771+00:00"
+  },
+  "repetition": 0,
+  "run_id": "20261018T002649Z-be5fb10",
+  "schema_version": 1,
+  "trial_id": "10000-F-t4-preflight-0-sqlite",
+  "ts_utc": "2026-10-18T00:34:23.637771+00:00"
+}

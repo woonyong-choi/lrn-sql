@@ -1,0 +1,15 @@
+$ RUN_ID=20261018T002128Z-ee7f9b0 ./run.sh all
+$ RUN_ID=20261018T002128Z-ee7f9b0 ./run.sh collect
+Exception in thread "main" java.lang.UnsatisfiedLinkError: ~/workspace/totedb/totedb.wt/ycsb/build/ycsb/libycsb.dylib: dlopen(~/workspace/totedb/totedb.wt/ycsb/build/ycsb/libycsb.dylib, 0x0001): Library not loaded: build/lib/libtotedb.dylib
+  Referenced from: <F31C9C2E-148C-3143-9E5E-240C8C1AEA75> ~/workspace/totedb/totedb.wt/ycsb/build/ycsb/libycsb.dylib
+  Reason: tried: 'build/lib/libtotedb.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OSbuild/lib/libtotedb.dylib' (no such file), 'build/lib/libtotedb.dylib' (no such file)
+	at java.base/jdk.internal.loader.NativeLibraries.load(Native Method)
+	at java.base/jdk.internal.loader.NativeLibraries$NativeLibraryImpl.open(NativeLibraries.java:331)
+	at java.base/jdk.internal.loader.NativeLibraries.loadLibrary(NativeLibraries.java:197)
+	at java.base/jdk.internal.loader.NativeLibraries.loadLibrary(NativeLibraries.java:139)
+	at java.base/java.lang.ClassLoader.loadLibrary(ClassLoader.java:2418)
+	at java.base/java.lang.Runtime.load0(Runtime.java:852)
+	at java.base/java.lang.System.load(System.java:2025)
+	at org.totedb.ycsb.Native.<clinit>(Native.java:5)
+	at org.totedb.ycsb.Tool.main(Tool.java:17)
+Command '['~/Library/Java/JavaVirtualMachines/ms-21.0.8/Contents/Home/bin/java', '-Xms256m', '-Xmx1g', '-Dycsb.native=~/workspace/totedb/totedb.wt/ycsb/build/ycsb/libycsb.dylib', '-cp', '~/workspace/totedb/totedb.wt/ycsb/build/ycsb/classes:~/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/HdrHistogram-2.1.4.jar:~/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/core-0.17.0.jar:~/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/htrace-core4-4.1.0-incubating.jar:~/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-core-asl-1.9.4.jar:~/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-mapper-asl-1.9.4.jar', 'org.totedb.ycsb.Tool', 'version']' returned non-zero exit status 1.

@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/Users/woonyong/Library/Java/JavaVirtualMachines/ms-21.0.8/Contents/Home/bin/java",
+    "-Xms256m",
+    "-Xmx1g",
+    "-Dycsb.native=/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/libycsb.dylib",
+    "-cp",
+    "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/classes:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/HdrHistogram-2.1.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/core-0.17.0.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/htrace-core4-4.1.0-incubating.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-core-asl-1.9.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-mapper-asl-1.9.4.jar",
+    "org.totedb.ycsb.Tool",
+    "setup",
+    "sqlite",
+    "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/runs/20261018T003900Z-be5fb10-profile/10000-sqlite.db"
+  ],
+  "cpu_system_seconds": 0.009026,
+  "cpu_user_seconds": 0.032239,
+  "elapsed_seconds": 0.052227625,
+  "exit_code": 0,
+  "load_after": [
+    4.7666015625,
+    4.56689453125,
+    4.71875
+  ],
+  "load_before": [
+    4.7666015625,
+    4.56689453125,
+    4.71875
+  ],
+  "major_faults": 0,
+  "max_rss_bytes": 47595520,
+  "minor_faults": 4079,
+  "profiler_wait_seconds": 7.662500000016337e-05,
+  "sample_available": false,
+  "sample_exit_code": null,
+  "timeout": false,
+  "ts_utc": "2026-10-18T00:34:55.633939+00:00"
+}

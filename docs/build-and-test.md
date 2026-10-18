@@ -71,6 +71,15 @@ python3 bench/sqlite_workload.py --output build/bench/sqlite_workload.json
 python3 bench/sqlite_workload.py --output build/bench/sqlite_workload.json --analyze
 ```
 
+공식 YCSB 0.17.0은 같은 Java/JNI SQL 바인딩으로 ToteDB와 SQLite에 A~F를 실행한다(2026-10-18 확인). Java 21, Python 3.9 이상, C 컴파일러와 SQLite 개발 헤더가 필요하다. 고정 JAR 다운로드에 네트워크를 사용한다.
+
+```sh
+make ycsb-build
+make ycsb-test
+```
+
+이 시험은 양쪽의 결정적 연결 검사와 공식 Client의 축소 matrix를 검사한다. 성능 합격선은 두지 않는다. 별도 성능 수집과 원자료 재분석은 [바인딩 안내](../bench/ycsb/README.md)에 있다. [YCSB 동등 조건 측정 결과](experiments/ycsb-sqlite/report.md)는 고정한 자동 commit 설정의 240회 비교이며, WAL·준비 문장 캐시를 튜닝한 DB 전체 성능을 뜻하지 않는다.
+
 ## CI
 
 `.github/workflows/ci.yml`은 Ubuntu에서 아래 작업을 실행한다.
@@ -81,6 +90,7 @@ python3 bench/sqlite_workload.py --output build/bench/sqlite_workload.json --ana
 | `test` (thread) | `make SANITIZE=thread test-transaction test-session test-ack-queue` |
 | `pg-compat` | PostgreSQL 18 서비스에 `make test-sql-diff`를 실행한 뒤 `make test-sqlite-session-diff` |
 | `actionlint` | 워크플로 파일 검사 |
+| `ycsb` | Ubuntu 24.04·Java 21에서 `make ycsb-build ycsb-test`, 양쪽 바인딩·공식 Client·원자료 재분석 검사 |
 
 CI의 SQL 비교·워크플로 검사와 릴리스의 Linux 보조 job은 Ubuntu 24.04로 고정한다. sanitizer 시험은 Ubuntu 22.04를 유지한다. 결과 파일 업로드·다운로드 액션은 Node.js 24 런타임을 사용한다.
 

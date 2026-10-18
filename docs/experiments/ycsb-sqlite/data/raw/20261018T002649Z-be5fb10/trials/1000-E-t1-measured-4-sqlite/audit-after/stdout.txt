@@ -1,0 +1,1 @@
+{"rows":1052,"payload_bytes":1052000,"sha256":"b7b614462196696ca424d6a9aa04e733d6260a7dda3cff4b0cad5296b637095a","keys_sha256":"f16d56d909d58eb9c1308b99ee2b3b18bf4b6619dc9675a6b813dc92353c8651","changed_fields":0,"added_rows":52,"missing_rows":0,"field_count":10,"field_bytes":100}

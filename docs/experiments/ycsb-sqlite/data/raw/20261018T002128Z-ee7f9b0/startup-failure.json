@@ -1,0 +1,21 @@
+{
+  "baseline_loads_started": 0,
+  "git_sha": "ee7f9b0b704de5b22717f71b5589f6c239647f46",
+  "logs": [
+    {
+      "path": "logs/all-20261018T002128Z-ee7f9b0.log",
+      "sha256": "8677e71c2e3a9b7991c2a315f39188e4fd5cfd95da4d64ef3c67d86bfdc02d32"
+    },
+    {
+      "path": "logs/collect-20261018T002128Z-ee7f9b0.log",
+      "sha256": "f822012cdb35c5a47520e9d455f653dc31e2e7ef4692a5c6dd67d2ece8fa7694"
+    }
+  ],
+  "phase": "startup",
+  "reason": "Metadata version query inherited the document working directory; macOS could not resolve build/lib/libtotedb.dylib",
+  "run_id": "20261018T002128Z-ee7f9b0",
+  "schema_version": 1,
+  "status": "failed",
+  "ts_utc": "2026-10-18T00:21:28Z",
+  "workload_trials_started": 0
+}

@@ -1,0 +1,163 @@
+{
+  "audit_after": {
+    "added_rows": 0,
+    "changed_fields": 0,
+    "field_bytes": 100,
+    "field_count": 10,
+    "keys_sha256": "c5892f8d98dd89e759f9a12733773afb187aaf17b841ebd69d38a7ced10ea011",
+    "missing_rows": 0,
+    "payload_bytes": 1000000,
+    "rows": 1000,
+    "sha256": "020d732ae8d02fe2917fcd5f08f7f14b11c82762c8d20cc137bc934bf56a1c3f"
+  },
+  "audit_before": {
+    "added_rows": 0,
+    "changed_fields": 0,
+    "field_bytes": 100,
+    "field_count": 10,
+    "keys_sha256": "c5892f8d98dd89e759f9a12733773afb187aaf17b841ebd69d38a7ced10ea011",
+    "missing_rows": 0,
+    "payload_bytes": 1000000,
+    "rows": 1000,
+    "sha256": "020d732ae8d02fe2917fcd5f08f7f14b11c82762c8d20cc137bc934bf56a1c3f"
+  },
+  "condition": {
+    "engine": "sqlite",
+    "operations": 1000,
+    "records": 1000,
+    "threads": 4,
+    "workload": "C"
+  },
+  "database_size_bytes": 1236992,
+  "git_sha": "be5fb10c8fd5102929e088af41026bd2e125cf21",
+  "input_identifier": "020d732ae8d02fe2917fcd5f08f7f14b11c82762c8d20cc137bc934bf56a1c3f",
+  "metrics": {
+    "binding": {
+      "attempts": 1000,
+      "exhausted": 0,
+      "input_bytes": 22895,
+      "open_retries": 0,
+      "output_bytes": 1000000,
+      "result_rows": 1000,
+      "retries": 0,
+      "setup_attempts": 28,
+      "setup_retries": 0,
+      "sql_bytes": 108000
+    },
+    "binding_errors": 0,
+    "logical_operations": 1000.0,
+    "non_ok": 0,
+    "sql_calls": 1000.0,
+    "workers": 4,
+    "ycsb": {
+      "CLEANUP": {
+        "50thPercentileLatency(us)": 4471.0,
+        "95thPercentileLatency(us)": 4619.0,
+        "99thPercentileLatency(us)": 4619.0,
+        "AverageLatency(us)": 4493.0,
+        "MaxLatency(us)": 4619.0,
+        "MinLatency(us)": 4316.0,
+        "Operations": 4.0
+      },
+      "OVERALL": {
+        "RunTime(ms)": 24.0,
+        "Throughput(ops/sec)": 41666.666666666664
+      },
+      "READ": {
+        "50thPercentileLatency(us)": 22.0,
+        "95thPercentileLatency(us)": 66.0,
+        "99thPercentileLatency(us)": 129.0,
+        "AverageLatency(us)": 38.713,
+        "MaxLatency(us)": 2741.0,
+        "MinLatency(us)": 16.0,
+        "Operations": 1000.0,
+        "Return=OK": 1000.0
+      },
+      "TOTAL_GCS_G1_Concurrent_GC": {
+        "Count": 0.0
+      },
+      "TOTAL_GCS_G1_Old_Generation": {
+        "Count": 0.0
+      },
+      "TOTAL_GCS_G1_Young_Generation": {
+        "Count": 0.0
+      },
+      "TOTAL_GC_TIME": {
+        "Time(ms)": 0.0
+      },
+      "TOTAL_GC_TIME_%": {
+        "Time(%)": 0.0
+      },
+      "TOTAL_GC_TIME_%_G1_Concurrent_GC": {
+        "Time(%)": 0.0
+      },
+      "TOTAL_GC_TIME_%_G1_Old_Generation": {
+        "Time(%)": 0.0
+      },
+      "TOTAL_GC_TIME_%_G1_Young_Generation": {
+        "Time(%)": 0.0
+      },
+      "TOTAL_GC_TIME_G1_Concurrent_GC": {
+        "Time(ms)": 0.0
+      },
+      "TOTAL_GC_TIME_G1_Old_Generation": {
+        "Time(ms)": 0.0
+      },
+      "TOTAL_GC_TIME_G1_Young_Generation": {
+        "Time(ms)": 0.0
+      },
+      "TOTAL_GCs": {
+        "Count": 0.0
+      }
+    }
+  },
+  "phase": "measured",
+  "problems": [],
+  "process": {
+    "command": [
+      "/Users/woonyong/Library/Java/JavaVirtualMachines/ms-21.0.8/Contents/Home/bin/java",
+      "-Xms256m",
+      "-Xmx1g",
+      "-Dycsb.native=/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/libycsb.dylib",
+      "-cp",
+      "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/classes:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/HdrHistogram-2.1.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/core-0.17.0.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/htrace-core4-4.1.0-incubating.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-core-asl-1.9.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-mapper-asl-1.9.4.jar",
+      "site.ycsb.Client",
+      "-t",
+      "-db",
+      "org.totedb.ycsb.SqlBinding",
+      "-P",
+      "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/bench/ycsb/workloads/workloadc",
+      "-P",
+      "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/docs/experiments/ycsb-sqlite/data/raw/20261018T002649Z-be5fb10/trials/1000-C-t4-measured-4-sqlite/run.properties",
+      "-threads",
+      "4"
+    ],
+    "cpu_system_seconds": 0.024499,
+    "cpu_user_seconds": 0.162964,
+    "elapsed_seconds": 0.13441179200000164,
+    "exit_code": 0,
+    "load_after": [
+      4.72802734375,
+      4.875,
+      4.90185546875
+    ],
+    "load_before": [
+      4.72802734375,
+      4.875,
+      4.90185546875
+    ],
+    "major_faults": 0,
+    "max_rss_bytes": 66469888,
+    "minor_faults": 5521,
+    "profiler_wait_seconds": 0.00011495900000113579,
+    "sample_available": false,
+    "sample_exit_code": null,
+    "timeout": false,
+    "ts_utc": "2026-10-18T00:27:28.751926+00:00"
+  },
+  "repetition": 4,
+  "run_id": "20261018T002649Z-be5fb10",
+  "schema_version": 1,
+  "trial_id": "1000-C-t4-measured-4-sqlite",
+  "ts_utc": "2026-10-18T00:27:28.751926+00:00"
+}

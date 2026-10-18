@@ -1,0 +1,2 @@
+$ RUN_ID=20261018T002649Z-be5fb10 ./run.sh verify
+{"measured_runs": 240, "failed_runs": 0}

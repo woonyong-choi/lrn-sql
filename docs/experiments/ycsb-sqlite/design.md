@@ -3,7 +3,7 @@
 | 항목 | 값 |
 |---|---|
 | 추적 | [YCSB 동등 조건 측정 #226](https://github.com/woonyong-choi/totedb/issues/226) |
-| 관련 설계 | [아키텍처](././architecture.md) |
+| 관련 설계 | [아키텍처](../../architecture.md) |
 | 사전 데이터 | 없음. 공개 C API·SQL 구현과 공식 YCSB 소스를 조사했으며 성능 데이터는 생성하지 않았다. |
 
 ## 목적
