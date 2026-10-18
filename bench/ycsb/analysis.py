@@ -113,7 +113,7 @@ def validate_trial(record: dict[str, Any]) -> list[str]:
     reads = metrics["ycsb"].get("READ", {}).get("Return=OK", 0)
     scans = metrics["ycsb"].get("SCAN", {}).get("Return=OK", 0)
     returned = binding.get("result_rows", 0)
-    if not reads <= returned <= reads + scans * 100:
+    if not reads + scans <= returned <= reads + scans * 100:
         problems.append("returned_row_count")
     if binding.get("output_bytes", 0) != returned * 1000:
         problems.append("returned_payload_bytes")

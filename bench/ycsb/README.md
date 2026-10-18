@@ -26,7 +26,13 @@ BUSY 지연은 두 엔진 모두 0.5 ms에서 시작하여 20 ms까지 늘고, �
 
 원자료는 `data/raw/<run-id>`의 manifest, baseline load, trial properties, 명령·종료·시간·CPU·RSS·fault·부하, stdout/stderr, 전후 audit JSON, 정규화 `records.jsonl`이다. audit는 별도 JVM으로 DB를 다시 열어 모든 키와 필드를 읽는다. 행 수, 키 순서·유일성, 필드 수·크기, 전체/키 digest, 추가·누락 행, 기준 대비 바뀐 필드 수를 확인한다. 비교용 canonical snapshot은 생성물인 `build/ycsb/runs`에 둔다. 공식 측정 키는 ASCII이며 전수 audit의 정렬 검사는 그 범위에서 적용한다. 동시 무작위 갱신의 모든 중간 상태를 증명하지는 않는다.
 
-`analyze`는 원자료만 읽어 `results/summary.json`, `summary.csv`, `operations.csv`를 다시 만든다. 전체 예상 조건 집합과 worker·논리 연산·native 호출·상태 수를 대조한다. 오류가 있는 조건은 비교 불가로 표시하고 비율을 만들지 않는다. 조건별 반복 중앙값·최소·최대와 각 실행의 연산별 p50/p95/p99를 보고한다. 처리량 비율은 반복 번호로 짝지은 ToteDB/SQLite 비율의 중앙값과 seed 226, 1만 번 bootstrap의 95% percentile 구간이다. 5쌍의 불확실성이 크며 다중 비교 보정은 하지 않는다. `verify`는 SHA-256 파일 목록과 실제 원자료 집합을 대조하고 요약 재생성 일치를 확인한다. 하나의 실험 출력 폴더에는 수집 run 하나만 둔다.
+`analyze`는 원자료만 읽어 `results/summary.json`, `summary.csv`, `operations.csv`를 다시 만든다. 전체 예상 조건 집합과 worker·논리 연산·native 호출·상태 수를 대조한다. 오류가 있는 조건은 비교 불가로 표시하고 비율을 만들지 않는다. 조건별 반복 중앙값·최소·최대와 각 실행의 연산별 p50/p95/p99를 보고한다. 처리량 비율은 반복 번호로 짝지은 ToteDB/SQLite 비율의 중앙값과 seed 226, 1만 번 bootstrap의 95% percentile 구간이다. 5쌍의 불확실성이 크며 다중 비교 보정은 하지 않는다. `verify`는 SHA-256 파일 목록과 실제 원자료 집합을 대조하고 요약 재생성 일치를 확인한다. 하나의 실험 출력 폴더에는 수집 run 하나만 둔다. 기존 manifest가 있으면 수집을 시작하기 전에 거절하고 원자료를 보존한다. 다시 수집할 때는 새 `--output`을 지정한다.
+
+```sh
+python3 bench/ycsb/run.py collect --output build/ycsb/recollection --run-id recollection
+python3 bench/ycsb/run.py analyze --output build/ycsb/recollection
+python3 bench/ycsb/run.py verify --output build/ycsb/recollection
+```
 
 프로파일은 정식 수집 후 별도 디렉터리에서 실행한다.
 

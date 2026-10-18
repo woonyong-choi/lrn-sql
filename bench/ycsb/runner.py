@@ -373,6 +373,12 @@ def collect(
     raw = experiment / "data" / "raw" / run_id
     if raw.exists():
         raise ValueError("raw output already exists: " + str(raw))
+    if any((experiment / "data" / "raw").glob("*/manifest.json")):
+        raise ValueError(
+            "experiment output already contains a collection: "
+            + str(experiment)
+            + "; existing raw data is preserved, use a new --output directory"
+        )
     work = BUILD / "runs" / run_id
     if work.exists():
         raise ValueError("generated database directory already exists: " + str(work))

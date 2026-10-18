@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import re
-import sys
 from pathlib import Path
 
 from analysis import analyze, verify
@@ -22,9 +21,7 @@ def main() -> int:
     parser.add_argument(
         "command", choices=["build", "test", "collect", "analyze", "verify", "profile"]
     )
-    parser.add_argument(
-        "--output", type=Path, default=ROOT / "docs/experiments/ycsb-sqlite"
-    )
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--run-id", default="default")
     parser.add_argument("--sizes", default="1000,10000")
     parser.add_argument("--workloads", default=None)
@@ -53,14 +50,14 @@ def main() -> int:
         )
     if any(value not in "ABCDEF" or len(value) != 1 for value in workloads):
         parser.error("workloads must be comma-separated A through F")
-    output = args.output.resolve()
+    output = (args.output or ROOT / "docs/experiments/ycsb-sqlite").resolve()
     if args.command == "build":
         build()
         print(BUILD / "build.json")
     elif args.command == "test":
         from testing import test
 
-        test(output if "--output" in sys.argv else BUILD / "checks")
+        test(output if args.output is not None else BUILD / "checks")
     elif args.command in ("collect", "profile"):
         if not (BUILD / "build.json").exists():
             raise RuntimeError("run build before collection")

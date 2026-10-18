@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from analysis import (
@@ -15,7 +17,8 @@ from analysis import (
     validate_trial,
     verify,
 )
-from runner import process
+from runner import CollectionOptions, collect, process
+from run import main
 
 from build import BUILD
 
@@ -111,6 +114,81 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(parsed["logical_operations"], 10)
         self.assertEqual(parsed["sql_calls"], 14)
         self.assertEqual(parsed["non_ok"], 1)
+
+    def test_successful_official_scans_require_at_least_one_row_each(self) -> None:
+        self.record["condition"]["workload"] = "E"
+        self.record["metrics"]["ycsb"]["SCAN"] = self.record["metrics"]["ycsb"].pop(
+            "READ"
+        )
+        for returned in (0, 19, 20, 2000, 2001):
+            with self.subTest(returned=returned):
+                self.record["metrics"]["binding"]["result_rows"] = returned
+                self.record["metrics"]["binding"]["output_bytes"] = returned * 1000
+                problems = validate_trial(self.record)
+                if 20 <= returned <= 2000:
+                    self.assertEqual(problems, [])
+                else:
+                    self.assertEqual(problems, ["returned_row_count"])
+
+    def test_collection_existing_output_rejects_before_side_effects(self) -> None:
+        directory = BUILD / "unit-tests" / "recollection"
+        directory.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, directory)
+        for profile in (False, True):
+            options = CollectionOptions([10], ["C"], [1], 1, 20, 1, profile)
+            experiment = directory / ("profile" if profile else "collection")
+            old_raw = experiment / "data" / "raw" / "existing"
+            old_raw.mkdir(parents=True)
+            manifest = old_raw / "manifest.json"
+            manifest.write_bytes(b'{"run_id": "existing"}\n')
+            environment = experiment / "env.json"
+            environment.write_bytes(b'{"preserve": true}\n')
+            original = {
+                path: path.read_bytes()
+                for path in experiment.rglob("*")
+                if path.is_file()
+            }
+            for run_id in ("existing", "recollection-guard-new"):
+                with (
+                    self.subTest(profile=profile, run_id=run_id),
+                    patch("runner.environment") as inspect_environment,
+                    patch("runner.subprocess.Popen") as child,
+                    patch("runner.BUILD", directory),
+                ):
+                    with self.assertRaises(ValueError) as failure:
+                        collect(experiment, run_id, options)
+                    if run_id != "existing":
+                        self.assertIn("--output", str(failure.exception))
+                    inspect_environment.assert_not_called()
+                    child.assert_not_called()
+                    self.assertFalse((directory / "runs" / run_id).exists())
+                    if run_id != "existing":
+                        self.assertFalse(
+                            (experiment / "data" / "raw" / run_id).exists()
+                        )
+                    self.assertEqual(
+                        {
+                            path: path.read_bytes()
+                            for path in experiment.rglob("*")
+                            if path.is_file()
+                        },
+                        original,
+                    )
+
+    def test_test_command_respects_both_output_forms_and_default(self) -> None:
+        explicit = BUILD / "unit-tests" / "explicit-checks"
+        for arguments, expected in (
+            (["--output", str(explicit)], explicit),
+            (["--output=" + str(explicit)], explicit),
+            ([], BUILD / "checks"),
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch("sys.argv", ["run.py", "test", *arguments]),
+                patch("testing.test") as adapter_test,
+            ):
+                self.assertEqual(main(), 0)
+                adapter_test.assert_called_once_with(expected)
 
     def test_bootstrap_is_paired_and_deterministic(self) -> None:
         result = bootstrap_ratios([0.5] * 5)
