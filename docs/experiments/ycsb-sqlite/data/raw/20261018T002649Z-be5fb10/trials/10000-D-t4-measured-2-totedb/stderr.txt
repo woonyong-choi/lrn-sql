@@ -1,0 +1,13 @@
+Command line: -t -db org.totedb.ycsb.SqlBinding -P /Users/woonyong/workspace/totedb/totedb.wt/ycsb/bench/ycsb/workloads/workloadd -P /Users/woonyong/workspace/totedb/totedb.wt/ycsb/docs/experiments/ycsb-sqlite/data/raw/20261018T002649Z-be5fb10/trials/10000-D-t4-measured-2-totedb/run.properties -threads 4
+YCSB Client 0.17.0
+
+Loading workload...
+Starting test.
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+BINDING setup_attempts=0 setup_retries=0 attempts=255 retries=5 exhausted=0 open_retries=0 sql_bytes=28190 input_bytes=31843 output_bytes=229000 result_rows=229
+BINDING setup_attempts=0 setup_retries=0 attempts=259 retries=9 exhausted=0 open_retries=0 sql_bytes=28647 input_bytes=32930 output_bytes=232000 result_rows=232
+BINDING setup_attempts=0 setup_retries=0 attempts=256 retries=6 exhausted=0 open_retries=0 sql_bytes=28148 input_bytes=25855 output_bytes=236000 result_rows=236
+BINDING setup_attempts=0 setup_retries=0 attempts=258 retries=8 exhausted=0 open_retries=0 sql_bytes=28414 input_bytes=27897 output_bytes=236000 result_rows=236

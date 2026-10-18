@@ -1,0 +1,634 @@
+{
+  "head": "be5fb10c8fd5102929e088af41026bd2e125cf21",
+  "verdict": "PASS",
+  "remaining_p1": 0,
+  "remaining_p2": 0,
+  "test": {
+    "command": [
+      "python3",
+      "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/bench/ycsb/run.py",
+      "test",
+      "--output=/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/cwd-independent-checks"
+    ],
+    "cwd": "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/docs/experiments/ycsb-sqlite",
+    "exit_code": 0,
+    "unit_tests": 14,
+    "jni_engines": [
+      "totedb",
+      "sqlite"
+    ],
+    "official_trials": 48
+  },
+  "direct_raw_checks": {
+    "unique_trials": 48,
+    "preflight": 24,
+    "measured": 24,
+    "all_non_ok": 0,
+    "exit_zero_no_timeout": 48,
+    "logical_40": 48,
+    "native_counts_match": 48,
+    "worker_cleanup_counts_match": 48
+  },
+  "representatives": [
+    {
+      "trial": "30-A-t1-measured-1-totedb",
+      "operations": {
+        "READ": {
+          "Operations": 22.0,
+          "AverageLatency(us)": 50.5,
+          "MinLatency(us)": 32.0,
+          "MaxLatency(us)": 257.0,
+          "50thPercentileLatency(us)": 37.0,
+          "95thPercentileLatency(us)": 64.0,
+          "99thPercentileLatency(us)": 257.0,
+          "Return=OK": 22.0
+        },
+        "UPDATE": {
+          "Operations": 18.0,
+          "AverageLatency(us)": 298.27777777777777,
+          "MinLatency(us)": 97.0,
+          "MaxLatency(us)": 3169.0,
+          "50thPercentileLatency(us)": 111.0,
+          "95thPercentileLatency(us)": 300.0,
+          "99thPercentileLatency(us)": 3169.0,
+          "Return=OK": 18.0
+        }
+      },
+      "logical": 40.0,
+      "calls": 40.0,
+      "workers": 1,
+      "non_ok": 0,
+      "binding": {
+        "setup_attempts": 0,
+        "setup_retries": 0,
+        "attempts": 40,
+        "retries": 0,
+        "exhausted": 0,
+        "open_retries": 0,
+        "sql_bytes": 3204,
+        "input_bytes": 2717,
+        "output_bytes": 22000,
+        "result_rows": 22
+      },
+      "before": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      },
+      "after": {
+        "added_rows": 0,
+        "changed_fields": 17,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "1a714788d58c006dd1979a9f3b953595bd7d204b662bc2ce49933ce55a9a1aaf"
+      }
+    },
+    {
+      "trial": "30-A-t1-measured-1-sqlite",
+      "operations": {
+        "READ": {
+          "Operations": 20.0,
+          "AverageLatency(us)": 176.9,
+          "MinLatency(us)": 31.0,
+          "MaxLatency(us)": 2427.0,
+          "50thPercentileLatency(us)": 56.0,
+          "95thPercentileLatency(us)": 134.0,
+          "99thPercentileLatency(us)": 2427.0,
+          "Return=OK": 20.0
+        },
+        "UPDATE": {
+          "Operations": 20.0,
+          "AverageLatency(us)": 388.5,
+          "MinLatency(us)": 283.0,
+          "MaxLatency(us)": 1046.0,
+          "50thPercentileLatency(us)": 349.0,
+          "95thPercentileLatency(us)": 439.0,
+          "99thPercentileLatency(us)": 1046.0,
+          "Return=OK": 20.0
+        }
+      },
+      "logical": 40.0,
+      "calls": 40.0,
+      "workers": 1,
+      "non_ok": 0,
+      "binding": {
+        "setup_attempts": 7,
+        "setup_retries": 0,
+        "attempts": 40,
+        "retries": 0,
+        "exhausted": 0,
+        "open_retries": 0,
+        "sql_bytes": 3080,
+        "input_bytes": 2912,
+        "output_bytes": 20000,
+        "result_rows": 20
+      },
+      "before": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      },
+      "after": {
+        "added_rows": 0,
+        "changed_fields": 19,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "47e9e0ec3af0c692c3a2b8287f7f6317729909f02900b86b5e0befff4b0fa37b"
+      }
+    },
+    {
+      "trial": "30-C-t1-measured-1-totedb",
+      "operations": {
+        "READ": {
+          "Operations": 40.0,
+          "AverageLatency(us)": 101.925,
+          "MinLatency(us)": 29.0,
+          "MaxLatency(us)": 2661.0,
+          "50thPercentileLatency(us)": 34.0,
+          "95thPercentileLatency(us)": 51.0,
+          "99thPercentileLatency(us)": 2661.0,
+          "Return=OK": 40.0
+        }
+      },
+      "logical": 40.0,
+      "calls": 40.0,
+      "workers": 1,
+      "non_ok": 0,
+      "binding": {
+        "setup_attempts": 0,
+        "setup_retries": 0,
+        "attempts": 40,
+        "retries": 0,
+        "exhausted": 0,
+        "open_retries": 0,
+        "sql_bytes": 4320,
+        "input_bytes": 915,
+        "output_bytes": 40000,
+        "result_rows": 40
+      },
+      "before": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      },
+      "after": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      }
+    },
+    {
+      "trial": "30-C-t1-measured-1-sqlite",
+      "operations": {
+        "READ": {
+          "Operations": 40.0,
+          "AverageLatency(us)": 93.875,
+          "MinLatency(us)": 20.0,
+          "MaxLatency(us)": 2669.0,
+          "50thPercentileLatency(us)": 25.0,
+          "95thPercentileLatency(us)": 61.0,
+          "99thPercentileLatency(us)": 2669.0,
+          "Return=OK": 40.0
+        }
+      },
+      "logical": 40.0,
+      "calls": 40.0,
+      "workers": 1,
+      "non_ok": 0,
+      "binding": {
+        "setup_attempts": 7,
+        "setup_retries": 0,
+        "attempts": 40,
+        "retries": 0,
+        "exhausted": 0,
+        "open_retries": 0,
+        "sql_bytes": 4320,
+        "input_bytes": 916,
+        "output_bytes": 40000,
+        "result_rows": 40
+      },
+      "before": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      },
+      "after": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      }
+    },
+    {
+      "trial": "30-E-t1-measured-1-totedb",
+      "operations": {
+        "INSERT": {
+          "Operations": 4.0,
+          "AverageLatency(us)": 529.25,
+          "MinLatency(us)": 131.0,
+          "MaxLatency(us)": 1608.0,
+          "50thPercentileLatency(us)": 137.0,
+          "95thPercentileLatency(us)": 1608.0,
+          "99thPercentileLatency(us)": 1608.0,
+          "Return=OK": 4.0
+        },
+        "SCAN": {
+          "Operations": 36.0,
+          "AverageLatency(us)": 213.58333333333334,
+          "MinLatency(us)": 58.0,
+          "MaxLatency(us)": 4029.0,
+          "50thPercentileLatency(us)": 96.0,
+          "95thPercentileLatency(us)": 181.0,
+          "99thPercentileLatency(us)": 4029.0,
+          "Return=OK": 36.0
+        }
+      },
+      "logical": 40.0,
+      "calls": 40.0,
+      "workers": 1,
+      "non_ok": 0,
+      "binding": {
+        "setup_attempts": 0,
+        "setup_retries": 0,
+        "attempts": 40,
+        "retries": 0,
+        "exhausted": 0,
+        "open_retries": 0,
+        "sql_bytes": 5423,
+        "input_bytes": 4919,
+        "output_bytes": 469000,
+        "result_rows": 469
+      },
+      "before": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      },
+      "after": {
+        "added_rows": 4,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "f81512b01585fbd999a03c575122d7b2cb4da9c0d498f0306ef125da879ce60f",
+        "missing_rows": 0,
+        "payload_bytes": 34000,
+        "rows": 34,
+        "sha256": "536d969b97e528ec3cf775076066fc41160f779b0fb1d312c55337c545650e52"
+      }
+    },
+    {
+      "trial": "30-E-t1-measured-1-sqlite",
+      "operations": {
+        "INSERT": {
+          "Operations": 3.0,
+          "AverageLatency(us)": 792.3333333333334,
+          "MinLatency(us)": 333.0,
+          "MaxLatency(us)": 1648.0,
+          "50thPercentileLatency(us)": 396.0,
+          "95thPercentileLatency(us)": 1648.0,
+          "99thPercentileLatency(us)": 1648.0,
+          "Return=OK": 3.0
+        },
+        "SCAN": {
+          "Operations": 37.0,
+          "AverageLatency(us)": 175.32432432432432,
+          "MinLatency(us)": 24.0,
+          "MaxLatency(us)": 3627.0,
+          "50thPercentileLatency(us)": 74.0,
+          "95thPercentileLatency(us)": 142.0,
+          "99thPercentileLatency(us)": 3627.0,
+          "Return=OK": 37.0
+        }
+      },
+      "logical": 40.0,
+      "calls": 40.0,
+      "workers": 1,
+      "non_ok": 0,
+      "binding": {
+        "setup_attempts": 7,
+        "setup_retries": 0,
+        "attempts": 40,
+        "retries": 0,
+        "exhausted": 0,
+        "open_retries": 0,
+        "sql_bytes": 5429,
+        "input_bytes": 3919,
+        "output_bytes": 610000,
+        "result_rows": 610
+      },
+      "before": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      },
+      "after": {
+        "added_rows": 3,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "2384c145e0c2808ffff6567660dd205baa457b660408a588cebbc933160418c5",
+        "missing_rows": 0,
+        "payload_bytes": 33000,
+        "rows": 33,
+        "sha256": "c7a259e795ca4108bc2909381b049181aa37efa9752cbc7161f8542df9f44a4a"
+      }
+    },
+    {
+      "trial": "30-F-t1-measured-1-totedb",
+      "operations": {
+        "READ": {
+          "Operations": 40.0,
+          "AverageLatency(us)": 102.9,
+          "MinLatency(us)": 30.0,
+          "MaxLatency(us)": 2637.0,
+          "50thPercentileLatency(us)": 35.0,
+          "95thPercentileLatency(us)": 69.0,
+          "99thPercentileLatency(us)": 2637.0,
+          "Return=OK": 40.0
+        },
+        "READ-MODIFY-WRITE": {
+          "Operations": 21.0,
+          "AverageLatency(us)": 192.1904761904762,
+          "MinLatency(us)": 111.0,
+          "MaxLatency(us)": 756.0,
+          "50thPercentileLatency(us)": 157.0,
+          "95thPercentileLatency(us)": 319.0,
+          "99thPercentileLatency(us)": 756.0
+        },
+        "UPDATE": {
+          "Operations": 21.0,
+          "AverageLatency(us)": 138.95238095238096,
+          "MinLatency(us)": 72.0,
+          "MaxLatency(us)": 622.0,
+          "50thPercentileLatency(us)": 109.0,
+          "95thPercentileLatency(us)": 265.0,
+          "99thPercentileLatency(us)": 622.0,
+          "Return=OK": 21.0
+        }
+      },
+      "logical": 40.0,
+      "calls": 61.0,
+      "workers": 1,
+      "non_ok": 0,
+      "binding": {
+        "setup_attempts": 0,
+        "setup_retries": 0,
+        "attempts": 61,
+        "retries": 0,
+        "exhausted": 0,
+        "open_retries": 0,
+        "sql_bytes": 5286,
+        "input_bytes": 3490,
+        "output_bytes": 40000,
+        "result_rows": 40
+      },
+      "before": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      },
+      "after": {
+        "added_rows": 0,
+        "changed_fields": 21,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "34ed72d6ee33cbb7eb4feaf0d65d457cb9ffa0c78c13d49a626e37cf3003b863"
+      }
+    },
+    {
+      "trial": "30-F-t1-measured-1-sqlite",
+      "operations": {
+        "READ": {
+          "Operations": 40.0,
+          "AverageLatency(us)": 92.825,
+          "MinLatency(us)": 21.0,
+          "MaxLatency(us)": 2463.0,
+          "50thPercentileLatency(us)": 29.0,
+          "95thPercentileLatency(us)": 55.0,
+          "99thPercentileLatency(us)": 2463.0,
+          "Return=OK": 40.0
+        },
+        "READ-MODIFY-WRITE": {
+          "Operations": 21.0,
+          "AverageLatency(us)": 321.6666666666667,
+          "MinLatency(us)": 242.0,
+          "MaxLatency(us)": 923.0,
+          "50thPercentileLatency(us)": 288.0,
+          "95thPercentileLatency(us)": 370.0,
+          "99thPercentileLatency(us)": 923.0
+        },
+        "UPDATE": {
+          "Operations": 21.0,
+          "AverageLatency(us)": 274.8095238095238,
+          "MinLatency(us)": 208.0,
+          "MaxLatency(us)": 804.0,
+          "50thPercentileLatency(us)": 248.0,
+          "95thPercentileLatency(us)": 319.0,
+          "99thPercentileLatency(us)": 804.0,
+          "Return=OK": 21.0
+        }
+      },
+      "logical": 40.0,
+      "calls": 61.0,
+      "workers": 1,
+      "non_ok": 0,
+      "binding": {
+        "setup_attempts": 7,
+        "setup_retries": 0,
+        "attempts": 61,
+        "retries": 0,
+        "exhausted": 0,
+        "open_retries": 0,
+        "sql_bytes": 5286,
+        "input_bytes": 3502,
+        "output_bytes": 40000,
+        "result_rows": 40
+      },
+      "before": {
+        "added_rows": 0,
+        "changed_fields": 0,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "05e7ab20f6594a0b00cb254c1a187aeadc299690c50ab636094b95f47ee69625"
+      },
+      "after": {
+        "added_rows": 0,
+        "changed_fields": 17,
+        "field_bytes": 100,
+        "field_count": 10,
+        "keys_sha256": "caa9d8302bdf9f2a3af6273956f1991a161188a59ac929cc4f9b30bcd1aae598",
+        "missing_rows": 0,
+        "payload_bytes": 30000,
+        "rows": 30,
+        "sha256": "7a29bcad9494adeeccd759d54290d4f2933d8797b2b08e8679b2de5c69e453ef"
+      }
+    }
+  ],
+  "result_hashes": {
+    "summary.json": "c851b37777c20053c77567188f1021ce3d450cf19f6463f2186c7819a8aed2f3",
+    "summary.csv": "0117d3e17643210a24f4324f3f52feb190fbc8ff8b8721dccf3de070e48fcd09",
+    "operations.csv": "7b8a823b10b6dc07ecc039c239b750ebf5044e02dbd75e2a7f0f2770a214d1f6"
+  },
+  "reproducibility": [
+    {
+      "command": [
+        "python3",
+        "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/bench/ycsb/run.py",
+        "analyze",
+        "--output=/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/cwd-independent-checks"
+      ],
+      "cwd": "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/docs/experiments/ycsb-sqlite",
+      "exit_code": 0,
+      "stdout": "{\"measured_runs\": 24, \"failed_runs\": 0}",
+      "same_result_bytes": true
+    },
+    {
+      "command": [
+        "python3",
+        "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/bench/ycsb/run.py",
+        "verify",
+        "--output=/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/cwd-independent-checks"
+      ],
+      "cwd": "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/docs/experiments/ycsb-sqlite",
+      "exit_code": 0,
+      "stdout": "{\"measured_runs\": 24, \"failed_runs\": 0}",
+      "same_result_bytes": true
+    },
+    {
+      "command": [
+        "python3",
+        "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/bench/ycsb/run.py",
+        "analyze",
+        "--output=/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/cwd-independent-checks"
+      ],
+      "cwd": "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/docs/experiments/ycsb-sqlite",
+      "exit_code": 0,
+      "stdout": "{\"measured_runs\": 24, \"failed_runs\": 0}",
+      "same_result_bytes": true
+    },
+    {
+      "command": [
+        "python3",
+        "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/bench/ycsb/run.py",
+        "verify",
+        "--output=/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/cwd-independent-checks"
+      ],
+      "cwd": "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/docs/experiments/ycsb-sqlite",
+      "exit_code": 0,
+      "stdout": "{\"measured_runs\": 24, \"failed_runs\": 0}",
+      "same_result_bytes": true
+    }
+  ],
+  "new_comments_in_head": false,
+  "limits": [
+    "30 records / 40 operations smoke only",
+    "formal 240-run performance excluded",
+    "Linux CI excluded",
+    "power-loss durability excluded"
+  ],
+  "source_fix": "runner.environment Java Tool version subprocess.check_output cwd=ROOT; native/Java/properties/performance path unchanged",
+  "same_binary_cwd_control": [
+    {
+      "command": [
+        "/Users/woonyong/Library/Java/JavaVirtualMachines/ms-21.0.8/Contents/Home/bin/java",
+        "-Xms256m",
+        "-Xmx1g",
+        "-Dycsb.native=/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/libycsb.dylib",
+        "-cp",
+        "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/classes:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/HdrHistogram-2.1.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/core-0.17.0.jar:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/htrace-core4-4.1.0-incubating.jar:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/jackson-core-asl-1.9.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/jackson-mapper-asl-1.9.4.jar",
+        "org.totedb.ycsb.Tool",
+        "version"
+      ],
+      "cwd": "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/docs/experiments/ycsb-sqlite",
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "Exception in thread \"main\" java.lang.UnsatisfiedLinkError: /Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/libycsb.dylib: dlopen(/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/libycsb.dylib, 0x0001): Library not loaded: build/lib/libtotedb.dylib\n  Referenced from: <5EF67751-BC19-3AA1-97CA-78E0841569DC> /Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/libycsb.dylib\n  Reason: tried: 'build/lib/libtotedb.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OSbuild/lib/libtotedb.dylib' (no such file), 'build/lib/libtotedb.dylib' (no such file)\n\tat java.base/jdk.internal.loader.NativeLibraries.load(Native Method)\n\tat java.base/jdk.internal.loader.NativeLibraries$NativeLibraryImpl.open(NativeLibraries.java:331)\n\tat java.base/jdk.internal.loader.NativeLibraries.loadLibrary(NativeLibraries.java:197)\n\tat java.base/jdk.internal.loader.NativeLibraries.loadLibrary(NativeLibraries.java:139)\n\tat java.base/java.lang.ClassLoader.loadLibrary(ClassLoader.java:2418)\n\tat java.base/java.lang.Runtime.load0(Runtime.java:852)\n\tat java.base/java.lang.System.load(System.java:2025)\n\tat org.totedb.ycsb.Native.<clinit>(Native.java:5)\n\tat org.totedb.ycsb.Tool.main(Tool.java:17)\n"
+    },
+    {
+      "command": [
+        "/Users/woonyong/Library/Java/JavaVirtualMachines/ms-21.0.8/Contents/Home/bin/java",
+        "-Xms256m",
+        "-Xmx1g",
+        "-Dycsb.native=/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/libycsb.dylib",
+        "-cp",
+        "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/classes:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/HdrHistogram-2.1.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/core-0.17.0.jar:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/htrace-core4-4.1.0-incubating.jar:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/jackson-core-asl-1.9.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb/build/ycsb/deps/jackson-mapper-asl-1.9.4.jar",
+        "org.totedb.ycsb.Tool",
+        "version"
+      ],
+      "cwd": "/Users/woonyong/workspace/totedb/totedb.wt/verify-ycsb",
+      "exit_code": 0,
+      "stdout": "{\"totedb\":\"0.1.0\",\"sqlite\":\"3.51.0\",\"sqlite_compile_options\":[\"ATOMIC_INTRINSICS=1\",\"BUG_COMPATIBLE_20160819\",\"CCCRYPT256\",\"CODEC=see-cccrypt\",\"COMPILER=clang-21.0.0\",\"DEFAULT_AUTOVACUUM\",\"DEFAULT_CACHE_SIZE=2000\",\"DEFAULT_CKPTFULLFSYNC\",\"DEFAULT_FILE_FORMAT=4\",\"DEFAULT_JOURNAL_SIZE_LIMIT=32768\",\"DEFAULT_LOOKASIDE=1200,102\",\"DEFAULT_MEMSTATUS=0\",\"DEFAULT_MMAP_SIZE=0\",\"DEFAULT_PAGE_SIZE=4096\",\"DEFAULT_PCACHE_INITSZ=20\",\"DEFAULT_RECURSIVE_TRIGGERS\",\"DEFAULT_SECTOR_SIZE=4096\",\"DEFAULT_SYNCHRONOUS=2\",\"DEFAULT_WAL_AUTOCHECKPOINT=1000\",\"DEFAULT_WAL_SYNCHRONOUS=1\",\"DEFAULT_WORKER_THREADS=0\",\"DIRECT_OVERFLOW_READ\",\"DQS=3\",\"ENABLE_API_ARMOR\",\"ENABLE_BYTECODE_VTAB\",\"ENABLE_COLUMN_METADATA\",\"ENABLE_DBSTAT_VTAB\",\"ENABLE_FTS3\",\"ENABLE_FTS3_PARENTHESIS\",\"ENABLE_FTS3_TOKENIZER\",\"ENABLE_FTS4\",\"ENABLE_FTS5\",\"ENABLE_LOCKING_STYLE=1\",\"ENABLE_MATH_FUNCTIONS\",\"ENABLE_NORMALIZE\",\"ENABLE_PREUPDATE_HOOK\",\"ENABLE_RTREE\",\"ENABLE_SESSION\",\"ENABLE_SETLK_TIMEOUT\",\"ENABLE_SNAPSHOT\",\"ENABLE_SQLLOG\",\"ENABLE_STMT_SCANSTATUS\",\"ENABLE_UNKNOWN_SQL_FUNCTION\",\"ENABLE_UPDATE_DELETE_LIMIT\",\"HAS_CODEC_RESTRICTED\",\"HAVE_ISNAN\",\"MALLOC_SOFT_LIMIT=1024\",\"MAX_ATTACHED=10\",\"MAX_COLUMN=2000\",\"MAX_COMPOUND_SELECT=500\",\"MAX_DEFAULT_PAGE_SIZE=8192\",\"MAX_EXPR_DEPTH=1000\",\"MAX_FUNCTION_ARG=127\",\"MAX_LENGTH=2147483645\",\"MAX_LIKE_PATTERN_LENGTH=50000\",\"MAX_MMAP_SIZE=1073741824\",\"MAX_PAGE_COUNT=1073741823\",\"MAX_PAGE_SIZE=65536\",\"MAX_SQL_LENGTH=1000000000\",\"MAX_TRIGGER_DEPTH=1000\",\"MAX_VARIABLE_NUMBER=500000\",\"MAX_VDBE_OP=250000000\",\"MAX_WORKER_THREADS=8\",\"MUTEX_UNFAIR\",\"OMIT_AUTORESET\",\"OMIT_LOAD_EXTENSION\",\"STMTJRNL_SPILL=131072\",\"SYSTEM_MALLOC\",\"TEMP_STORE=1\",\"THREADSAFE=2\",\"USE_URI\"]}\n",
+      "stderr": ""
+    }
+  ],
+  "git_status": ""
+}

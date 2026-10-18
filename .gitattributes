@@ -1,0 +1,4 @@
+bench/ycsb/workloads/* -text whitespace=-blank-at-eol,-blank-at-eof,cr-at-eol
+bench/ycsb/LICENSE.txt -text
+bench/ycsb/NOTICE.txt -text whitespace=-blank-at-eol
+docs/experiments/ycsb-sqlite/**/*.csv -text whitespace=cr-at-eol

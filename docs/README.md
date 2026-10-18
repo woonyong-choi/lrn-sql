@@ -10,3 +10,5 @@ ToteDB의 설계·개발 문서다. 문서는 한국어로 쓴다. 처음이면 
   - [폴더 구조 규칙](convention/project-structure.md)
   - [기여 안내](../.github/CONTRIBUTING.md)
 - [출처와 기여 경계](attribution.md)
+- [실험](experiments/README.md)
+  - [YCSB 동등 조건 측정](experiments/ycsb-sqlite/report.md)

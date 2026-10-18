@@ -1,0 +1,9 @@
+$ RUN_ID=20261018T003900Z-be5fb10-profile ./run.sh profile
+{"trial_id": "10000-C-t1-preflight-0-totedb", "problems": [], "elapsed_seconds": 0.29872766700000053}
+{"trial_id": "10000-C-t1-preflight-0-sqlite", "problems": [], "elapsed_seconds": 0.1679154580000004}
+{"trial_id": "10000-C-t1-measured-1-totedb", "problems": [], "elapsed_seconds": 0.20507420800000098}
+{"trial_id": "10000-C-t1-measured-1-sqlite", "problems": [], "elapsed_seconds": 0.13500637499999968}
+{"trial_id": "10000-E-t1-preflight-0-totedb", "problems": [], "elapsed_seconds": 16.829501333000003}
+{"trial_id": "10000-E-t1-preflight-0-sqlite", "problems": [], "elapsed_seconds": 0.3978354589999995}
+{"trial_id": "10000-E-t1-measured-1-totedb", "problems": [], "elapsed_seconds": 17.526449875}
+{"trial_id": "10000-E-t1-measured-1-sqlite", "problems": [], "elapsed_seconds": 0.45150199999999785}

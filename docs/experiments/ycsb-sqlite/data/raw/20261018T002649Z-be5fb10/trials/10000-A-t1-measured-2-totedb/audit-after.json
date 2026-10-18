@@ -1,0 +1,11 @@
+{
+  "added_rows": 0,
+  "changed_fields": 467,
+  "field_bytes": 100,
+  "field_count": 10,
+  "keys_sha256": "cecad843bb0e2c76965d9457a92c466ab87639d21ddf15298a797aab56137a96",
+  "missing_rows": 0,
+  "payload_bytes": 10000000,
+  "rows": 10000,
+  "sha256": "0026850428aa8180814344e601041b4b553f8855fe31d0b3b1a4cd17ea9fa9d9"
+}

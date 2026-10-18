@@ -1,0 +1,6047 @@
+{
+  "bootstrap_note": "paired median ratio; 10000 resamples; seed 226; n=5 intervals are imprecise; no multiplicity correction",
+  "collection": {
+    "expected_measured_runs": 240,
+    "expected_preflight_runs": 48,
+    "filesystem_cache": "uncontrolled; full audit read immediately before each measured process",
+    "fresh_jvm": true,
+    "jit_warmup": false,
+    "operations": 1000,
+    "request_trace": "independent ThreadLocalRandom",
+    "run_id": "20261018T002649Z-be5fb10",
+    "sizes": [
+      1000,
+      10000
+    ],
+    "threads": [
+      1,
+      4
+    ],
+    "timeout_seconds": 180,
+    "workloads": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F"
+    ]
+  },
+  "conditions": [
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 494,
+              "median": 471,
+              "min": 447,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 26.0,
+                "median": 23.0,
+                "min": 22.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 103.0,
+                "median": 37.0,
+                "min": 35.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 515.0,
+                "median": 109.0,
+                "min": 54.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 505.0,
+                "median": 483.0,
+                "min": 469.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 252.0,
+                "median": 230.0,
+                "min": 218.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 1920.0,
+                "median": 307.0,
+                "min": 290.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 6875.0,
+                "median": 663.0,
+                "min": 343.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 531.0,
+                "median": 517.0,
+                "min": 495.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 2436000,
+          "returned_rows": 2436,
+          "runtime_seconds": {
+            "max": 0.4858203750000012,
+            "median": 0.27198270799999946,
+            "min": 0.23764237500000007,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 6849.315068493151,
+            "median": 6211.180124223602,
+            "min": 2617.801047120419,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 485,
+              "median": 472,
+              "min": 450,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 32.0,
+                "median": 31.0,
+                "min": 31.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 48.0,
+                "median": 46.0,
+                "min": 45.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 86.0,
+                "median": 70.0,
+                "min": 55.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 511.0,
+                "median": 491.0,
+                "min": 475.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 137.0,
+                "median": 135.0,
+                "min": 130.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 170.0,
+                "median": 160.0,
+                "min": 153.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 242.0,
+                "median": 191.0,
+                "min": 188.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 525.0,
+                "median": 509.0,
+                "min": 489.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 2470000,
+          "returned_rows": 2470,
+          "runtime_seconds": {
+            "max": 0.21889966699999874,
+            "median": 0.19843395899999905,
+            "min": 0.18998154199999995,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 9803.921568627451,
+            "median": 9523.809523809523,
+            "min": 9090.90909090909,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          1.3394495412844036,
+          3.70873786407767
+        ],
+        "median": 1.5333333333333332,
+        "n": 5,
+        "ratios": [
+          1.3394495412844036,
+          1.5333333333333332,
+          1.6960784313725492,
+          3.70873786407767,
+          1.3909090909090909
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 1,
+      "workload": "A"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 488,
+              "median": 466,
+              "min": 454,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5210,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 26.0,
+                "median": 23.0,
+                "min": 22.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 77.0,
+                "median": 36.0,
+                "min": 35.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 253.0,
+                "median": 167.0,
+                "min": 59.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 505.0,
+                "median": 497.0,
+                "min": 479.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 247.0,
+                "median": 243.0,
+                "min": 216.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 520.0,
+                "median": 317.0,
+                "min": 297.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 10239.0,
+                "median": 5259.0,
+                "min": 2989.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 521.0,
+                "median": 503.0,
+                "min": 495.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 210,
+          "returned_bytes": 2473000,
+          "returned_rows": 2473,
+          "runtime_seconds": {
+            "max": 0.2993642080000001,
+            "median": 0.28787737500000077,
+            "min": 0.22744283299999957,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 6493.506493506494,
+            "median": 5291.005291005291,
+            "min": 4694.835680751174,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 492,
+              "median": 464,
+              "min": 444,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5168,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 34.0,
+                "median": 33.0,
+                "min": 32.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 61.0,
+                "median": 49.0,
+                "min": 45.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 158.0,
+                "median": 72.0,
+                "min": 66.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 520.0,
+                "median": 501.0,
+                "min": 466.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 137.0,
+                "median": 135.0,
+                "min": 134.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 241.0,
+                "median": 164.0,
+                "min": 157.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 10415.0,
+                "median": 3341.0,
+                "min": 2503.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 534.0,
+                "median": 499.0,
+                "min": 480.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 168,
+          "returned_bytes": 2494000,
+          "returned_rows": 2494,
+          "runtime_seconds": {
+            "max": 0.23958316700000104,
+            "median": 0.22109308299999952,
+            "min": 0.211614333,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 9090.90909090909,
+            "median": 7633.587786259542,
+            "min": 7142.857142857143,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          1.1,
+          1.809090909090909
+        ],
+        "median": 1.4427480916030533,
+        "n": 5,
+        "ratios": [
+          1.1,
+          1.37984496124031,
+          1.809090909090909,
+          1.4427480916030533,
+          1.6015037593984962
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 4,
+      "workload": "A"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 54,
+              "median": 44,
+              "min": 42,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 17.0,
+                "median": 17.0,
+                "min": 17.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 29.0,
+                "median": 28.0,
+                "min": 27.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 44.0,
+                "median": 41.0,
+                "min": 41.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 958.0,
+                "median": 955.0,
+                "min": 946.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 230.0,
+                "median": 227.0,
+                "min": 216.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 339.0,
+                "median": 292.0,
+                "min": 281.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 844.0,
+                "median": 773.0,
+                "min": 338.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 54.0,
+                "median": 45.0,
+                "min": 42.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 4768000,
+          "returned_rows": 4768,
+          "runtime_seconds": {
+            "max": 0.14958199999999877,
+            "median": 0.1392209169999994,
+            "min": 0.1315393329999992,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 21739.130434782608,
+            "median": 21276.59574468085,
+            "min": 20000.0,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 62,
+              "median": 53,
+              "min": 44,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 28.0,
+                "median": 27.0,
+                "min": 27.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 38.0,
+                "median": 38.0,
+                "min": 37.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 53.0,
+                "median": 51.0,
+                "min": 48.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 954.0,
+                "median": 947.0,
+                "min": 936.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 144.0,
+                "median": 140.0,
+                "min": 136.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 185.0,
+                "median": 174.0,
+                "min": 167.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 617.0,
+                "median": 228.0,
+                "min": 177.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 64.0,
+                "median": 53.0,
+                "min": 46.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 4735000,
+          "returned_rows": 4735,
+          "runtime_seconds": {
+            "max": 0.1658695839999993,
+            "median": 0.1613442080000027,
+            "min": 0.15643766699999873,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 19230.76923076923,
+            "median": 19230.76923076923,
+            "min": 18518.51851851852,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.8518518518518519,
+          0.9615384615384616
+        ],
+        "median": 0.8846153846153846,
+        "n": 5,
+        "ratios": [
+          0.9038461538461539,
+          0.8703703703703705,
+          0.8846153846153846,
+          0.8518518518518519,
+          0.9615384615384616
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 1,
+      "workload": "B"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 55,
+              "median": 44,
+              "min": 40,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5273,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 19.0,
+                "median": 19.0,
+                "min": 18.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 162.0,
+                "median": 59.0,
+                "min": 34.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 2307.0,
+                "median": 849.0,
+                "min": 807.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 960.0,
+                "median": 956.0,
+                "min": 945.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 267.0,
+                "median": 246.0,
+                "min": 229.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 12575.0,
+                "median": 5731.0,
+                "min": 2715.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 64767.0,
+                "median": 21583.0,
+                "min": 10727.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 55.0,
+                "median": 44.0,
+                "min": 40.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 273,
+          "returned_bytes": 4774000,
+          "returned_rows": 4774,
+          "runtime_seconds": {
+            "max": 0.15826191699999725,
+            "median": 0.14411879100000036,
+            "min": 0.13683316700000248,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 22727.272727272728,
+            "median": 18518.51851851852,
+            "min": 12048.192771084337,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 63,
+              "median": 43,
+              "min": 39,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5150,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 33.0,
+                "median": 31.0,
+                "min": 29.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 121.0,
+                "median": 50.0,
+                "min": 46.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 443.0,
+                "median": 288.0,
+                "min": 144.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 960.0,
+                "median": 957.0,
+                "min": 935.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 177.0,
+                "median": 158.0,
+                "min": 149.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 11735.0,
+                "median": 5883.0,
+                "min": 5471.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 22527.0,
+                "median": 21519.0,
+                "min": 5703.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 65.0,
+                "median": 43.0,
+                "min": 40.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 150,
+          "returned_bytes": 4758000,
+          "returned_rows": 4758,
+          "runtime_seconds": {
+            "max": 0.1848659589999997,
+            "median": 0.1430053330000014,
+            "min": 0.1324214579999996,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 21276.59574468085,
+            "median": 18867.924528301886,
+            "min": 14925.373134328358,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.6567164179104478,
+          1.7291666666666665
+        ],
+        "median": 1.1132075471698113,
+        "n": 5,
+        "ratios": [
+          1.1132075471698113,
+          1.7291666666666665,
+          1.1489361702127658,
+          0.6567164179104478,
+          0.7692307692307693
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 4,
+      "workload": "B"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 17.0,
+                "median": 16.0,
+                "min": 16.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 27.0,
+                "median": 27.0,
+                "min": 25.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 44.0,
+                "median": 38.0,
+                "min": 35.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.13698550000000154,
+            "median": 0.1341380000000001,
+            "min": 0.11469075000000117,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 28571.428571428572,
+            "median": 27777.777777777777,
+            "min": 27777.777777777777,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 29.0,
+                "median": 28.0,
+                "min": 27.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 61.0,
+                "median": 39.0,
+                "min": 37.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 92.0,
+                "median": 55.0,
+                "min": 51.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.14579370899999589,
+            "median": 0.13617349999999817,
+            "min": 0.11572020799999905,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 21276.59574468085,
+            "median": 20833.333333333332,
+            "min": 18181.81818181818,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.6545454545454545,
+          0.7659574468085106
+        ],
+        "median": 0.75,
+        "n": 5,
+        "ratios": [
+          0.7291666666666666,
+          0.7659574468085106,
+          0.75,
+          0.7659574468085106,
+          0.6545454545454545
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 1,
+      "workload": "C"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 24.0,
+                "median": 22.0,
+                "min": 22.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 80.0,
+                "median": 71.0,
+                "min": 63.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 136.0,
+                "median": 129.0,
+                "min": 109.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.13742229199999656,
+            "median": 0.13145695800000112,
+            "min": 0.10705899999999957,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 41666.666666666664,
+            "median": 41666.666666666664,
+            "min": 40000.0,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 38.0,
+                "median": 33.0,
+                "min": 33.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 123.0,
+                "median": 83.0,
+                "min": 62.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 788.0,
+                "median": 158.0,
+                "min": 144.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.13550054099999898,
+            "median": 0.1309972079999966,
+            "min": 0.11493850000000094,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 40000.0,
+            "median": 38461.53846153846,
+            "min": 26315.78947368421,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.6315789473684211,
+          1.0
+        ],
+        "median": 0.9230769230769231,
+        "n": 5,
+        "ratios": [
+          0.7741935483870969,
+          0.9615384615384616,
+          0.9230769230769231,
+          0.6315789473684211,
+          1.0
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 4,
+      "workload": "C"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 51,
+              "median": 47,
+              "min": 40,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1051000,
+              "median": 1047000,
+              "min": 1040000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1051,
+              "median": 1047,
+              "min": 1040,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 275.0,
+                "median": 266.0,
+                "min": 257.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 502.0,
+                "median": 361.0,
+                "min": 321.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1135.0,
+                "median": 669.0,
+                "min": 471.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 51.0,
+                "median": 47.0,
+                "min": 40.0,
+                "n": 5
+              }
+            },
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 17.0,
+                "median": 17.0,
+                "min": 17.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 39.0,
+                "median": 28.0,
+                "min": 28.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 114.0,
+                "median": 49.0,
+                "min": 41.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 960.0,
+                "median": 953.0,
+                "min": 949.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 4770000,
+          "returned_rows": 4770,
+          "runtime_seconds": {
+            "max": 0.1646905409999988,
+            "median": 0.15208983300000511,
+            "min": 0.13407379100000583,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 20408.163265306124,
+            "median": 19607.843137254902,
+            "min": 18181.81818181818,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 58,
+              "median": 53,
+              "min": 45,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1058000,
+              "median": 1053000,
+              "min": 1045000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1058,
+              "median": 1053,
+              "min": 1045,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 179.0,
+                "median": 175.0,
+                "min": 172.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 255.0,
+                "median": 237.0,
+                "min": 226.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 624.0,
+                "median": 269.0,
+                "min": 248.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 58.0,
+                "median": 53.0,
+                "min": 45.0,
+                "n": 5
+              }
+            },
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 28.0,
+                "median": 27.0,
+                "min": 27.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 39.0,
+                "median": 37.0,
+                "min": 36.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 65.0,
+                "median": 53.0,
+                "min": 50.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 955.0,
+                "median": 947.0,
+                "min": 942.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 4737000,
+          "returned_rows": 4737,
+          "runtime_seconds": {
+            "max": 0.1640082079999985,
+            "median": 0.15743629099999623,
+            "min": 0.14509783300000123,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 18518.51851851852,
+            "median": 18181.81818181818,
+            "min": 17543.859649122805,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.8596491228070174,
+          1.0185185185185186
+        ],
+        "median": 0.9259259259259259,
+        "n": 5,
+        "ratios": [
+          0.8596491228070174,
+          0.9259259259259259,
+          0.9272727272727271,
+          1.0185185185185186,
+          0.9122807017543859
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 1,
+      "workload": "D"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 54,
+              "median": 45,
+              "min": 41,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1054000,
+              "median": 1045000,
+              "min": 1041000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1054,
+              "median": 1045,
+              "min": 1041,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5272,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 323.0,
+                "median": 285.0,
+                "min": 271.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 11503.0,
+                "median": 5763.0,
+                "min": 5391.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 46719.0,
+                "median": 22511.0,
+                "min": 12919.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 54.0,
+                "median": 45.0,
+                "min": 41.0,
+                "n": 5
+              }
+            },
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 19.0,
+                "median": 18.0,
+                "min": 18.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 101.0,
+                "median": 49.0,
+                "min": 39.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 2243.0,
+                "median": 843.0,
+                "min": 822.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 959.0,
+                "median": 955.0,
+                "min": 946.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 272,
+          "returned_bytes": 4769000,
+          "returned_rows": 4769,
+          "runtime_seconds": {
+            "max": 0.16589841600000454,
+            "median": 0.15747779099999804,
+            "min": 0.13005874999999634,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 20833.333333333332,
+            "median": 15384.615384615385,
+            "min": 13698.630136986301,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 64,
+              "median": 51,
+              "min": 43,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1064000,
+              "median": 1051000,
+              "min": 1043000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1064,
+              "median": 1051,
+              "min": 1043,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5121,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 202.0,
+                "median": 185.0,
+                "min": 176.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 11559.0,
+                "median": 5619.0,
+                "min": 336.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 47071.0,
+                "median": 23535.0,
+                "min": 22639.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 64.0,
+                "median": 51.0,
+                "min": 43.0,
+                "n": 5
+              }
+            },
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 30.0,
+                "median": 30.0,
+                "min": 29.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 88.0,
+                "median": 52.0,
+                "min": 48.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 353.0,
+                "median": 305.0,
+                "min": 100.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 957.0,
+                "median": 949.0,
+                "min": 936.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 121,
+          "returned_bytes": 4737000,
+          "returned_rows": 4737,
+          "runtime_seconds": {
+            "max": 0.179324084000001,
+            "median": 0.1601360000000014,
+            "min": 0.1360163330000006,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 17241.379310344826,
+            "median": 15151.515151515152,
+            "min": 9803.921568627451,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.7156862745098039,
+          1.2241379310344827
+        ],
+        "median": 0.8225806451612904,
+        "n": 5,
+        "ratios": [
+          1.2241379310344827,
+          0.8225806451612904,
+          0.9420289855072463,
+          0.7156862745098039,
+          0.7272727272727273
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 4,
+      "workload": "D"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 63,
+              "median": 55,
+              "min": 49,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1063000,
+              "median": 1055000,
+              "min": 1049000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1063,
+              "median": 1055,
+              "min": 1049,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 296.0,
+                "median": 288.0,
+                "min": 284.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 840.0,
+                "median": 420.0,
+                "min": 363.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 2993.0,
+                "median": 568.0,
+                "min": 458.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 63.0,
+                "median": 55.0,
+                "min": 49.0,
+                "n": 5
+              }
+            },
+            "SCAN": {
+              "50thPercentileLatency(us)": {
+                "max": 148.0,
+                "median": 144.0,
+                "min": 139.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 617.0,
+                "median": 263.0,
+                "min": 260.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1333.0,
+                "median": 297.0,
+                "min": 289.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 951.0,
+                "median": 945.0,
+                "min": 937.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 232486000,
+          "returned_rows": 232486,
+          "runtime_seconds": {
+            "max": 0.3341246250000012,
+            "median": 0.2775929169999998,
+            "min": 0.25858312500000125,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 5747.126436781609,
+            "median": 5649.717514124294,
+            "min": 4184.100418410042,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 54,
+              "median": 48,
+              "min": 48,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1054000,
+              "median": 1048000,
+              "min": 1048000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1054,
+              "median": 1048,
+              "min": 1048,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 297.0,
+                "median": 266.0,
+                "min": 236.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 516.0,
+                "median": 405.0,
+                "min": 368.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1828.0,
+                "median": 1588.0,
+                "min": 431.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 54.0,
+                "median": 48.0,
+                "min": 48.0,
+                "n": 5
+              }
+            },
+            "SCAN": {
+              "50thPercentileLatency(us)": {
+                "max": 1370.0,
+                "median": 1321.0,
+                "min": 1303.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 1837.0,
+                "median": 1779.0,
+                "min": 1756.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 2053.0,
+                "median": 1917.0,
+                "min": 1896.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 952.0,
+                "median": 952.0,
+                "min": 946.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 234145000,
+          "returned_rows": 234145,
+          "runtime_seconds": {
+            "max": 1.4286701660000034,
+            "median": 1.3888042499999997,
+            "min": 1.3630109579999967,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 787.4015748031496,
+            "median": 773.9938080495356,
+            "min": 755.8578987150415,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "supported",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.13151927437641722,
+          0.18818897637795276
+        ],
+        "median": 0.13696498054474707,
+        "n": 5,
+        "ratios": [
+          0.13151927437641722,
+          0.13696498054474707,
+          0.13646877409406322,
+          0.14009287925696592,
+          0.18818897637795276
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 1,
+      "workload": "E"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 53,
+              "median": 46,
+              "min": 42,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1053000,
+              "median": 1046000,
+              "min": 1042000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1053,
+              "median": 1046,
+              "min": 1042,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5283,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 356.0,
+                "median": 324.0,
+                "min": 286.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 69503.0,
+                "median": 45439.0,
+                "min": 10287.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 181247.0,
+                "median": 131967.0,
+                "min": 70143.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 53.0,
+                "median": 46.0,
+                "min": 42.0,
+                "n": 5
+              }
+            },
+            "SCAN": {
+              "50thPercentileLatency(us)": {
+                "max": 169.0,
+                "median": 153.0,
+                "min": 147.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 815.0,
+                "median": 334.0,
+                "min": 273.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 2473.0,
+                "median": 1085.0,
+                "min": 909.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 958.0,
+                "median": 954.0,
+                "min": 947.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 283,
+          "returned_bytes": 235988000,
+          "returned_rows": 235988,
+          "runtime_seconds": {
+            "max": 0.3866954159999949,
+            "median": 0.303896249999994,
+            "min": 0.2837067920000038,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 5208.333333333333,
+            "median": 4807.692307692308,
+            "min": 3367.003367003367,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 57,
+              "median": 47,
+              "min": 45,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1057000,
+              "median": 1047000,
+              "min": 1045000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1057,
+              "median": 1047,
+              "min": 1045,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5533,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 457.0,
+                "median": 333.0,
+                "min": 272.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 288767.0,
+                "median": 198911.0,
+                "min": 180735.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 740863.0,
+                "median": 681983.0,
+                "min": 233855.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 57.0,
+                "median": 47.0,
+                "min": 45.0,
+                "n": 5
+              }
+            },
+            "SCAN": {
+              "50thPercentileLatency(us)": {
+                "max": 1395.0,
+                "median": 1380.0,
+                "min": 1335.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 2333.0,
+                "median": 1958.0,
+                "min": 1887.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 4651.0,
+                "median": 3537.0,
+                "min": 2747.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 955.0,
+                "median": 953.0,
+                "min": 943.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 533,
+          "returned_bytes": 236120000,
+          "returned_rows": 236120,
+          "runtime_seconds": {
+            "max": 1.2407845840000107,
+            "median": 1.2011520829999967,
+            "min": 1.123809707999996,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 988.1422924901186,
+            "median": 901.7132551848512,
+            "min": 879.5074758135444,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "supported",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.16886543535620052,
+          0.2678088367899008
+        ],
+        "median": 0.19366852886405958,
+        "n": 5,
+        "ratios": [
+          0.21343873517786563,
+          0.2678088367899008,
+          0.19366852886405958,
+          0.16886543535620052,
+          0.1802990325417766
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 4,
+      "workload": "E"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 485,
+              "median": 475,
+              "min": 439,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 7500,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 25.0,
+                "median": 21.0,
+                "min": 20.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 83.0,
+                "median": 32.0,
+                "min": 30.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 171.0,
+                "median": 48.0,
+                "min": 40.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            },
+            "READ-MODIFY-WRITE": {
+              "50thPercentileLatency(us)": {
+                "max": 295.0,
+                "median": 271.0,
+                "min": 242.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 548.0,
+                "median": 368.0,
+                "min": 303.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1405.0,
+                "median": 424.0,
+                "min": 360.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 513.0,
+                "median": 506.0,
+                "min": 470.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 271.0,
+                "median": 245.0,
+                "min": 218.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 458.0,
+                "median": 335.0,
+                "min": 276.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1311.0,
+                "median": 386.0,
+                "min": 330.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 513.0,
+                "median": 506.0,
+                "min": 470.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.32335312500001123,
+            "median": 0.2827189579999896,
+            "min": 0.25410700000000475,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 6289.308176100629,
+            "median": 5747.126436781609,
+            "min": 4761.9047619047615,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 472,
+              "median": 469,
+              "min": 446,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 7505,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 30.0,
+                "median": 29.0,
+                "min": 29.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 46.0,
+                "median": 41.0,
+                "min": 39.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 62.0,
+                "median": 54.0,
+                "min": 52.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            },
+            "READ-MODIFY-WRITE": {
+              "50thPercentileLatency(us)": {
+                "max": 168.0,
+                "median": 164.0,
+                "min": 162.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 285.0,
+                "median": 198.0,
+                "min": 190.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 491.0,
+                "median": 251.0,
+                "min": 222.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 513.0,
+                "median": 500.0,
+                "min": 491.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 135.0,
+                "median": 131.0,
+                "min": 129.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 251.0,
+                "median": 154.0,
+                "min": 147.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 447.0,
+                "median": 186.0,
+                "min": 161.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 513.0,
+                "median": 500.0,
+                "min": 491.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.24011329200000375,
+            "median": 0.2084125840000013,
+            "min": 0.20288233399999456,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 8695.652173913044,
+            "median": 8547.008547008547,
+            "min": 7874.0157480314965,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          1.3706896551724137,
+          1.6695652173913045
+        ],
+        "median": 1.4871794871794872,
+        "n": 5,
+        "ratios": [
+          1.6535433070866143,
+          1.6695652173913045,
+          1.46218487394958,
+          1.4871794871794872,
+          1.3706896551724137
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 1,
+      "workload": "F"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 484,
+              "median": 467,
+              "min": 461,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 7766,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 22.0,
+                "median": 21.0,
+                "min": 21.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 35.0,
+                "median": 33.0,
+                "min": 33.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 98.0,
+                "median": 72.0,
+                "min": 50.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            },
+            "READ-MODIFY-WRITE": {
+              "50thPercentileLatency(us)": {
+                "max": 295.0,
+                "median": 253.0,
+                "min": 233.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 470.0,
+                "median": 354.0,
+                "min": 318.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 13039.0,
+                "median": 11183.0,
+                "min": 414.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 521.0,
+                "median": 505.0,
+                "min": 494.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 271.0,
+                "median": 229.0,
+                "min": 209.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 407.0,
+                "median": 319.0,
+                "min": 286.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 11775.0,
+                "median": 5559.0,
+                "min": 359.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 521.0,
+                "median": 505.0,
+                "min": 494.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 244,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.32878283400000896,
+            "median": 0.3036273749999907,
+            "min": 0.2711456249999884,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 5319.148936170212,
+            "median": 4854.368932038835,
+            "min": 4587.155963302752,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 471,
+              "median": 469,
+              "min": 460,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 1000000,
+              "median": 1000000,
+              "min": 1000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 1000,
+              "median": 1000,
+              "min": 1000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 7683,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 31.0,
+                "median": 31.0,
+                "min": 31.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 49.0,
+                "median": 46.0,
+                "min": 41.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 143.0,
+                "median": 84.0,
+                "min": 72.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            },
+            "READ-MODIFY-WRITE": {
+              "50thPercentileLatency(us)": {
+                "max": 170.0,
+                "median": 164.0,
+                "min": 162.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 249.0,
+                "median": 225.0,
+                "min": 199.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 9967.0,
+                "median": 8919.0,
+                "min": 1001.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 510.0,
+                "median": 499.0,
+                "min": 482.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 135.0,
+                "median": 130.0,
+                "min": 128.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 179.0,
+                "median": 166.0,
+                "min": 150.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 5967.0,
+                "median": 4675.0,
+                "min": 786.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 510.0,
+                "median": 499.0,
+                "min": 482.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 199,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.2509687500000126,
+            "median": 0.24289883400000178,
+            "min": 0.21414054199999555,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 7462.686567164179,
+            "median": 6802.721088435374,
+            "min": 6134.9693251533745,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          1.2484076433121019,
+          1.546099290780142
+        ],
+        "median": 1.401360544217687,
+        "n": 5,
+        "ratios": [
+          1.546099290780142,
+          1.2699386503067485,
+          1.401360544217687,
+          1.2484076433121019,
+          1.4029850746268657
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 1000,
+      "threads": 4,
+      "workload": "F"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 503,
+              "median": 469,
+              "min": 447,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 32.0,
+                "median": 26.0,
+                "min": 24.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 90.0,
+                "median": 40.0,
+                "min": 35.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 196.0,
+                "median": 66.0,
+                "min": 43.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 525.0,
+                "median": 512.0,
+                "min": 478.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 281.0,
+                "median": 225.0,
+                "min": 219.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 567.0,
+                "median": 303.0,
+                "min": 282.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 781.0,
+                "median": 567.0,
+                "min": 313.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 522.0,
+                "median": 488.0,
+                "min": 475.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 2522000,
+          "returned_rows": 2522,
+          "runtime_seconds": {
+            "max": 0.3338498749999985,
+            "median": 0.27691808400000184,
+            "min": 0.23460649999999816,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 6944.444444444444,
+            "median": 6134.9693251533745,
+            "min": 4784.688995215311,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 497,
+              "median": 481,
+              "min": 467,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 92.0,
+                "median": 60.0,
+                "min": 59.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 288.0,
+                "median": 72.0,
+                "min": 72.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 768.0,
+                "median": 92.0,
+                "min": 83.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 515.0,
+                "median": 496.0,
+                "min": 486.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 292.0,
+                "median": 185.0,
+                "min": 184.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 683.0,
+                "median": 214.0,
+                "min": 210.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1872.0,
+                "median": 261.0,
+                "min": 252.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 514.0,
+                "median": 504.0,
+                "min": 485.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 2488000,
+          "returned_rows": 2488,
+          "runtime_seconds": {
+            "max": 0.558413416999997,
+            "median": 0.24924154199999293,
+            "min": 0.23883549999999332,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 7042.2535211267605,
+            "median": 6896.551724137931,
+            "min": 3021.1480362537764,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.6314199395770393,
+          1.1931034482758622
+        ],
+        "median": 1.034965034965035,
+        "n": 5,
+        "ratios": [
+          1.0140845070422535,
+          1.034965034965035,
+          1.0382165605095541,
+          1.1931034482758622,
+          0.6314199395770393
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 1,
+      "workload": "A"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 490,
+              "median": 478,
+              "min": 451,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5208,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 27.0,
+                "median": 26.0,
+                "min": 24.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 95.0,
+                "median": 44.0,
+                "min": 39.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 810.0,
+                "median": 158.0,
+                "min": 56.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 524.0,
+                "median": 492.0,
+                "min": 481.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 236.0,
+                "median": 231.0,
+                "min": 216.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 747.0,
+                "median": 329.0,
+                "min": 324.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 22015.0,
+                "median": 5547.0,
+                "min": 435.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 519.0,
+                "median": 508.0,
+                "min": 476.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 208,
+          "returned_bytes": 2495000,
+          "returned_rows": 2495,
+          "runtime_seconds": {
+            "max": 0.31085500000000366,
+            "median": 0.27412966699999686,
+            "min": 0.2452618330000007,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 5952.380952380952,
+            "median": 5291.005291005291,
+            "min": 4975.124378109453,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 493,
+              "median": 479,
+              "min": 455,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5177,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 78.0,
+                "median": 62.0,
+                "min": 60.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 133.0,
+                "median": 77.0,
+                "min": 74.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 625.0,
+                "median": 104.0,
+                "min": 103.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 521.0,
+                "median": 500.0,
+                "min": 487.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 230.0,
+                "median": 188.0,
+                "min": 184.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 326.0,
+                "median": 224.0,
+                "min": 212.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 11551.0,
+                "median": 3479.0,
+                "min": 2989.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 513.0,
+                "median": 500.0,
+                "min": 479.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 177,
+          "returned_bytes": 2518000,
+          "returned_rows": 2518,
+          "runtime_seconds": {
+            "max": 0.3683728750000057,
+            "median": 0.28085429099999715,
+            "min": 0.24882304199999794,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 6410.25641025641,
+            "median": 5882.35294117647,
+            "min": 4807.692307692308,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.9663461538461539,
+          1.2115384615384615
+        ],
+        "median": 0.988235294117647,
+        "n": 5,
+        "ratios": [
+          0.9663461538461539,
+          1.2115384615384615,
+          0.9679144385026738,
+          1.2085889570552149,
+          0.988235294117647
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 4,
+      "workload": "A"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 50,
+              "median": 46,
+              "min": 41,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 19.0,
+                "median": 19.0,
+                "min": 18.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 32.0,
+                "median": 29.0,
+                "min": 28.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 49.0,
+                "median": 41.0,
+                "min": 39.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 959.0,
+                "median": 954.0,
+                "min": 950.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 239.0,
+                "median": 224.0,
+                "min": 211.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 361.0,
+                "median": 311.0,
+                "min": 269.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 826.0,
+                "median": 819.0,
+                "min": 754.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 50.0,
+                "median": 46.0,
+                "min": 41.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 4770000,
+          "returned_rows": 4770,
+          "runtime_seconds": {
+            "max": 0.15960158299998284,
+            "median": 0.14079204099999743,
+            "min": 0.13589854200000673,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 21276.59574468085,
+            "median": 20833.333333333332,
+            "min": 18867.924528301886,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 58,
+              "median": 54,
+              "min": 39,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 51.0,
+                "median": 50.0,
+                "min": 49.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 67.0,
+                "median": 62.0,
+                "min": 61.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 118.0,
+                "median": 77.0,
+                "min": 74.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 961.0,
+                "median": 946.0,
+                "min": 942.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 204.0,
+                "median": 200.0,
+                "min": 192.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 263.0,
+                "median": 247.0,
+                "min": 231.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 778.0,
+                "median": 412.0,
+                "min": 262.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 58.0,
+                "median": 54.0,
+                "min": 39.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 4750000,
+          "returned_rows": 4750,
+          "runtime_seconds": {
+            "max": 0.18925670900000569,
+            "median": 0.17393350000000396,
+            "min": 0.16321408299998552,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 13333.333333333334,
+            "median": 12987.012987012988,
+            "min": 12195.121951219513,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.5731707317073171,
+          0.6973684210526315
+        ],
+        "median": 0.6266666666666667,
+        "n": 5,
+        "ratios": [
+          0.6266666666666667,
+          0.6075949367088608,
+          0.5731707317073171,
+          0.6363636363636364,
+          0.6973684210526315
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 1,
+      "workload": "B"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 55,
+              "median": 43,
+              "min": 42,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5284,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 21.0,
+                "median": 20.0,
+                "min": 20.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 783.0,
+                "median": 47.0,
+                "min": 37.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 874.0,
+                "median": 852.0,
+                "min": 845.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 958.0,
+                "median": 956.0,
+                "min": 944.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 247.0,
+                "median": 243.0,
+                "min": 231.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 12095.0,
+                "median": 6371.0,
+                "min": 5751.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 45535.0,
+                "median": 24239.0,
+                "min": 11439.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 56.0,
+                "median": 44.0,
+                "min": 42.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 284,
+          "returned_bytes": 4770000,
+          "returned_rows": 4770,
+          "runtime_seconds": {
+            "max": 0.15619433300000196,
+            "median": 0.1471989169999972,
+            "min": 0.13605183299998203,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 18181.81818181818,
+            "median": 16949.15254237288,
+            "min": 15384.615384615385,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 58,
+              "median": 46,
+              "min": 34,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5149,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 53.0,
+                "median": 52.0,
+                "min": 50.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 86.0,
+                "median": 74.0,
+                "min": 68.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 341.0,
+                "median": 325.0,
+                "min": 256.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 966.0,
+                "median": 952.0,
+                "min": 942.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 215.0,
+                "median": 205.0,
+                "min": 195.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 20991.0,
+                "median": 11575.0,
+                "min": 11543.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 68927.0,
+                "median": 63551.0,
+                "min": 23695.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 58.0,
+                "median": 48.0,
+                "min": 34.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 149,
+          "returned_bytes": 4767000,
+          "returned_rows": 4767,
+          "runtime_seconds": {
+            "max": 0.20208112500000652,
+            "median": 0.18521141700000499,
+            "min": 0.16435441699999842,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 10869.565217391304,
+            "median": 10638.297872340425,
+            "min": 9615.384615384615,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.5851063829787234,
+          0.6774193548387096
+        ],
+        "median": 0.625,
+        "n": 5,
+        "ratios": [
+          0.6195652173913044,
+          0.625,
+          0.6774193548387096,
+          0.5851063829787234,
+          0.6276595744680851
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 4,
+      "workload": "B"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 19.0,
+                "median": 19.0,
+                "min": 18.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 30.0,
+                "median": 29.0,
+                "min": 29.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 46.0,
+                "median": 43.0,
+                "min": 37.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.1485351249999951,
+            "median": 0.13782195800001773,
+            "min": 0.1355934999999988,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 26315.78947368421,
+            "median": 25641.02564102564,
+            "min": 25000.0,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 54.0,
+                "median": 52.0,
+                "min": 52.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 66.0,
+                "median": 65.0,
+                "min": 64.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 94.0,
+                "median": 78.0,
+                "min": 76.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.18930566699998508,
+            "median": 0.17618083300001786,
+            "min": 0.16599816699999792,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 14084.507042253521,
+            "median": 13888.888888888889,
+            "min": 13333.333333333334,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.5066666666666667,
+          0.5633802816901409
+        ],
+        "median": 0.5416666666666666,
+        "n": 5,
+        "ratios": [
+          0.527027027027027,
+          0.5633802816901409,
+          0.5492957746478874,
+          0.5416666666666666,
+          0.5066666666666667
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 1,
+      "workload": "C"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 30.0,
+                "median": 26.0,
+                "min": 24.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 93.0,
+                "median": 77.0,
+                "min": 71.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 140.0,
+                "median": 134.0,
+                "min": 110.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.13599199999998746,
+            "median": 0.13550766700001304,
+            "min": 0.10827900000001023,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 40000.0,
+            "median": 38461.53846153846,
+            "min": 35714.28571428572,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 59.0,
+                "median": 57.0,
+                "min": 56.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 142.0,
+                "median": 115.0,
+                "min": 105.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 388.0,
+                "median": 196.0,
+                "min": 174.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.1356327500000134,
+            "median": 0.13421275000001742,
+            "min": 0.11672362499999167,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 31250.0,
+            "median": 30303.030303030304,
+            "min": 28571.428571428572,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.7575757575757576,
+          0.8235294117647058
+        ],
+        "median": 0.78125,
+        "n": 5,
+        "ratios": [
+          0.7714285714285715,
+          0.7575757575757576,
+          0.78125,
+          0.787878787878788,
+          0.8235294117647058
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 4,
+      "workload": "C"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 58,
+              "median": 53,
+              "min": 48,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10058000,
+              "median": 10053000,
+              "min": 10048000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10058,
+              "median": 10053,
+              "min": 10048,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 462.0,
+                "median": 275.0,
+                "min": 261.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 2061.0,
+                "median": 361.0,
+                "min": 357.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 5107.0,
+                "median": 476.0,
+                "min": 375.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 58.0,
+                "median": 53.0,
+                "min": 48.0,
+                "n": 5
+              }
+            },
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 24.0,
+                "median": 18.0,
+                "min": 18.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 129.0,
+                "median": 30.0,
+                "min": 29.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 642.0,
+                "median": 48.0,
+                "min": 42.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 952.0,
+                "median": 947.0,
+                "min": 942.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 4731000,
+          "returned_rows": 4731,
+          "runtime_seconds": {
+            "max": 0.3474939159999906,
+            "median": 0.16614387500001726,
+            "min": 0.1578293750000057,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 19230.76923076923,
+            "median": 18518.51851851852,
+            "min": 8000.0,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 58,
+              "median": 52,
+              "min": 47,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10058000,
+              "median": 10052000,
+              "min": 10047000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10058,
+              "median": 10052,
+              "min": 10047,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 231.0,
+                "median": 224.0,
+                "min": 221.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 353.0,
+                "median": 299.0,
+                "min": 289.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 3053.0,
+                "median": 348.0,
+                "min": 346.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 58.0,
+                "median": 52.0,
+                "min": 47.0,
+                "n": 5
+              }
+            },
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 52.0,
+                "median": 49.0,
+                "min": 47.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 69.0,
+                "median": 61.0,
+                "min": 60.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 89.0,
+                "median": 77.0,
+                "min": 70.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 953.0,
+                "median": 948.0,
+                "min": 942.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 4740000,
+          "returned_rows": 4740,
+          "runtime_seconds": {
+            "max": 0.18027441699999258,
+            "median": 0.17013112499998329,
+            "min": 0.15566662499998074,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 13333.333333333334,
+            "median": 12987.012987012988,
+            "min": 12195.121951219513,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.6753246753246753,
+          1.6233766233766234
+        ],
+        "median": 0.7200000000000001,
+        "n": 5,
+        "ratios": [
+          0.6753246753246753,
+          1.2926829268292683,
+          0.6794871794871795,
+          0.7200000000000001,
+          1.6233766233766234
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 1,
+      "workload": "D"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 62,
+              "median": 54,
+              "min": 42,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10062000,
+              "median": 10054000,
+              "min": 10042000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10062,
+              "median": 10054,
+              "min": 10042,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5308,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 330.0,
+                "median": 289.0,
+                "min": 267.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 5871.0,
+                "median": 5783.0,
+                "min": 2795.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 46239.0,
+                "median": 20271.0,
+                "min": 5815.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 62.0,
+                "median": 54.0,
+                "min": 42.0,
+                "n": 5
+              }
+            },
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 20.0,
+                "median": 20.0,
+                "min": 19.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 99.0,
+                "median": 51.0,
+                "min": 46.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 2317.0,
+                "median": 2105.0,
+                "min": 801.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 958.0,
+                "median": 946.0,
+                "min": 938.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 308,
+          "returned_bytes": 4730000,
+          "returned_rows": 4730,
+          "runtime_seconds": {
+            "max": 0.16943408400001658,
+            "median": 0.1575191670000038,
+            "min": 0.13887608300001375,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 17543.859649122805,
+            "median": 15151.515151515152,
+            "min": 14492.753623188406,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 67,
+              "median": 42,
+              "min": 40,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10067000,
+              "median": 10042000,
+              "min": 10040000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10067,
+              "median": 10042,
+              "min": 10040,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5157,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 268.0,
+                "median": 245.0,
+                "min": 235.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 23135.0,
+                "median": 11775.0,
+                "min": 6055.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 100031.0,
+                "median": 47903.0,
+                "min": 38975.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 67.0,
+                "median": 42.0,
+                "min": 40.0,
+                "n": 5
+              }
+            },
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 53.0,
+                "median": 52.0,
+                "min": 51.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 142.0,
+                "median": 80.0,
+                "min": 72.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 724.0,
+                "median": 628.0,
+                "min": 232.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 960.0,
+                "median": 958.0,
+                "min": 933.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 157,
+          "returned_bytes": 4761000,
+          "returned_rows": 4761,
+          "runtime_seconds": {
+            "max": 0.24982195799998408,
+            "median": 0.1841575409999905,
+            "min": 0.1757780829999831,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 14285.714285714286,
+            "median": 10000.0,
+            "min": 7462.686567164179,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.4253731343283582,
+          0.9428571428571428
+        ],
+        "median": 0.6476190476190475,
+        "n": 5,
+        "ratios": [
+          0.9428571428571428,
+          0.6476190476190475,
+          0.4253731343283582,
+          0.92,
+          0.5800000000000001
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 4,
+      "workload": "D"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 65,
+              "median": 55,
+              "min": 48,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10065000,
+              "median": 10055000,
+              "min": 10048000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10065,
+              "median": 10055,
+              "min": 10048,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 377.0,
+                "median": 351.0,
+                "min": 311.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 1192.0,
+                "median": 849.0,
+                "min": 451.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1913.0,
+                "median": 977.0,
+                "min": 466.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 65.0,
+                "median": 55.0,
+                "min": 48.0,
+                "n": 5
+              }
+            },
+            "SCAN": {
+              "50thPercentileLatency(us)": {
+                "max": 214.0,
+                "median": 202.0,
+                "min": 185.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 584.0,
+                "median": 408.0,
+                "min": 339.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1019.0,
+                "median": 750.0,
+                "min": 398.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 952.0,
+                "median": 945.0,
+                "min": 935.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 236089000,
+          "returned_rows": 236089,
+          "runtime_seconds": {
+            "max": 0.3701394579999828,
+            "median": 0.34567850000001954,
+            "min": 0.3127232920000438,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 4629.62962962963,
+            "median": 4048.582995951417,
+            "min": 3649.6350364963505,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 63,
+              "median": 56,
+              "min": 41,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10063000,
+              "median": 10056000,
+              "min": 10041000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10063,
+              "median": 10056,
+              "min": 10041,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5000,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 520.0,
+                "median": 504.0,
+                "min": 471.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 811.0,
+                "median": 757.0,
+                "min": 721.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1758.0,
+                "median": 1087.0,
+                "min": 792.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 63.0,
+                "median": 56.0,
+                "min": 41.0,
+                "n": 5
+              }
+            },
+            "SCAN": {
+              "50thPercentileLatency(us)": {
+                "max": 18127.0,
+                "median": 17711.0,
+                "min": 17615.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 26863.0,
+                "median": 26191.0,
+                "min": 25295.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 33471.0,
+                "median": 30799.0,
+                "min": 29519.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 959.0,
+                "median": 944.0,
+                "min": 937.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 236352000,
+          "returned_rows": 236352,
+          "runtime_seconds": {
+            "max": 17.145347165999993,
+            "median": 16.93519245799996,
+            "min": 16.776270249999982,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 60.07449237053947,
+            "median": 59.38594928439931,
+            "min": 58.7026709715292,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "supported",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.012925617856501707,
+          0.016197682667297233
+        ],
+        "median": 0.014793073084825359,
+        "n": 5,
+        "ratios": [
+          0.014793073084825359,
+          0.012925617856501707,
+          0.014838399615523247,
+          0.016197682667297233,
+          0.01460894352396223
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 1,
+      "workload": "E"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 57,
+              "median": 48,
+              "min": 43,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10057000,
+              "median": 10048000,
+              "min": 10043000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10057,
+              "median": 10048,
+              "min": 10043,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 5320,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 439.0,
+                "median": 340.0,
+                "min": 325.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 48607.0,
+                "median": 45215.0,
+                "min": 37535.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 148607.0,
+                "median": 131967.0,
+                "min": 100287.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 57.0,
+                "median": 48.0,
+                "min": 43.0,
+                "n": 5
+              }
+            },
+            "SCAN": {
+              "50thPercentileLatency(us)": {
+                "max": 232.0,
+                "median": 204.0,
+                "min": 197.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 853.0,
+                "median": 413.0,
+                "min": 394.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1766.0,
+                "median": 1160.0,
+                "min": 1117.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 957.0,
+                "median": 952.0,
+                "min": 943.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 320,
+          "returned_bytes": 237765000,
+          "returned_rows": 237765,
+          "runtime_seconds": {
+            "max": 0.40550879200003465,
+            "median": 0.32009699999997565,
+            "min": 0.30466637499995386,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 4651.162790697675,
+            "median": 4504.504504504504,
+            "min": 3412.9692832764504,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 59,
+              "median": 51,
+              "min": 46,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10059000,
+              "median": 10051000,
+              "min": 10046000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10059,
+              "median": 10051,
+              "min": 10046,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 9783,
+          "non_ok": 0,
+          "operations": {
+            "INSERT": {
+              "50thPercentileLatency(us)": {
+                "max": 661.0,
+                "median": 642.0,
+                "min": 491.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 4231167.0,
+                "median": 3186687.0,
+                "min": 2701311.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 4976639.0,
+                "median": 4788223.0,
+                "min": 3174399.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 59.0,
+                "median": 51.0,
+                "min": 46.0,
+                "n": 5
+              }
+            },
+            "SCAN": {
+              "50thPercentileLatency(us)": {
+                "max": 18735.0,
+                "median": 18271.0,
+                "min": 17871.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 33887.0,
+                "median": 31519.0,
+                "min": 29695.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 55423.0,
+                "median": 37951.0,
+                "min": 35199.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 954.0,
+                "median": 949.0,
+                "min": 941.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 4783,
+          "returned_bytes": 238723000,
+          "returned_rows": 238723,
+          "runtime_seconds": {
+            "max": 14.643132165999987,
+            "median": 14.152519625000025,
+            "min": 13.540041625000015,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 74.360499702558,
+            "median": 71.18957784580337,
+            "min": 68.73324627122139,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "supported",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.01525878067221115,
+          0.020858546308820388
+        ],
+        "median": 0.01643367043426532,
+        "n": 5,
+        "ratios": [
+          0.01643367043426532,
+          0.015434314429289303,
+          0.017733715003839974,
+          0.020858546308820388,
+          0.01525878067221115
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 4,
+      "workload": "E"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 518,
+              "median": 474,
+              "min": 460,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 7506,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 26.0,
+                "median": 23.0,
+                "min": 22.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 117.0,
+                "median": 36.0,
+                "min": 35.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 297.0,
+                "median": 51.0,
+                "min": 45.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            },
+            "READ-MODIFY-WRITE": {
+              "50thPercentileLatency(us)": {
+                "max": 299.0,
+                "median": 268.0,
+                "min": 249.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 1333.0,
+                "median": 351.0,
+                "min": 322.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 4831.0,
+                "median": 436.0,
+                "min": 377.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 537.0,
+                "median": 491.0,
+                "min": 480.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 270.0,
+                "median": 239.0,
+                "min": 224.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 1224.0,
+                "median": 318.0,
+                "min": 293.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 4223.0,
+                "median": 374.0,
+                "min": 324.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 537.0,
+                "median": 491.0,
+                "min": 480.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.4472449589999883,
+            "median": 0.2773224590000041,
+            "min": 0.25761945899995453,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 6134.9693251533745,
+            "median": 5780.346820809248,
+            "min": 2857.1428571428573,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 495,
+              "median": 489,
+              "min": 464,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 7514,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 60.0,
+                "median": 58.0,
+                "min": 58.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 76.0,
+                "median": 70.0,
+                "min": 69.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 115.0,
+                "median": 86.0,
+                "min": 81.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            },
+            "READ-MODIFY-WRITE": {
+              "50thPercentileLatency(us)": {
+                "max": 249.0,
+                "median": 240.0,
+                "min": 237.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 320.0,
+                "median": 277.0,
+                "min": 268.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 418.0,
+                "median": 330.0,
+                "min": 297.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 515.0,
+                "median": 509.0,
+                "min": 487.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 184.0,
+                "median": 179.0,
+                "min": 175.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 229.0,
+                "median": 202.0,
+                "min": 197.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 314.0,
+                "median": 242.0,
+                "min": 214.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 515.0,
+                "median": 509.0,
+                "min": 487.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 0,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.2945364160000281,
+            "median": 0.27438162500004637,
+            "min": 0.2527703750000114,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 5988.023952095808,
+            "median": 5847.953216374269,
+            "min": 5319.148936170212,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.9488636363636364,
+          2.095808383233533
+        ],
+        "median": 1.035928143712575,
+        "n": 5,
+        "ratios": [
+          2.095808383233533,
+          1.035928143712575,
+          0.9532163742690057,
+          0.9488636363636364,
+          1.2180851063829785
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 1,
+      "workload": "F"
+    },
+    {
+      "comparable": true,
+      "engines": {
+        "sqlite": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 488,
+              "median": 469,
+              "min": 464,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 7807,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 31.0,
+                "median": 23.0,
+                "min": 23.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 226.0,
+                "median": 39.0,
+                "min": 36.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 1806.0,
+                "median": 111.0,
+                "min": 72.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            },
+            "READ-MODIFY-WRITE": {
+              "50thPercentileLatency(us)": {
+                "max": 347.0,
+                "median": 259.0,
+                "min": 255.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 2239.0,
+                "median": 415.0,
+                "min": 360.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 46463.0,
+                "median": 12375.0,
+                "min": 5607.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 512.0,
+                "median": 495.0,
+                "min": 488.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 304.0,
+                "median": 232.0,
+                "min": 229.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 1933.0,
+                "median": 337.0,
+                "min": 314.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 45855.0,
+                "median": 11695.0,
+                "min": 5563.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 512.0,
+                "median": 495.0,
+                "min": 488.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 324,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.5245990419999771,
+            "median": 0.29730612500003417,
+            "min": 0.28502800000001116,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 5464.48087431694,
+            "median": 5181.347150259067,
+            "min": 2673.7967914438505,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        },
+        "totedb": {
+          "audit": {
+            "added_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "changed_fields": {
+              "max": 508,
+              "median": 493,
+              "min": 464,
+              "n": 5
+            },
+            "missing_rows": {
+              "max": 0,
+              "median": 0,
+              "min": 0,
+              "n": 5
+            },
+            "payload_bytes": {
+              "max": 10000000,
+              "median": 10000000,
+              "min": 10000000,
+              "n": 5
+            },
+            "rows": {
+              "max": 10000,
+              "median": 10000,
+              "min": 10000,
+              "n": 5
+            }
+          },
+          "exhausted": 0,
+          "logical_operations": 5000.0,
+          "native_attempts": 7846,
+          "non_ok": 0,
+          "operations": {
+            "READ": {
+              "50thPercentileLatency(us)": {
+                "max": 76.0,
+                "median": 61.0,
+                "min": 60.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 126.0,
+                "median": 93.0,
+                "min": 75.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 302.0,
+                "median": 224.0,
+                "min": 106.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 1000.0,
+                "median": 1000.0,
+                "min": 1000.0,
+                "n": 5
+              }
+            },
+            "READ-MODIFY-WRITE": {
+              "50thPercentileLatency(us)": {
+                "max": 297.0,
+                "median": 255.0,
+                "min": 244.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 741.0,
+                "median": 408.0,
+                "min": 314.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 31807.0,
+                "median": 11607.0,
+                "min": 7203.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 537.0,
+                "median": 517.0,
+                "min": 484.0,
+                "n": 5
+              }
+            },
+            "UPDATE": {
+              "50thPercentileLatency(us)": {
+                "max": 217.0,
+                "median": 191.0,
+                "min": 180.0,
+                "n": 5
+              },
+              "95thPercentileLatency(us)": {
+                "max": 574.0,
+                "median": 294.0,
+                "min": 218.0,
+                "n": 5
+              },
+              "99thPercentileLatency(us)": {
+                "max": 23583.0,
+                "median": 10519.0,
+                "min": 6079.0,
+                "n": 5
+              },
+              "Operations": {
+                "max": 537.0,
+                "median": 517.0,
+                "min": 484.0,
+                "n": 5
+              }
+            }
+          },
+          "retries": 292,
+          "returned_bytes": 5000000,
+          "returned_rows": 5000,
+          "runtime_seconds": {
+            "max": 0.45929029100000207,
+            "median": 0.32929637500001263,
+            "min": 0.27695649999998295,
+            "n": 5
+          },
+          "successful": 5,
+          "throughput": {
+            "max": 4901.9607843137255,
+            "median": 4237.28813559322,
+            "min": 3649.6350364963505,
+            "n": 5
+          },
+          "timeouts": 0,
+          "total": 5
+        }
+      },
+      "failures": [],
+      "h2": "not_applicable",
+      "paired_throughput_ratio": {
+        "ci95": [
+          0.8050847457627118,
+          1.364963503649635
+        ],
+        "median": 0.8970588235294118,
+        "n": 5,
+        "ratios": [
+          0.8970588235294118,
+          1.364963503649635,
+          0.9368932038834952,
+          0.8050847457627118,
+          0.8270042194092826
+        ],
+        "resamples": 10000,
+        "seed": 226
+      },
+      "records": 10000,
+      "threads": 4,
+      "workload": "F"
+    }
+  ],
+  "failed_runs": 0,
+  "git_sha": "be5fb10c8fd5102929e088af41026bd2e125cf21",
+  "measured_runs": 240,
+  "native_versions": {
+    "sqlite": "3.51.0",
+    "sqlite_compile_options": [
+      "ATOMIC_INTRINSICS=1",
+      "BUG_COMPATIBLE_20160819",
+      "CCCRYPT256",
+      "CODEC=see-cccrypt",
+      "COMPILER=clang-21.0.0",
+      "DEFAULT_AUTOVACUUM",
+      "DEFAULT_CACHE_SIZE=2000",
+      "DEFAULT_CKPTFULLFSYNC",
+      "DEFAULT_FILE_FORMAT=4",
+      "DEFAULT_JOURNAL_SIZE_LIMIT=32768",
+      "DEFAULT_LOOKASIDE=1200,102",
+      "DEFAULT_MEMSTATUS=0",
+      "DEFAULT_MMAP_SIZE=0",
+      "DEFAULT_PAGE_SIZE=4096",
+      "DEFAULT_PCACHE_INITSZ=20",
+      "DEFAULT_RECURSIVE_TRIGGERS",
+      "DEFAULT_SECTOR_SIZE=4096",
+      "DEFAULT_SYNCHRONOUS=2",
+      "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+      "DEFAULT_WAL_SYNCHRONOUS=1",
+      "DEFAULT_WORKER_THREADS=0",
+      "DIRECT_OVERFLOW_READ",
+      "DQS=3",
+      "ENABLE_API_ARMOR",
+      "ENABLE_BYTECODE_VTAB",
+      "ENABLE_COLUMN_METADATA",
+      "ENABLE_DBSTAT_VTAB",
+      "ENABLE_FTS3",
+      "ENABLE_FTS3_PARENTHESIS",
+      "ENABLE_FTS3_TOKENIZER",
+      "ENABLE_FTS4",
+      "ENABLE_FTS5",
+      "ENABLE_LOCKING_STYLE=1",
+      "ENABLE_MATH_FUNCTIONS",
+      "ENABLE_NORMALIZE",
+      "ENABLE_PREUPDATE_HOOK",
+      "ENABLE_RTREE",
+      "ENABLE_SESSION",
+      "ENABLE_SETLK_TIMEOUT",
+      "ENABLE_SNAPSHOT",
+      "ENABLE_SQLLOG",
+      "ENABLE_STMT_SCANSTATUS",
+      "ENABLE_UNKNOWN_SQL_FUNCTION",
+      "ENABLE_UPDATE_DELETE_LIMIT",
+      "HAS_CODEC_RESTRICTED",
+      "HAVE_ISNAN",
+      "MALLOC_SOFT_LIMIT=1024",
+      "MAX_ATTACHED=10",
+      "MAX_COLUMN=2000",
+      "MAX_COMPOUND_SELECT=500",
+      "MAX_DEFAULT_PAGE_SIZE=8192",
+      "MAX_EXPR_DEPTH=1000",
+      "MAX_FUNCTION_ARG=127",
+      "MAX_LENGTH=2147483645",
+      "MAX_LIKE_PATTERN_LENGTH=50000",
+      "MAX_MMAP_SIZE=1073741824",
+      "MAX_PAGE_COUNT=1073741823",
+      "MAX_PAGE_SIZE=65536",
+      "MAX_SQL_LENGTH=1000000000",
+      "MAX_TRIGGER_DEPTH=1000",
+      "MAX_VARIABLE_NUMBER=500000",
+      "MAX_VDBE_OP=250000000",
+      "MAX_WORKER_THREADS=8",
+      "MUTEX_UNFAIR",
+      "OMIT_AUTORESET",
+      "OMIT_LOAD_EXTENSION",
+      "STMTJRNL_SPILL=131072",
+      "SYSTEM_MALLOC",
+      "TEMP_STORE=1",
+      "THREADSAFE=2",
+      "USE_URI"
+    ],
+    "totedb": "0.1.0"
+  },
+  "preflight_runs": 48,
+  "repetitions": 5,
+  "schema_version": 1,
+  "total_busy_retries": 9455,
+  "total_logical_operations": 240000.0,
+  "total_native_attempts": 269523,
+  "total_non_ok": 0
+}

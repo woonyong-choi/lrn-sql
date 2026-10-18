@@ -1,0 +1,8 @@
+page_size=8192
+journal_mode=delete
+synchronous=2
+fullfsync=0
+busy_timeout=0
+cache_size=256
+mmap_size=0
+native_version=3.51.0

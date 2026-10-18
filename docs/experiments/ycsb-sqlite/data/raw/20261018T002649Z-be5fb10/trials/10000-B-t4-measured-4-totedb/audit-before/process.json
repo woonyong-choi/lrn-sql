@@ -1,0 +1,38 @@
+{
+  "command": [
+    "/Users/woonyong/Library/Java/JavaVirtualMachines/ms-21.0.8/Contents/Home/bin/java",
+    "-Xms256m",
+    "-Xmx1g",
+    "-Dycsb.native=/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/libycsb.dylib",
+    "-cp",
+    "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/classes:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/HdrHistogram-2.1.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/core-0.17.0.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/htrace-core4-4.1.0-incubating.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-core-asl-1.9.4.jar:/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/deps/jackson-mapper-asl-1.9.4.jar",
+    "org.totedb.ycsb.Tool",
+    "audit",
+    "totedb",
+    "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/runs/20261018T002649Z-be5fb10/10000-B-t4-measured-4-totedb.db",
+    "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/runs/20261018T002649Z-be5fb10/10000-B-t4-measured-4-totedb.snapshot",
+    "/Users/woonyong/workspace/totedb/totedb.wt/ycsb/build/ycsb/runs/20261018T002649Z-be5fb10/10000-totedb.snapshot"
+  ],
+  "cpu_system_seconds": 0.33937999999999996,
+  "cpu_user_seconds": 0.465613,
+  "elapsed_seconds": 0.6541990830000088,
+  "exit_code": 0,
+  "load_after": [
+    5.39208984375,
+    5.06689453125,
+    4.97119140625
+  ],
+  "load_before": [
+    5.39208984375,
+    5.06689453125,
+    4.97119140625
+  ],
+  "major_faults": 0,
+  "max_rss_bytes": 155975680,
+  "minor_faults": 11527,
+  "profiler_wait_seconds": 9.483400000931397e-05,
+  "sample_available": false,
+  "sample_exit_code": null,
+  "timeout": false,
+  "ts_utc": "2026-10-18T00:29:22.081098+00:00"
+}
