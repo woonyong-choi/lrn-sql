@@ -48,6 +48,8 @@ H2는 TEXT 구간 조회에서 ToteDB가 전체 순회·정렬 후 LIMIT를 적�
 | 대응 처리량 비율 | 계산 값 | 반복별 ToteDB 처리량/SQLite 처리량의 중앙값 | 비율 |
 | 신뢰구간 | 계산 값 | 대응 비율 중앙값의 bootstrap percentile 구간 | 비율 |
 
+공식 처리량의 runtime은 worker 시작부터 join까지이며 연결 초기화와 종료를 포함한다. 연산별 지연은 각 DB 메서드 호출을 잰 값이다. JVM 시작을 포함한 외부 wall time은 별도 지표다.
+
 ## 실험 환경
 
 | 항목 | 값 |
@@ -58,7 +60,7 @@ H2는 TEXT 구간 조회에서 ToteDB가 전체 순회·정렬 후 LIMIT를 적�
 | 도구 | 공식 YCSB 0.17.0, OpenJDK Microsoft 21.0.8, build Microsoft-11933201, Apple clang 17.0.0. native SQLite 버전·빌드 옵션은 실행 시 조회하여 환경 기록에 보존 |
 | 대상 | ToteDB 기반 커밋 `ea2eb868cd2ba23f4cc13955c54021bc005b8d5d`. 연결 코드는 `YCSB` 브랜치에서 수집 전 커밋 고정 |
 | 모델 | 해당 없음 |
-| 공통 값 | Java `-Xms256m -Xmx1g`, sanitizer 없는 최적화 native 빌드, 자동 commit, 페이지 8,192바이트, 10필드×100바이트, 논리 연산 1,000회, `measurementtype=hdrhistogram`, `hdrhistogram.percentiles=50,95,99` |
+| 공통 값 | Java `-Xms256m -Xmx1g`, sanitizer 없는 최적화 native 빌드, 자동 commit, 페이지 8,192바이트, 연결당 페이지 cache 상한 256페이지, 10필드×100바이트, 논리 연산 1,000회, `measurementtype=hdrhistogram`, `hdrhistogram.percentiles=50,95,99` |
 | 입력 | 공식 tag 0.17.0의 commit `4b19340e3bab5e4c88eda75ad56e83dc4d5cc503`에 있는 A~F와 Maven Central core·runtime 의존성. 파일별 SHA-256은 바인딩 잠금 파일에 고정 |
 | 시드 | 공식 YCSB의 ThreadLocalRandom 요청열은 고정하지 못한다. 같은 확률 분포의 독립 시행. 분석 bootstrap만 seed 226 |
 | 실행 명령 | 아래 수집 명령. 연결 코드·시험을 수집 전에 검증한 뒤 실행 |
@@ -77,9 +79,13 @@ python3 bench/ycsb/run.py test --output build/ycsb/checks
 | 내구성 설정 | 공개 API DURABLE, COW/fsync | `DELETE`, `FULL`, `fullfsync=OFF` |
 | 내부 결과 처리 | 공개 API 결과 wire를 검사·해석 | sqlite3 결과를 직접 소비 |
 | 페이지 크기 | 8,192바이트 | 생성 전 `page_size=8192`, 실제 값 조회 |
+| 페이지 cache | 공개 API의 기본 256페이지 | 연결마다 `cache_size=256`, 실제 값 조회 |
+| 파일 읽기 | 기존 `pread` 경로 | `mmap_size=0`, 실제 값 조회 |
 | 고유 비용 | 공개 API의 전체 결과 직렬화 포함 | 호출마다 prepare/finalize 포함 |
 
 내구성 설정은 정상 commit의 동기화 의도를 맞춘 조건이다. 전원 장애 보장이 같다고 가정하지 않는다. SQLite WAL이나 준비 문장 재사용을 튜닝한 최상의 성능을 뜻하지 않는다.
+
+페이지 cache는 연결당 명목상 2MiB로 맞춘다. 캐시에 담는 페이지 종류와 메타데이터 비용이 달라 실제 메모리 사용량이 같다는 뜻은 아니다. 이 값은 ToteDB의 `PAGE_FILE_CACHE_PAGES=256`과 페이지 크기에서 정한다.
 
 ## 표본
 
@@ -91,7 +97,7 @@ python3 bench/ycsb/run.py test --output build/ycsb/checks
 | 중단 규칙 | 각 child 180초. 실패·timeout을 보존하고 다음 조건 계속. 속도에 따른 조기 중단이나 불리한 반복의 대체 없음. 저장 검사가 전체 실행 안전성을 깨뜨리면 중단하고 이유 기록 |
 | 반복과 예열 | 조건·엔진마다 사전 실행 1회로 총 48회. 정식 통계에서 제외하고 원자료 보존. 별도 프로세스이므로 측정 JVM의 JIT 예열로 취급하지 않는다. |
 
-초기 load는 각 엔진·크기마다 공식 클라이언트 1스레드와 `dataintegrity=true`로 수행한다. 키·모든 필드·바이트를 정규화한 전체 해시가 양쪽에서 같은지 확인한다. 정상 종료한 baseline을 정식 실행마다 별도 DB 파일로 복제한다. 측정은 `dataintegrity=false`로 실제 갱신값을 생성한다. 매 실행은 새 JVM이다. 파일 시스템 cache를 비우거나 온도를 통제하지 않는다.
+초기 load는 각 엔진·크기마다 공식 클라이언트 1스레드와 `dataintegrity=true`로 수행한다. 키·모든 필드·바이트를 정규화한 전체 해시가 양쪽에서 같은지 확인한다. 정상 종료한 baseline을 정식 실행마다 별도 DB 파일로 복제한다. 측정은 `dataintegrity=false`로 실제 갱신값을 생성한다. 매 실행은 새 JVM이다. 매 실행의 직전 audit가 실제 측정 DB 파일의 전체 행을 읽는다. 따라서 cold file cache 조건이 아니다. 파일 시스템 cache를 비우거나 온도를 통제하지 않으며 측정 JVM의 JIT는 예열하지 않는다.
 
 ### 저장 검사 합격 조건
 
