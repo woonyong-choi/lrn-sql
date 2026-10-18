@@ -139,7 +139,7 @@ def environment() -> dict[str, Any]:
         "ts_utc": timestamp(),
         "versions": json.loads(
             subprocess.check_output(
-                java_command("org.totedb.ycsb.Tool", "version"), text=True
+                java_command("org.totedb.ycsb.Tool", "version"), cwd=ROOT, text=True
             )
         ),
     }

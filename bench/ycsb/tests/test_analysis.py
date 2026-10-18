@@ -17,8 +17,8 @@ from analysis import (
     validate_trial,
     verify,
 )
-from runner import CollectionOptions, collect, process
 from run import main
+from runner import CollectionOptions, collect, process
 
 from build import BUILD
 
